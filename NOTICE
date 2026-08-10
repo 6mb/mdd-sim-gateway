@@ -1,0 +1,17 @@
+MDD Sim Gateway 1.0.0
+Copyright (C) 2026 MDD Sim Gateway contributors
+
+This product includes modified code derived from fasferraz/SWu-IKEv2 and integration work
+based on phcoder/asterisk-docker. It also builds, downloads, links to,
+or communicates with the independent components listed in THIRD_PARTY_LICENSES.md.
+
+This product includes the Android Open Source Project Carrier ID table, licensed under
+the Apache License 2.0, for offline carrier identification. Android is a trademark of
+Google LLC; this project is not endorsed by or affiliated with Google.
+
+MDD Sim Gateway is GPL-3.0-only except for the build-time patches listed under "Files that
+are not GPL-3.0-only" in THIRD_PARTY_LICENSES.md, which are derivative works of Asterisk
+(GPL-2.0-only) and CCID (LGPL-2.1-or-later) and remain under those licenses.
+
+No upstream project, carrier, or hardware vendor endorses MDD Sim Gateway. Product and
+project names remain trademarks of their respective owners.
