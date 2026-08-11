@@ -48,6 +48,8 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   const [prov, setProv] = useState(null)
   const [reg, setReg] = useState('idle')
   const [call, setCall] = useState(null)     // {dir, number, state, startedAt, endCause}
+  const [callTransport, setCallTransport] = useState('vowifi')
+  const [cellularBusy, setCellularBusy] = useState(false)
   const [num, setNum] = useState('')
   const [dur, setDur] = useState(0)
   const [muted, setMuted] = useState(false)
@@ -61,10 +63,24 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   // Persistent, DOM-rendered <audio> sink. One stable element (primed on the first click via
   // unlockAudio) is what makes remote WebRTC audio play under Chrome/Edge autoplay policy.
   const audioRef = useRef(null)
+  const selectedDevice = devices.find((device) => device.present === true
+    && device.device_type === 'modem'
+    && String(device.instance_id || '') === String(id || ''))
+  const cellularAvailable = Boolean(selectedDevice)
+  const cellularCapability = selectedDevice?.capabilities?.cellular || selectedDevice?.cellular || {}
+  const cellularDesired = typeof cellularCapability === 'object'
+    ? Boolean(cellularCapability.desired ?? cellularCapability.enabled) : Boolean(cellularCapability)
+  const cellularActual = String(typeof cellularCapability === 'object'
+    ? (cellularCapability.actual || cellularCapability.state || '') : cellularCapability).toLowerCase()
+  const cellularReady = cellularAvailable && cellularDesired
+    && ['on', 'connected', 'registered', 'active'].includes(cellularActual)
 
   const loadCalls = useCallback(() => { if (id) api.calls(id).then((r) => setCalls(r.calls || [])).catch(() => {}) }, [id])
   useEffect(() => { loadCalls() }, [loadCalls])
-  useEffect(() => { setCallSelMode(false); setCallSel(new Set()) }, [id])
+  useEffect(() => { setCallSelMode(false); setCallSel(new Set()); setCallTransport('vowifi') }, [id])
+  useEffect(() => {
+    if (!cellularReady && callTransport === 'cellular') setCallTransport('vowifi')
+  }, [cellularReady, callTransport])
   // if the list empties (own delete, or another client's clear-all over WS), leave select
   // mode so the toolbar/checkbox UI can't get stranded on an empty list.
   useEffect(() => { if (!calls.length) { setCallSelMode(false); setCallSel(new Set()) } }, [calls.length])
@@ -119,8 +135,8 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       if (type === 'registered') setReg(data ? 'registered' : 'unregistered')
       else if (type === 'ws') setReg((r) => data === 'connected' ? (r === 'registered' ? r : 'connecting') : 'disconnected')
       else if (type === 'regfail') setReg('failed')
-      else if (type === 'incoming') setCall({ dir: 'in', number: data.from || 'Unknown', state: 'incoming' })
-      else if (type === 'calling') setCall({ dir: 'out', number: data.to, state: 'calling' })
+      else if (type === 'incoming') setCall({ dir: 'in', number: data.from || 'Unknown', state: 'incoming', transport: 'vowifi' })
+      else if (type === 'calling') setCall({ dir: 'out', number: data.to, state: 'calling', transport: 'vowifi' })
       // 'progress' fires for BOTH directions. On an incoming call JsSIP auto-sends 180 and
       // emits progress('local'); mapping that to 'ringing' would blow away the 'incoming'
       // state and hide the Answer/Decline overlay. Only an OUTGOING call still in the
@@ -148,6 +164,38 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
     return () => clearInterval(t)
   }, [call?.state, call?.startedAt])
 
+  // ModemManager owns the cellular call object and exposes its signalling state. Poll only
+  // while our experimental cellular dial UI is active; no microphone/audio path is implied.
+  useEffect(() => {
+    if (!id || call?.transport !== 'cellular' || call.state === 'ended') return
+    let alive = true
+    const poll = async () => {
+      try {
+        const result = await api.cellularCallStatus(id)
+        if (!alive) return
+        const state = result.status
+        if (result.unavailable || state === 'failed') {
+          toast(`${t('Cellular call ended')}: ${result.error || t('Cellular modem is unavailable')}`)
+          clearCallSoon('Failed')
+          return
+        }
+        if (state === 'active') {
+          setCall((current) => current?.transport === 'cellular'
+            ? { ...current, state: 'active', startedAt: current.startedAt || Date.now() } : current)
+        } else if (state === 'dialing' || state === 'ringing-out') {
+          setCall((current) => current?.transport === 'cellular' ? { ...current, state: 'ringing' } : current)
+        } else if (state === 'terminated' || state === 'idle' || state === 'ended') {
+          clearCallSoon(result.call?.reason || 'Ended')
+        }
+      } catch (error) {
+        if (alive) toast(`${t('Could not read cellular call status')}: ${error.message}`)
+      }
+    }
+    poll()
+    const timer = setInterval(poll, 2000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [id, call?.transport, call?.state])
+
   // Physical-keyboard DTMF: while the in-call keypad is open, let the user type 0-9 * #
   // directly instead of only clicking. Clear the echo strip each time the keypad opens.
   useEffect(() => {
@@ -173,7 +221,10 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
     const ms = call.state === 'incoming' ? 60000 : 65000
     const t = setTimeout(() => {
       // Ask the phone to tear down whatever it thinks it has, then reset the UI.
-      try { phone.current?.hangup() } catch {}
+      try {
+        if (call.transport === 'cellular') api.cellularCallHangup(id).catch(() => {})
+        else phone.current?.hangup()
+      } catch {}
       setCall(null); setKeypad(false); setMuted(false); setRecording(false)
     }, ms)
     return () => clearTimeout(t)
@@ -185,18 +236,49 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   }
   // In-call DTMF: send the tone and echo it into the keypad's display strip.
   const pressDTMF = (k) => { phone.current?.sendDTMF(k); setDtmfSeq((s) => (s + k).slice(-32)) }
-  const placeCall = () => {
-    if (!phone.current || !num) return
-    const target = normalizeDialTarget(num)
+  const placeCall = async (number = num) => {
+    if (!number) return
+    const target = normalizeDialTarget(number)
     if (!target) { toast(t('Use a service short code or international format, for example +8613800138000.')); return }
+    if (callTransport === 'cellular') {
+      if (!cellularReady) { toast(t('Turn on 4G and wait for the cellular modem to become ready first.')); return }
+      if (!window.confirm(t('Place this call through the cellular modem? This experimental mode has no browser audio; the called phone may ring and normal call charges may apply.'))) return
+      setCellularBusy(true)
+      try {
+        const result = await api.cellularCall(id, target)
+        if (!result.ok && !result.uncertain) {
+          toast(`${t('Cellular call failed')}: ${result.error || t('Unknown')}`)
+          return
+        }
+        setCall({ dir: 'out', number: target, state: 'calling', transport: 'cellular' })
+        setNum('')
+        toast(result.uncertain
+          ? t('Call start is uncertain. Use Hang up before trying again.')
+          : t('Cellular dial started. Audio is not connected to the browser.'))
+      } catch (error) { toast(`${t('Cellular call failed')}: ${error.message}`) }
+      finally { setCellularBusy(false) }
+      return
+    }
+    if (!phone.current) return
     phone.current.unlockAudio(); phone.current.call(target); setNum('')
   }
   const answer = () => { phone.current?.unlockAudio(); phone.current?.answer() }
   // Optimistically move to 'ended' on a local hangup. JsSIP will still fire 'ended'
   // (→ clearCallSoon), but if that event is delayed or missed the UI has already left the
   // active/ringing screen instead of stranding on it.
-  const hangup = () => {
-    phone.current?.hangup()
+  const hangup = async () => {
+    if (call?.transport === 'cellular') {
+      setCellularBusy(true)
+      try {
+        const result = await api.cellularCallHangup(id)
+        if (!result.ok) {
+          toast(`${t('Cellular hangup failed')}: ${result.error || t('Call state is unknown')}`)
+          return
+        }
+      }
+      catch (error) { toast(`${t('Cellular hangup failed')}: ${error.message}`); return }
+      finally { setCellularBusy(false) }
+    } else phone.current?.hangup()
     setCall((c) => (c && c.state !== 'ended') ? { ...c, state: 'ended', endCause: c.endCause } : c)
     setKeypad(false); setMuted(false); setRecording(false)
     setTimeout(() => setCall((c) => (c && c.state === 'ended') ? null : c), 2500)
@@ -275,17 +357,27 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       {/* ---- Phone panel (Google-Voice style) ---- */}
       <div className="card" style={{ padding: 24, minHeight: 520, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>{t('Softphone')}</div>
+          {cellularAvailable ? <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--text-dim)' }}>
+            {t('Call via')}
+            <select value={callTransport} disabled={Boolean(inCall)} onChange={(event) => setCallTransport(event.target.value)} style={{ width: 'auto' }}>
+              <option value="vowifi">VoWiFi</option>
+              <option value="cellular" disabled={!cellularReady}>{t('Cellular modem (experimental, no audio)')}{!cellularReady ? ` — ${t('4G off')}` : ''}</option>
+            </select>
+          </label> : <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>{t('Softphone')}</div>}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: regColor }}>
-            <span style={{ width: 8, height: 8, borderRadius: 999, background: regColor }} />{reg}
+            <span style={{ width: 8, height: 8, borderRadius: 999, background: callTransport === 'cellular' ? '#f59e0b' : regColor }} />
+            {callTransport === 'cellular' ? t('No audio') : reg}
           </div>
         </div>
 
-        {!prov?.enabled && (
+        {callTransport === 'vowifi' && !prov?.enabled && (
           <div style={{ color: '#f97316', fontSize: 13, margin: '12px 0' }}>
             {t('WebRTC is disabled for this SIM. Enable it in SIM Config (needs HTTPS/TLS) to use the browser phone.')}
           </div>
         )}
+        {callTransport === 'cellular' && <div className="u-note" style={{ margin: '8px 0 12px', color: '#f59e0b' }}>
+          {t('Experimental signalling only: the modem can dial and hang up, but browser audio, microphone, DTMF and recording are unavailable. The called party may still answer and charges may apply.')}
+        </div>}
 
         {/* ===== INCOMING handled by full-screen overlay above ===== */}
 
@@ -310,9 +402,10 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
             <div>
               <div className="mono" style={{ fontSize: 20, fontWeight: 700 }}>{call.number || 'Unknown'}</div>
               <div style={{ fontSize: 15, color: GREEN, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>{fmtDur(dur)}</div>
+              {call.transport === 'cellular' && <div style={{ fontSize: 12, color: '#f59e0b', marginTop: 5 }}>{t('Cellular call connected · browser audio unavailable')}</div>}
               {recording && <div style={{ fontSize: 12, color: RED, marginTop: 2 }}>● Recording</div>}
             </div>
-            {keypad && (
+            {call.transport !== 'cellular' && keypad && (
               <div style={{ maxWidth: 220, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {/* Echo strip: shows every digit/symbol entered via click or physical keyboard */}
                 <div className="mono" style={{ minHeight: 40, padding: '8px 12px', borderRadius: 8,
@@ -329,11 +422,11 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
                 </div>
               </div>
             )}
-            <div style={{ display: 'flex', justifyContent: 'center', gap: 22, marginTop: 8 }}>
+            {call.transport !== 'cellular' && <div style={{ display: 'flex', justifyContent: 'center', gap: 22, marginTop: 8 }}>
               <RoundBtn icon={muted ? '🔇' : '🎙'} label={t(muted ? 'Unmute' : 'Mute')} color="#60a5fa" onClick={toggleMute} active={muted} />
               <RoundBtn icon="⌨" label={t('Keypad')} color="#a78bfa" onClick={() => setKeypad((v) => !v)} active={keypad} />
               <RoundBtn icon="⏺" label={t(recording ? 'Stop' : 'Record')} color={RED} onClick={toggleRecord} active={recording} />
-            </div>
+            </div>}
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: 6 }}>
               <RoundBtn icon="✕" label={t('Hangup')} color="#fff" bg={RED} onClick={hangup} />
             </div>
@@ -367,9 +460,9 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
             </div>
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 24, marginTop: 16 }}>
               <div style={{ width: 58 }} />
-              <button onClick={placeCall} disabled={reg !== 'registered' || !num} style={{
+              <button onClick={() => placeCall()} disabled={cellularBusy || !num || (callTransport === 'vowifi' ? reg !== 'registered' : !cellularReady)} style={{
                 width: 64, height: 64, borderRadius: '50%', border: 'none', cursor: 'pointer', fontSize: 26,
-                background: (reg === 'registered' && num) ? GREEN : 'var(--border-strong)', color: '#fff',
+                background: (num && (callTransport === 'cellular' ? cellularReady : reg === 'registered')) ? GREEN : 'var(--border-strong)', color: '#fff',
               }}>✆</button>
               <button onClick={() => setNum((n) => n.slice(0, -1))} style={{
                 width: 58, height: 58, borderRadius: '50%', border: 'none', background: 'transparent',
@@ -419,13 +512,14 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
                 {callSelMode && <input type="checkbox" readOnly checked={checked} style={{ width: 'auto', flexShrink: 0 }} />}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="mono" style={{ fontWeight: 600 }}>{c.peer}</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-mute)' }}>{dlabel} · {new Date(c.start_ts * 1000).toLocaleString()}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-mute)' }}>{dlabel} · {new Date(c.start_ts * 1000).toLocaleString()}{c.transport === 'cellular' ? ` · ${t('Cellular modem')}` : ''}</div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ color, fontWeight: 600, textTransform: 'capitalize' }}>{c.status || 'ringing'}</span>
                   {!callSelMode && <>
                     <button className="btn btn-ghost" style={{ padding: '5px 10px' }}
-                      disabled={reg !== 'registered'} onClick={(e) => { e.stopPropagation(); phone.current?.unlockAudio(); setNum(c.peer); phone.current?.call(c.peer) }}>{t('Call')}</button>
+                      disabled={callTransport === 'vowifi' ? reg !== 'registered' : !cellularReady}
+                      onClick={(e) => { e.stopPropagation(); setNum(c.peer); placeCall(c.peer) }}>{t('Call')}</button>
                     <button className="row-del" title={t('Delete this call')} aria-label={t('Delete this call')}
                       onClick={(e) => deleteOneCall(c.id, e)}>🗑</button>
                   </>}

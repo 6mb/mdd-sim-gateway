@@ -98,7 +98,8 @@ DEFAULTS = {
             "headers_json": "{}",
             "payload_template": "",
             "verify_tls": True,
-            "events": {"incoming_sms": True, "incoming_call": True},
+            "events": {"incoming_sms": True, "incoming_call": True,
+                       "activation_reminder": True},
         },
         "telegram": {
             "enabled": False,
@@ -107,7 +108,8 @@ DEFAULTS = {
             "proxy_mode": "direct",
             "proxy_url": "",
             "proxy_country": "",
-            "events": {"incoming_sms": True, "incoming_call": True},
+            "events": {"incoming_sms": True, "incoming_call": True,
+                       "activation_reminder": True},
         },
         "pushplus": {
             "enabled": False,
@@ -115,7 +117,8 @@ DEFAULTS = {
             "topic": "",
             "template": "html",
             "channel": "wechat",
-            "events": {"incoming_sms": True, "incoming_call": True},
+            "events": {"incoming_sms": True, "incoming_call": True,
+                       "activation_reminder": True},
         },
         "security": {
             "https_only": True,

@@ -28,6 +28,7 @@ ARG PCSC_SHA256=00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f
 RUN apt-get update && apt-get install -y --no-install-recommends \
         swig gcc python3-dev pkg-config \
         wget ca-certificates meson ninja-build flex perl \
+        modemmanager \
     && cd /tmp \
     && wget -qO pcsc.tar.gz "https://github.com/LudovicRousseau/PCSC/archive/refs/tags/${PCSC_VERSION}.tar.gz" \
     && echo "${PCSC_SHA256}  pcsc.tar.gz" | sha256sum -c - \

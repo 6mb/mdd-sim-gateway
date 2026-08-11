@@ -791,6 +791,7 @@ run_control() {
     -p "${MDD_PORT}:8443" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v /run/pcscd:/run/pcscd \
+    -v /run/dbus:/run/dbus:ro \
     -v "${DATA_ABS}:/data" \
     -e MDD_DATA=/data \
     -e MDD_HOST_DATA="${DATA_ABS}" \

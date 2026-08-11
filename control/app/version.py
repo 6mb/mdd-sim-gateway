@@ -19,7 +19,7 @@ def current() -> str:
                 return value.removeprefix("v")
         except OSError:
             pass
-    return "1.2.2"
+    return "1.3.1"
 
 
 VERSION = current()
