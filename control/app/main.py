@@ -19,6 +19,7 @@ import os
 import random
 import re
 import time
+from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from contextlib import asynccontextmanager
 
@@ -29,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
-               sysinfo, failover, carrier_id)
+               sysinfo, failover, carrier_id, allowance, cellular_call)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -293,6 +294,10 @@ class Hub:
         self._learning: set[str] = set()     # instances currently learning MSISDN
         self._msisdn_tries: dict[str, int] = {}
         self._msisdn_checked: dict[str, float] = {}   # last passive re-check
+        # Serialise route selection and submission per line. In particular, two concurrent
+        # ``auto`` requests must not both decide that the preferred route is unavailable and
+        # submit the same user action through different transports.
+        self.sms_send_locks: dict[str, asyncio.Lock] = {}
         # Per-line exit failover ledger. Persisted: a control-plane restart must not
         # re-announce a give-up it already reported, nor re-walk an exhausted pool.
         self.exit_ledgers: dict[str, dict] = _load_exit_ledgers()
@@ -1216,6 +1221,8 @@ HOST_ALERT_REPEAT_SECONDS = float(os.environ.get("MDD_HOST_ALERT_REPEAT", "21600
 # measurement sitting near its threshold crosses back and forth all day and each re-entry
 # looks like a new problem worth notifying about.
 HOST_ALERT_CLEAR_SECONDS = float(os.environ.get("MDD_HOST_ALERT_CLEAR", "1800"))
+ALLOWANCE_REMINDER_POLL_SECONDS = float(
+    os.environ.get("MDD_ALLOWANCE_REMINDER_POLL", "3600"))
 
 HOST_ALERT_TEXT = {
     "undervoltage_now": "供电电压不足（正在发生）。网口、蜂窝模块和读卡器共用同一路供电，"
@@ -1228,6 +1235,40 @@ HOST_ALERT_TEXT = {
     "swap_pressure": "正在频繁换页。在 SD 卡上换页会拖慢所有操作并造成状态查询超时。",
     "default_route_changed": "默认路由在上行之间发生了切换，所有出站连接的源地址随之改变。",
 }
+
+
+async def allowance_reminder_poller():
+    """Send one reminder per line/expiry/day at 3, 2 and 1 days before expiry."""
+    while True:
+        try:
+            settings = cfg.get_settings()
+            if notify_push.has_enabled_channel(settings, notify_push.EV_ACTIVATION_REMINDER):
+                try:
+                    local_zone = ZoneInfo(str(settings.get("timezone") or "Asia/Shanghai"))
+                except ZoneInfoNotFoundError:
+                    local_zone = ZoneInfo("UTC")
+                now = datetime.now(local_zone)
+                for inst in cfg.list_instances():
+                    iid = str(inst.get("id") or "")
+                    snapshot = await asyncio.to_thread(store.get_allowance, iid)
+                    days = allowance.reminder_days(snapshot, now.date())
+                    expiry = allowance.parse_expiry_date(snapshot.get("valid_until"))
+                    if days is None or expiry is None:
+                        continue
+                    claimed = await asyncio.to_thread(
+                        store.claim_allowance_reminder, iid, expiry.isoformat(), days,
+                        int(now.timestamp()))
+                    if not claimed:
+                        continue
+                    text = (f"线路 {inst.get('name') or iid} 将于 {expiry.isoformat()} 到期，"
+                            f"还剩 {days} 天。激活时间：{snapshot.get('activated_at')}。"
+                            "请及时续期或重新激活。")
+                    await asyncio.to_thread(
+                        notify_push.dispatch, settings, notify_push.EV_ACTIVATION_REMINDER,
+                        inst, expiry.isoformat(), text)
+        except Exception as exc:  # noqa
+            log.debug("allowance reminder poll failed: %r", exc)
+        await asyncio.sleep(max(60.0, ALLOWANCE_REMINDER_POLL_SECONDS))
 
 
 def _host_alert_summary(alerts: list[dict]) -> str:
@@ -1430,7 +1471,7 @@ def _save_host_alert_state(state: dict) -> None:
 
 async def cellular_sms_poller():
     """Import SMS received by the 4G modem even when its VoWiFi engine is stopped."""
-    scanner = cellular_sms.Scanner()
+    scanner = cellular_sms.Scanner(local_sms_tracker=store)
     while True:
         try:
             discovered = await asyncio.to_thread(scanner.discover, cfg.list_instances())
@@ -1812,14 +1853,16 @@ async def lifespan(app: FastAPI):
     monitor = asyncio.create_task(card_monitor())
     sms_poller = asyncio.create_task(cellular_sms_poller())
     host_poller = asyncio.create_task(host_health_poller())
+    allowance_poller = asyncio.create_task(allowance_reminder_poller())
     yield
     poller.cancel()
     monitor.cancel()
     sms_poller.cancel()
     host_poller.cancel()
+    allowance_poller.cancel()
     # Reap the cancelled tasks (the monitor may be parked in a to_thread wait for up to
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
-    await asyncio.gather(poller, monitor, sms_poller, host_poller,
+    await asyncio.gather(poller, monitor, sms_poller, host_poller, allowance_poller,
                          return_exceptions=True)
     await hub.runtime.close()
     for c in hub.ami.values():
@@ -3560,6 +3603,7 @@ async def api_instance_delete(iid: str, delete_history: bool = True, confirm_id:
     # with the line it describes — a new SIM must never inherit another SIM's outages.
     _line_state_written.pop(str(iid), None)
     await asyncio.to_thread(store.clear_line_states, iid)
+    await asyncio.to_thread(store.clear_allowance_data, iid)
     _refresh_card_matches()
     if inserted and replacements:
         replacement = next((item for item in replacements if item.get("enabled", True)), None)
@@ -3895,15 +3939,16 @@ async def _watch_sms_delivery(iid: str, mid: int, since: int, timeout: float = 4
     # no verdict within the window — leave as 'sent' (accepted, unconfirmed).
 
 
-async def send_sms_on_line(iid: str, to: str, text: str) -> dict:
-    """Send one MO SMS and start the delivery watcher. Never raises for an ordinary
-    failure: returns {ok, message, error, unavailable} instead."""
-    ami = await hub.ami_for(iid)
+async def _send_sms_vowifi(iid: str, to: str, text: str,
+                           ami: AmiClient | None = None) -> dict:
+    """Submit one MO SMS through Asterisk/IMS and start its delivery watcher."""
+    ami = ami or await hub.ami_for(iid)
     if not ami:
         return {"ok": False, "unavailable": True, "message": None,
-                "error": "Line is not running / control channel unavailable."}
+                "error": "VoWiFi is not running / its control channel is unavailable.",
+                "transport": "vowifi"}
     since = int(time.time())
-    rec = store.add_message(iid, "out", to, text, status="pending")
+    rec = store.add_message(iid, "out", to, text, status="pending", transport="vowifi")
     res = await ami.send_sms(to, text)
 
     if not res.get("ok"):
@@ -3912,7 +3957,7 @@ async def send_sms_on_line(iid: str, to: str, text: str) -> dict:
         store.set_message_status(rec["id"], "failed", err)
         rec["status"], rec["error"] = "failed", err
         await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
-        return {"ok": False, "message": rec, "error": err}
+        return {"ok": False, "message": rec, "error": err, "transport": "vowifi"}
 
     # IMS accepted the MESSAGE (SIP 202). That is NOT delivery confirmation — mark the message
     # 'sent' now and resolve the REAL outcome asynchronously from the SMSC's RP submit report,
@@ -3922,15 +3967,173 @@ async def send_sms_on_line(iid: str, to: str, text: str) -> dict:
     rec["status"], rec["error"] = "sent", None
     await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
     asyncio.create_task(_watch_sms_delivery(iid, rec["id"], since))
-    return {"ok": True, "message": rec, "error": None, "pending_delivery": True}
+    return {"ok": True, "message": rec, "error": None, "transport": "vowifi",
+            "pending_delivery": True}
+
+
+async def _registered_vowifi_ami(iid: str) -> AmiClient | None:
+    """Return a sender only when IMS registration is confirmed before submission.
+
+    This preflight is used solely by ``auto`` routing. If it cannot prove that VoWiFi is ready,
+    no SMS has been attempted yet and selecting cellular is safe. Once either transport's send
+    operation begins, ``auto`` never retries on the other transport: an action timeout may still
+    mean that the first copy reached the SMSC.
+    """
+    ami = await hub.ami_for(iid)
+    if not ami or not ami.connected:
+        return None
+    state = await ami.registration_state()
+    return ami if state == "Registered" else None
+
+
+async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
+    """Submit one MO SMS through the physical modem managed by ModemManager."""
+    instances = await asyncio.to_thread(cfg.list_instances)
+    result = await asyncio.to_thread(
+        cellular_sms.send, instances, iid, to, text, local_sms_tracker=store)
+    reservation_id = result.pop("_reservation_id", None)
+    if result.get("unavailable"):
+        return {**result, "message": None}
+
+    # ModemManager's successful ``Send`` means submitted, not handset delivery-confirmed.
+    # A timeout is explicitly unknown and must remain visible as such; treating it as failed
+    # encourages a retry that may create a duplicate and an extra roaming charge.
+    message_status = ("sent" if result.get("ok") else
+                      "unknown" if result.get("uncertain") else "failed")
+    rec = (await asyncio.to_thread(store.local_modem_sms_message, reservation_id)
+           if reservation_id is not None else None)
+    if rec is None:
+        rec = store.add_message(iid, "out", to, text, status=message_status,
+                                transport="cellular")
+    error = result.get("error")
+    store.set_message_status(rec["id"], message_status, error)
+    rec["status"], rec["error"] = message_status, error
+    await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
+    return {**result, "message": rec, "transport": "cellular"}
+
+
+async def send_sms_on_line(iid: str, to: str, text: str,
+                           transport: str = "auto") -> dict:
+    """Send one MO SMS using ``auto``, ``vowifi`` or ``cellular``.
+
+    ``auto`` prefers a *confirmed registered* VoWiFi route. It selects cellular only before any
+    VoWiFi submission has been attempted, and never retries across transports after an error or
+    timeout because SMS has no cross-transport idempotency key.
+    """
+    iid, transport = str(iid), str(transport or "auto").lower()
+    if transport not in {"auto", "vowifi", "cellular"}:
+        return {"ok": False, "unavailable": True, "message": None,
+                "error": "Unknown SMS transport; use auto, vowifi, or cellular."}
+
+    lock = hub.sms_send_locks.setdefault(iid, asyncio.Lock())
+    async with lock:
+        if transport == "vowifi":
+            return await _send_sms_vowifi(iid, to, text)
+        if transport == "cellular":
+            return await _send_sms_cellular(iid, to, text)
+
+        ami = await _registered_vowifi_ami(iid)
+        if ami:
+            result = await _send_sms_vowifi(iid, to, text, ami=ami)
+        else:
+            result = await _send_sms_cellular(iid, to, text)
+            if result.get("unavailable"):
+                cellular_error = result.get("error") or "Cellular SMS is unavailable."
+                result["error"] = f"VoWiFi is not registered. {cellular_error}"
+        result["requested_transport"] = "auto"
+        return result
 
 
 @app.post("/api/instances/{iid}/sms/send")
 async def api_sms_send(iid: str, body: dict):
-    result = await send_sms_on_line(iid, body["to"], body["body"])
+    to = str((body or {}).get("to") or "").strip()
+    text = (body or {}).get("body")
+    transport = str((body or {}).get("transport") or "auto").lower()
+    if not to or not isinstance(text, str) or not text:
+        raise HTTPException(422, "recipient and non-empty message body are required")
+    if transport not in {"auto", "vowifi", "cellular"}:
+        raise HTTPException(422, "transport must be auto, vowifi, or cellular")
+    result = await send_sms_on_line(iid, to, text, transport)
     if result.pop("unavailable", False):
         raise HTTPException(409, result["error"])
     return result
+
+
+# ----------------------------- Allowance / balance -----------------------------
+def _allowance_instance(iid: str) -> dict:
+    inst = cfg.get_instance(str(iid))
+    if not inst:
+        raise HTTPException(404, "instance not found")
+    return {**inst, "id": str(iid)}
+
+
+def _allowance_rule(inst: dict) -> dict:
+    return allowance.query_rule(inst, carrier_id.lookup(inst))
+
+
+@app.get("/api/instances/{iid}/allowance")
+def api_allowance(iid: str):
+    _allowance_instance(iid)
+    return {"allowance": allowance.reconcile(str(iid))}
+
+
+@app.put("/api/instances/{iid}/allowance")
+def api_allowance_save(iid: str, body: dict):
+    _allowance_instance(iid)
+    try:
+        values = allowance.clean_allowance(body or {})
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"allowance": store.save_allowance(str(iid), values, source="manual")}
+
+
+@app.get("/api/instances/{iid}/allowance/query-rule")
+def api_allowance_query_rule(iid: str):
+    return {"rule": _allowance_rule(_allowance_instance(iid))}
+
+
+@app.put("/api/instances/{iid}/allowance/query-rule")
+def api_allowance_query_rule_save(iid: str, body: dict):
+    inst = _allowance_instance(iid)
+    try:
+        recipient, text = allowance.validate_rule((body or {}).get("recipient"),
+                                                   (body or {}).get("body"))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    store.save_allowance_query_rule(str(iid), recipient, text)
+    return {"rule": _allowance_rule(inst)}
+
+
+@app.delete("/api/instances/{iid}/allowance/query-rule")
+def api_allowance_query_rule_reset(iid: str):
+    inst = _allowance_instance(iid)
+    store.delete_allowance_query_rule(str(iid))
+    return {"rule": _allowance_rule(inst)}
+
+
+@app.post("/api/instances/{iid}/allowance/query")
+async def api_allowance_query(iid: str, body: dict):
+    inst = _allowance_instance(iid)
+    rule = _allowance_rule(inst)
+    effective = rule.get("effective")
+    if not effective:
+        raise HTTPException(409, "allowance query method is unknown; configure it in Messages")
+    transport = str((body or {}).get("transport") or "auto").lower()
+    if transport not in {"auto", "vowifi", "cellular"}:
+        raise HTTPException(422, "transport must be auto, vowifi, or cellular")
+    query = store.start_allowance_query(
+        str(iid), effective["recipient"], effective["body"],
+        rule.get("carrier_key") or "", transport)
+    result = await send_sms_on_line(str(iid), effective["recipient"],
+                                    effective["body"], transport)
+    if result.get("unavailable"):
+        store.set_allowance_query_status(query["id"], "failed")
+        raise HTTPException(409, result.get("error") or "SMS transport unavailable")
+    store.set_allowance_query_status(
+        query["id"], "sent" if result.get("ok") else
+        "unknown" if result.get("uncertain") else "failed")
+    return {"ok": bool(result.get("ok")), "query": query, "rule": rule,
+            "send": result}
 
 
 # ----------------------------- Calls -----------------------------
@@ -3983,6 +4186,78 @@ async def api_hangup(iid: str):
     result = await hangup_on_line(iid)
     if result.pop("unavailable", False):
         raise HTTPException(409, result["error"])
+    return result
+
+
+def _cellular_call_result_status(value: str) -> tuple[str, bool]:
+    state = str(value or "").casefold()
+    if state == "active":
+        return "answered", False
+    if state in {"dialing", "ringing-out"}:
+        return "ringing", False
+    if state in {"terminated", "ended", "idle"}:
+        return "ended", True
+    if state == "unknown":
+        return "unknown", False
+    return state or "unknown", False
+
+
+def _sync_cellular_call_record(iid: str, state: str) -> dict | None:
+    rec = store.get_open_call_for_transport(str(iid), "cellular")
+    if not rec:
+        return None
+    status, ended = _cellular_call_result_status(state)
+    store.update_call(rec["id"], status, ended=ended)
+    rec["status"] = status
+    if ended:
+        rec["end_ts"] = int(time.time())
+    return rec
+
+
+@app.post("/api/instances/{iid}/cellular-call")
+async def api_cellular_call(iid: str, body: dict):
+    if not cfg.get_instance(str(iid)):
+        raise HTTPException(404, "instance not found")
+    number = str((body or {}).get("to") or "").strip()
+    result = await asyncio.to_thread(
+        cellular_call.dial, cfg.list_instances(), str(iid), number)
+    if result.pop("unavailable", False):
+        raise HTTPException(409, result.get("error") or "Cellular calling is unavailable")
+    if result.get("ok") or result.get("uncertain"):
+        rec = store.add_call(str(iid), "out", number,
+                             status="unknown" if result.get("uncertain") else "ringing",
+                             transport="cellular")
+        result["record"] = rec
+        await hub.broadcast({"type": "call", "instance": str(iid), "call": rec})
+    return result
+
+
+@app.get("/api/instances/{iid}/cellular-call/status")
+async def api_cellular_call_status(iid: str):
+    if not cfg.get_instance(str(iid)):
+        raise HTTPException(404, "instance not found")
+    result = await asyncio.to_thread(
+        cellular_call.status, cfg.list_instances(), str(iid))
+    if not result.get("unavailable"):
+        rec = _sync_cellular_call_record(str(iid), result.get("status") or "")
+        if rec:
+            result["record"] = rec
+    return result
+
+
+@app.post("/api/instances/{iid}/cellular-call/hangup")
+async def api_cellular_call_hangup(iid: str):
+    if not cfg.get_instance(str(iid)):
+        raise HTTPException(404, "instance not found")
+    result = await asyncio.to_thread(
+        cellular_call.hangup, cfg.list_instances(), str(iid))
+    if result.pop("unavailable", False):
+        raise HTTPException(409, result.get("error") or "Cellular calling is unavailable")
+    if result.get("ok"):
+        rec = _sync_cellular_call_record(str(iid), "ended")
+        if rec:
+            result["record"] = rec
+            await hub.broadcast({"type": "call", "instance": str(iid), "call": rec})
     return result
 
 

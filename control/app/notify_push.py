@@ -53,6 +53,8 @@ EV_NUMBER_CHANGED = "number_changed"
 # could carry a tunnel, or the failures were never the exit's fault to begin with. Both need
 # a person, and a gateway that cannot recover should say so rather than rebuild forever.
 EV_LINE_UNRECOVERABLE = "line_unrecoverable"
+# A manually tracked SIM activation is approaching its carrier-reported expiry date.
+EV_ACTIVATION_REMINDER = "activation_reminder"
 
 _TIMEOUT = 8  # seconds; keep short so a dead endpoint never piles up threads
 _TOKEN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
@@ -144,7 +146,14 @@ def _events_enabled(chan: dict) -> dict:
         EV_HOST_ALERT: ev.get(EV_HOST_ALERT, True),
         EV_NUMBER_CHANGED: ev.get(EV_NUMBER_CHANGED, True),
         EV_LINE_UNRECOVERABLE: ev.get(EV_LINE_UNRECOVERABLE, True),
+        EV_ACTIVATION_REMINDER: ev.get(EV_ACTIVATION_REMINDER, True),
     }
+
+
+def has_enabled_channel(settings: dict, event: str) -> bool:
+    return any(bool((settings.get(key) or {}).get("enabled"))
+               and bool(_events_enabled(settings.get(key) or {}).get(event))
+               for key in ("webhook", "telegram", "pushplus"))
 
 
 def build_payload(event: str, instance: dict, source: str, text: str | None) -> dict:
@@ -159,7 +168,7 @@ def build_payload(event: str, instance: dict, source: str, text: str | None) -> 
         "msisdn": instance.get("msisdn", "") or "",       # the line's own number (may be "")
         "from": source or "",                             # the event's source number
         "text": text if event in (EV_INCOMING_SMS, EV_HOST_ALERT, EV_NUMBER_CHANGED,
-                                  EV_LINE_UNRECOVERABLE) else None,
+                                  EV_LINE_UNRECOVERABLE, EV_ACTIVATION_REMINDER) else None,
     }
 
 
@@ -177,6 +186,8 @@ def build_notification_message(payload: dict) -> dict:
         return {"title": f"线路号码已变更 · {sim}", "content": payload.get("text") or ""}
     if event == EV_LINE_UNRECOVERABLE:
         return {"title": f"线路无法自动恢复 · {sim}", "content": payload.get("text") or ""}
+    if event == EV_ACTIVATION_REMINDER:
+        return {"title": f"SIM 即将到期 · {sim}", "content": payload.get("text") or ""}
     title = f"VoWiFi {'短信' if event == EV_INCOMING_SMS else '来电'} · {sim}"
     lines = [f"SIM: {sim}"]
     if own:
@@ -326,6 +337,9 @@ def _telegram_text(payload: dict) -> str:
         # hardware model).
         return "\n".join(["⚠️ 网关主机异常", str(payload.get("from") or ""), "",
                           payload.get("text") or ""])
+    if ev == EV_ACTIVATION_REMINDER:
+        return "\n".join([f"⏰ SIM 即将到期 · {payload.get('sim_name') or payload.get('instance')}",
+                           "", payload.get("text") or ""])
     head = "📩 Incoming SMS" if ev == EV_INCOMING_SMS else "📞 Incoming call"
     name = payload.get("sim_name") or payload.get("iccid") or payload.get("instance")
     msisdn = payload.get("msisdn")

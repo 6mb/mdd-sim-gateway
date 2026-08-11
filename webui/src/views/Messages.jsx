@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api.js'
 import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
+import AllowancePanel from './AllowancePanel.jsx'
 
 export default function Messages({ selected, subscribe, showToast, instances, cards, devices, setSelected }) {
   const { t: tr } = useI18n()
@@ -13,6 +14,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   const [messagesLoading, setMessagesLoading] = useState(false)
   const [text, setText] = useState('')
   const [newTo, setNewTo] = useState('')
+  const [transport, setTransport] = useState('auto')
   const [sending, setSending] = useState(false)
   const [selMode, setSelMode] = useState(false)      // multi-select messages to delete
   const [selIds, setSelIds] = useState(() => new Set())
@@ -20,8 +22,17 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   const activePeer = useRef(peer)
   const threadsRequest = useRef(0)
   const messagesRequest = useRef(0)
+  const sendingRef = useRef(false)
   activeId.current = id
   activePeer.current = peer
+
+  // Cellular SMS is available only when this line is currently attached to a live modem.
+  // Older backends do not expose a dedicated SMS capability, so use the unified device type
+  // instead; the backend still performs the authoritative ModemManager capability check.
+  const selectedDevice = devices.find((device) => device.present === true
+    && device.device_type === 'modem'
+    && String(device.instance_id || '') === String(id || ''))
+  const cellularAvailable = Boolean(selectedDevice)
 
   const loadThreads = useCallback(async (showLoading = false) => {
     if (!id) return
@@ -55,10 +66,13 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   // history appear to have disappeared.
   useEffect(() => {
     ++threadsRequest.current; ++messagesRequest.current
-    setThreads([]); setPeer(null); setMsgs([]); setText(''); setNewTo('')
+    setThreads([]); setPeer(null); setMsgs([]); setText(''); setNewTo(''); setTransport('auto')
     setThreadsLoading(Boolean(id)); setMessagesLoading(false)
     if (id) loadThreads(true)
   }, [id, loadThreads])
+  useEffect(() => {
+    if (!cellularAvailable && transport === 'cellular') setTransport('auto')
+  }, [cellularAvailable, transport])
   useEffect(() => {
     ++messagesRequest.current
     setMsgs([])
@@ -78,22 +92,35 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   }), [subscribe, id, peer, loadThreads, loadMsgs])
 
   const send = async () => {
+    // React state is updated asynchronously, so `sending` alone leaves a short window where
+    // a double click or a repeating Enter key can submit the same billable SMS twice.
+    if (sendingRef.current) return
     const to = peer || newTo
     if (!to || !text) return
+    const forId = id
+    sendingRef.current = true
     setSending(true)
     try {
-      const res = await api.sendSms(id, to, text)
-      setText(''); setPeer(to); setNewTo('')
-      await loadThreads(); await loadMsgs(to)
+      const res = await api.sendSms(forId, to, text, transport)
+      // A slow modem submit may finish after the operator selected another line. Never erase
+      // that line's draft or replace its open conversation with the old line's recipient.
+      if (activeId.current === forId) {
+        setText(''); setPeer(to); setNewTo('')
+        await loadThreads(); await loadMsgs(to)
+      }
       if (res && res.ok === false) {
-        const msg = 'SMS not delivered: ' + (res.error || 'unknown error')
+        const msg = res.uncertain
+          ? tr('SMS submission timed out; delivery is unknown. Do not retry automatically.')
+          : 'SMS not delivered: ' + (res.error || 'unknown error')
         showToast ? showToast(msg) : alert(msg)
       }
     } catch (e) {
       const msg = 'SMS failed: ' + e.message
       showToast ? showToast(msg) : alert(msg)
+    } finally {
+      sendingRef.current = false
+      setSending(false)
     }
-    setSending(false)
   }
 
   const toast = (m) => (showToast ? showToast(m) : null)
@@ -155,6 +182,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
       <div style={{ flexShrink: 0 }}>
         <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
       </div>
+      <AllowancePanel instanceId={String(id)} mode="messages" transport={transport} showToast={showToast} />
       <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gridTemplateRows: 'minmax(0, 1fr)', gap: 16, flex: 1, minHeight: 0 }}>
       <div className="card" style={{ padding: 12, overflow: 'auto', minHeight: 0 }}>
         <button className="btn btn-primary" style={{ width: '100%', marginBottom: 8 }} onClick={() => { setPeer(null); setMsgs([]); setMessagesLoading(false) }}>+ {tr('New message')}</button>
@@ -210,12 +238,14 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
             // but delivery not yet confirmed.
             const delivered = m.status === 'delivered'
             const sent = m.status === 'sent'
+            const uncertain = m.status === 'unknown'
             const statusText = failed ? ` · ${tr('Failed to deliver')}`
               : m.status === 'pending' ? ` · ${tr('sending…')}`
               : sent ? ` · ${tr('Sent')}`
               : delivered ? ` · ${tr('Delivered ✓')}`
+              : uncertain ? ` · ${tr('Delivery unknown')}`
               : ''
-            const statusColor = failed ? '#ef4444' : delivered ? '#22c55e' : 'var(--text-mute)'
+            const statusColor = failed ? '#ef4444' : uncertain ? '#f59e0b' : delivered ? '#22c55e' : 'var(--text-mute)'
             const checked = selIds.has(m.id)
             return (
               <div key={m.id} onClick={() => selMode && toggleSel(m.id)}
@@ -228,9 +258,11 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
                     flexDirection: m.direction === 'out' ? 'row' : 'row-reverse' }}>
                     {failed && <span title={m.error || 'Delivery failed'}
                       style={{ color: '#ef4444', fontWeight: 800, cursor: 'help', fontSize: 15 }}>❗</span>}
+                    {uncertain && <span title={m.error || tr('Delivery unknown')}
+                      style={{ color: '#f59e0b', fontWeight: 800, cursor: 'help', fontSize: 15 }}>⚠</span>}
                     <div style={{
-                      background: checked ? 'var(--active)' : failed ? 'rgba(239,68,68,.15)' : (m.direction === 'out' ? 'var(--primary)' : 'var(--hover)'),
-                      border: failed ? '1px solid rgba(239,68,68,.55)' : '1px solid transparent',
+                      background: checked ? 'var(--active)' : failed ? 'rgba(239,68,68,.15)' : uncertain ? 'rgba(245,158,11,.14)' : (m.direction === 'out' ? 'var(--primary)' : 'var(--hover)'),
+                      border: failed ? '1px solid rgba(239,68,68,.55)' : uncertain ? '1px solid rgba(245,158,11,.55)' : '1px solid transparent',
                       padding: '8px 12px', borderRadius: 12, fontSize: 14,
                     }}>{m.body}</div>
                   </div>
@@ -244,14 +276,37 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
                     <div style={{ fontSize: 10.5, color: '#ef4444', marginTop: 1,
                       textAlign: m.direction === 'out' ? 'right' : 'left', maxWidth: 280 }}>{m.error}</div>
                   )}
+                  {uncertain && m.error && (
+                    <div style={{ fontSize: 10.5, color: '#f59e0b', marginTop: 1,
+                      textAlign: m.direction === 'out' ? 'right' : 'left', maxWidth: 280 }}>{m.error}</div>
+                  )}
                 </div>
               </div>
             )
           })}
         </div>
-        <div style={{ display: 'flex', gap: 8, padding: 12, borderTop: '1px solid var(--border)', flexShrink: 0 }}>
-          <input placeholder={tr('Type a message…')} value={text} onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && send()} />
+        <div style={{ display: 'flex', gap: 8, padding: 12, borderTop: '1px solid var(--border)', flexShrink: 0, flexWrap: 'wrap', alignItems: 'center' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-mute)', whiteSpace: 'nowrap' }}>
+            {tr('Send via')}
+            <select value={transport} disabled={sending}
+              onChange={(e) => setTransport(e.target.value)}
+              aria-label={tr('Send via')}
+              title={!cellularAvailable ? tr('This line does not have an available cellular modem.') : ''}
+              style={{ width: 'auto', minWidth: 150 }}>
+              <option value="auto">{tr('Auto (VoWiFi first)')}</option>
+              <option value="vowifi">VoWiFi</option>
+              <option value="cellular" disabled={!cellularAvailable}>
+                {tr('Cellular network (Modem)')}{!cellularAvailable ? ` — ${tr('Unavailable')}` : ''}
+              </option>
+            </select>
+          </label>
+          <input placeholder={tr('Type a message…')} value={text} disabled={sending}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter') return
+              e.preventDefault()
+              if (!e.repeat) send()
+            }} style={{ flex: '1 1 220px' }} />
           <button className="btn btn-primary" disabled={sending || (!peer && !newTo)} onClick={send}>{tr('Send')}</button>
         </div>
       </div>

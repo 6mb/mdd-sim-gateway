@@ -163,6 +163,37 @@ class HostAlertNotificationTests(unittest.TestCase):
         self.assertTrue(notify_push._events_enabled({})[notify_push.EV_HOST_ALERT])
 
 
+class ActivationReminderNotificationTests(unittest.TestCase):
+    def test_it_is_enabled_by_default_and_can_be_disabled_per_channel(self):
+        self.assertTrue(notify_push._events_enabled({})[
+            notify_push.EV_ACTIVATION_REMINDER])
+        self.assertFalse(notify_push._events_enabled({"events": {
+            notify_push.EV_ACTIVATION_REMINDER: False,
+        }})[notify_push.EV_ACTIVATION_REMINDER])
+
+    def test_it_has_expiry_wording_not_call_or_sms_wording(self):
+        payload = notify_push.build_payload(
+            notify_push.EV_ACTIVATION_REMINDER,
+            {"id": "1", "name": "US SIM"}, "2026-08-28",
+            "线路 US SIM 将于 2026-08-28 到期，还剩 3 天。")
+        built = notify_push.build_notification_message(payload)
+        telegram = notify_push._telegram_text(payload)
+        self.assertIn("即将到期", built["title"])
+        self.assertIn("还剩 3 天", built["content"])
+        self.assertIn("即将到期", telegram)
+        self.assertNotIn("Incoming call", telegram)
+        self.assertNotIn("Incoming SMS", telegram)
+
+    def test_enabled_channel_detection_honours_category_toggle(self):
+        settings = {"telegram": {"enabled": True, "events": {
+            notify_push.EV_ACTIVATION_REMINDER: False}}}
+        self.assertFalse(notify_push.has_enabled_channel(
+            settings, notify_push.EV_ACTIVATION_REMINDER))
+        settings["telegram"]["events"][notify_push.EV_ACTIVATION_REMINDER] = True
+        self.assertTrue(notify_push.has_enabled_channel(
+            settings, notify_push.EV_ACTIVATION_REMINDER))
+
+
 class NumberChangeNotificationTests(unittest.TestCase):
     """A ported number changes the line's caller identity, so it is announced rather than
     silently corrected."""

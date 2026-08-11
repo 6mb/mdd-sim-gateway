@@ -116,7 +116,18 @@ export const api = {
 
   threads: (id) => j('GET', `/api/instances/${id}/messages/threads`),
   messages: (id, peer) => j('GET', `/api/instances/${id}/messages/${encodeURIComponent(peer)}`),
-  sendSms: (id, to, body) => j('POST', `/api/instances/${id}/sms/send`, { to, body }),
+  sendSms: (id, to, body, transport = 'auto') => j(
+    'POST',
+    `/api/instances/${id}/sms/send`,
+    { to, body, transport },
+  ),
+  allowance: (id) => j('GET', `/api/instances/${id}/allowance`),
+  saveAllowance: (id, body) => j('PUT', `/api/instances/${id}/allowance`, body),
+  allowanceQueryRule: (id) => j('GET', `/api/instances/${id}/allowance/query-rule`),
+  saveAllowanceQueryRule: (id, body) => j('PUT', `/api/instances/${id}/allowance/query-rule`, body),
+  resetAllowanceQueryRule: (id) => j('DELETE', `/api/instances/${id}/allowance/query-rule`),
+  queryAllowance: (id, transport = 'auto') => j(
+    'POST', `/api/instances/${id}/allowance/query`, { transport }),
   // delete messages: { ids:[...] } | { peer } (whole conversation) | { all:true }
   deleteMessages: (id, sel) => j('POST', `/api/instances/${id}/messages/delete`, sel),
 
@@ -125,6 +136,9 @@ export const api = {
   deleteCalls: (id, sel) => j('POST', `/api/instances/${id}/calls/delete`, sel),
   call: (id, to, from_endpoint = 'webrtc') => j('POST', `/api/instances/${id}/call`, { to, from_endpoint }),
   hangup: (id) => j('POST', `/api/instances/${id}/hangup`),
+  cellularCall: (id, to) => j('POST', `/api/instances/${id}/cellular-call`, { to }),
+  cellularCallStatus: (id) => j('GET', `/api/instances/${id}/cellular-call/status`),
+  cellularCallHangup: (id) => j('POST', `/api/instances/${id}/cellular-call/hangup`, {}),
   softphone: (id) => j('GET', `/api/instances/${id}/softphone`),
 
   // eSIM / LPA (lpac) — first arg is usually the PC/SC reader NAME (string).

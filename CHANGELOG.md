@@ -4,7 +4,25 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-08-12
+
+### Added
+
+- Added ModemManager cellular SMS sending with an explicit Auto, VoWiFi or cellular route;
+  Auto prefers a confirmed registered VoWiFi line and otherwise uses its ICCID-matched modem.
+- Added experimental outbound cellular calling through ModemManager, including call state and
+  hangup controls. This path intentionally provides no audio, DTMF, muting or recording.
+- Added cached balance, validity, SMS, data and voice allowances with manual editing, built-in
+  SMS queries for Ultra Mobile and CTExcel, and customizable query number and message rules.
+- Added an activation date and an enabled-by-default activation reminder category that notifies
+  configured channels three, two and one days before the cached expiry date.
+
 ### Changed
+
+- Cellular actions are available only when a real modem is bound to the SIM; a disabled 4G
+  setting disables cellular calling, and reader-only SIMs no longer show a cellular channel.
+- Allowance detection uses SIM-reported carrier identity instead of the editable line name, and
+  query responses are timestamped and cached for the overview.
 
 - Completed an AI-assisted review of every open-source component this project uses, comparing the
   source tree against its upstream and auditing the build scripts, container image and dependency
@@ -16,6 +34,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   credit all of them, retain the upstream MIT copyright notice as that license requires, and
   record the GPL source-offer obligations that shipping a built engine image or host install
   carries. No code changed.
+
+### Security
+
+- ModemManager SMS and call operations require exact ICCID matching and do not silently change
+  radio state or retry over a different transport after an explicit route fails.
 
 ## [1.2.2] - 2026-08-10
 
