@@ -116,9 +116,14 @@ selected. A separate UDP probe is mandatory because IKEv2/ESP NAT traversal depe
 ## License and acknowledgements
 
 MDD Sim Gateway is released under **GPL-3.0-only**. Build-time derivative patches that must remain
-under an upstream license are identified separately. The project derives from or interoperates
-with SWu-IKEv2, sysmocom Asterisk, phcoder/asterisk-docker, mitshell/card, sing-box, lpac, PCSC and
-CCID. See [NOTICE](NOTICE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+under an upstream license are identified separately. The project is a derivative of
+[pagecat/vowifi_gateway](https://github.com/pagecat/vowifi_gateway) (MIT), which contributes the
+VoWiFi engine and the overall control-plane/engine/WebUI architecture; MDD Sim Gateway adds 4G
+cellular data and SMS, per-country network egress routing, unified device management and automatic
+provisioning, failover and a test suite. It further derives from or interoperates with SWu-IKEv2,
+sysmocom Asterisk and pjproject, phcoder/asterisk-docker, mitshell/card, sing-box, lpac, PCSC,
+CCID, pyscard and frankmorgner/vsmartcard. See [NOTICE](NOTICE) and
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 This is an independent project and is not endorsed by carriers, hardware vendors or upstream
 projects.
