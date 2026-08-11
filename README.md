@@ -114,11 +114,13 @@ MDD Sim Gateway 以 **GPL-3.0-only** 发布。它包含或调用多个独立上�
 
 特别感谢：
 
+- [pagecat/vowifi_gateway](https://github.com/pagecat/vowifi_gateway)：本项目的上游基础（MIT）——VoWiFi 引擎与管理端/引擎/WebUI 的整体架构源自该项目；本项目在其之上增加了 4G 蜂窝数据与短信、按国家的网络出口路由、统一设备管理与自动开通、故障转移以及测试体系；
 - [fasferraz/SWu-IKEv2](https://github.com/fasferraz/SWu-IKEv2)：SWu IKEv2/IPsec 基础实现；
-- [phcoder/asterisk-docker](https://github.com/phcoder/asterisk-docker) 与 [sysmocom Asterisk](https://gitea.sysmocom.de/sysmocom/asterisk)：IMS-AKA、语音和短信；
+- [phcoder/asterisk-docker](https://github.com/phcoder/asterisk-docker) 与 [sysmocom Asterisk](https://gitea.sysmocom.de/sysmocom/asterisk)、[sysmocom pjproject](https://gitea.sysmocom.de/sysmocom/pjproject)：IMS-AKA、语音和短信；
 - [mitshell/card](https://github.com/mitshell/card)：USIM/PCSC 辅助代码；
 - [SagerNet/sing-box](https://github.com/SagerNet/sing-box)：国家代理出口；
 - [estkme-group/lpac](https://github.com/estkme-group/lpac)：eSIM LPA；
-- [LudovicRousseau/PCSC](https://github.com/LudovicRousseau/PCSC) 与 [CCID](https://github.com/LudovicRousseau/CCID)：智能卡基础设施。
+- [LudovicRousseau/PCSC](https://github.com/LudovicRousseau/PCSC)、[CCID](https://github.com/LudovicRousseau/CCID) 与 [pyscard](https://github.com/LudovicRousseau/pyscard)：智能卡基础设施；
+- [frankmorgner/vsmartcard](https://github.com/frankmorgner/vsmartcard)：虚拟 PC/SC 驱动（vpcd），4G 模组 SIM 槽位的基础。
 
 本项目不是上述项目、运营商或设备厂商的官方产品，也不受其背书。

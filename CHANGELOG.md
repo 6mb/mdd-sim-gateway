@@ -4,6 +4,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- Completed an AI-assisted review of every open-source component this project uses, comparing the
+  source tree against its upstream and auditing the build scripts, container image and dependency
+  manifests. The review established that MDD Sim Gateway is a derivative work of
+  pagecat/vowifi_gateway (MIT), which contributes the VoWiFi engine and the overall
+  control-plane/engine/WebUI architecture, and it identified seven further components that were in
+  use but undeclared: sysmocom/pjproject, frankmorgner/vsmartcard (vpcd), pyscard, PyCryptodome,
+  panoramisk, jsQR and Tailwind CSS. `NOTICE`, `THIRD_PARTY_LICENSES.md` and both READMEs now
+  credit all of them, retain the upstream MIT copyright notice as that license requires, and
+  record the GPL source-offer obligations that shipping a built engine image or host install
+  carries. No code changed.
+
 ## [1.2.2] - 2026-08-10
 
 ### Fixed
