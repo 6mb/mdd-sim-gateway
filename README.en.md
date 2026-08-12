@@ -6,7 +6,7 @@ MDD Sim Gateway is a self-hosted multi-SIM communications gateway. It brings cel
 modems, USB smart-card readers, 4G data, Wi-Fi Calling, voice, SMS, eSIM management and
 country-specific proxy exits into one bilingual Web console.
 
-Current version: **1.2.2** · [中文](README.md)
+Current version: **1.3.2** · [中文](README.md)
 
 > **Compliance warning (public edition):** This software is only for use by the verified subscriber of a number where the carrier expressly permits that use. Do not use it for fraud, bulk or nuisance calling, marketing, verification-code collection, renting numbers or lines, call forwarding for others, concealing the controller's location, or providing telecommunications services to third parties. Users must follow local law, subscriber identity rules, and carrier terms. This project grants no telecom licence or carrier authorisation. The public edition stores and runs at most **five SIM lines** and provides neither standalone SIP accounts nor Telegram commands for calls, SMS, or hangup. Technical restrictions do not make any particular use lawful.
 

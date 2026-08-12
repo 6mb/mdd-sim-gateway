@@ -4,6 +4,7 @@ const STORAGE_KEY = 'mdd-language'
 
 const zh = {
   'update.error.no_public_release': '当前还没有公开发布的版本',
+  'update.error.proxy': '升级代理未配置或所选国家出口尚未就绪',
   Dashboard: '仪表盘', Softphone: '软电话', Messages: '短信', 'SIM Config': 'SIM 配置',
   Settings: '设置', Logs: '日志', Language: '语言', English: 'English', Chinese: '中文',
   Auto: '自动', Light: '浅色', Dark: '深色',
@@ -216,6 +217,9 @@ const zh = {
   'The gateway is restarting — the page will reload automatically. Sign in again afterwards.': '网关正在重启，页面稍后会自动刷新，之后请重新登录。',
   'The host orchestrator has not picked up the update request. Check the mdd-sim-gateway-orchestrator service on the host.': '主机编排服务未响应升级请求，请在主机上检查 mdd-sim-gateway-orchestrator 服务。',
   'Update failed': '升级失败', 'Update failed: {error}': '升级失败：{error}', 'Updated to v{version}': '已升级到 v{version}',
+  'Update connection': '升级联网方式',
+  'Used for both checking releases and downloading an update. Direct connection remains the default.': '检查新版本和下载升级包都使用此设置；默认保持直连。',
+  'Save update connection': '保存升级联网设置',
   'Unknown carrier': '未知运营商',
   'cap.off': '已关闭', 'cap.starting': '正在开启', 'cap.on': '已开启', 'cap.stopping': '正在关闭', 'cap.degraded': '需要处理', 'cap.error': '异常', 'cap.unsupported': '不支持', 'cap.help.off': '当前未运行', 'cap.help.starting': '正在初始化，请稍候', 'cap.help.on': '运行正常', 'cap.help.stopping': '正在安全停止', 'cap.help.degraded': '部分功能异常，请查看具体原因', 'cap.help.error': '启动失败，请查看原因', 'cap.help.unsupported': '此设备或后端不支持',
   'Number unavailable': '号码不可用', Offline: '离线', Detected: '已检测', 'Not connected': '未连接', 'Country exit': '国家出口', Message: '短信', Details: '详情', 'Stable hardware path unavailable': '稳定硬件路径不可用', 'Desired and actual states are shown separately. A failed capability does not imply the other one stopped.': '期望状态与实际状态分别显示；一项能力失败不表示另一项也已停止。', Registration: '注册状态', Operator: '运营商', 'IP address': 'IP 地址', Signal: '信号', Traffic: '流量', 'Cellular data not connected': '蜂窝数据未连接', 'This backend has not exposed per-device cellular status yet.': '当前后端没有该设备的蜂窝状态。', Rekey: '换钥', Hardware: '硬件', Model: '型号', Firmware: '固件', Unavailable: '不可用', 'Stable path': '稳定路径', 'SIM logical channels': 'SIM 逻辑通道', '{used} / {total} allocated': '已分配 {used} / {total}', 'Logical channel {channel}': '逻辑通道 {channel}', 'channel.status.allocating': '正在分配', 'channel.status.ready': '就绪', 'channel.status.error': '分配失败', 'channel.status.stopped': '未占用', 'channel.role.pin': 'PIN 保活', 'channel.role.swu': 'VoWiFi / EAP-AKA', 'channel.role.ims': 'IMS / Asterisk',
@@ -365,6 +369,7 @@ const en = {
   'update.error.rate_limited': 'GitHub temporarily rate-limited update checks; try again later',
   'update.error.github': 'The GitHub update service returned an error',
   'update.error.unavailable': 'The update service is temporarily unavailable',
+  'update.error.proxy': 'The update proxy is invalid or the selected country exit is not ready',
   'Login is sent only when you click the button.': 'Login is sent only when you click the button.',
   'Too many attempts. Try again in {seconds} seconds.': 'Too many attempts. Try again in {seconds} seconds.',
   'Try again in {seconds}s': 'Try again in {seconds}s',

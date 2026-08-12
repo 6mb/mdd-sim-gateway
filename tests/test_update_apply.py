@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from control.app import config, update_check
+from host import mdd_orchestrator
 
 _SPEC = importlib.util.spec_from_file_location(
     "mdd_update", Path(__file__).resolve().parent.parent / "host" / "mdd_update.py")
@@ -30,13 +31,16 @@ class RequestApplyTests(unittest.TestCase):
         self.status_path = os.path.join(self.tmp.name, "orchestrator", "update-status.json")
 
     def test_request_is_published_with_version_and_repository(self):
-        with patch.object(update_check, "check", return_value=dict(_AVAILABLE)):
+        with patch.object(update_check, "check", return_value=dict(_AVAILABLE)), \
+                patch.object(update_check, "_network_selection", return_value={
+                    "proxy_mode": "country", "proxy_url": "", "proxy_country": "us"}):
             result = update_check.request_apply()
         self.assertTrue(result["ok"])
         with open(self.request_path, encoding="utf-8") as handle:
             request = json.load(handle)
         self.assertEqual(request["version"], "9.9.9")
         self.assertEqual(request["repository"], update_check.repository())
+        self.assertEqual(request["network"]["proxy_country"], "us")
         with open(self.status_path, encoding="utf-8") as handle:
             status = json.load(handle)
         self.assertEqual(status["state"], "running")
@@ -69,6 +73,19 @@ class RequestApplyTests(unittest.TestCase):
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_proxy_environment_is_explicit_and_not_added_to_curl_arguments(self):
+        proxy = "socks5h://user:secret@127.0.0.1:1080"
+        env = mdd_update.network_environment(proxy)
+        self.assertEqual(env["ALL_PROXY"], proxy)
+        completed = type("Completed", (), {"returncode": 0, "stderr": ""})()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+                mdd_update.subprocess, "run", return_value=completed) as run:
+            mdd_update.download("https://example.invalid/release.tar.gz",
+                                Path(tmp, "release.tar.gz"), env, proxy)
+        args = run.call_args.args[0]
+        self.assertNotIn(proxy, args)
+        self.assertEqual(run.call_args.kwargs["env"]["HTTPS_PROXY"], proxy)
+
     def test_apply_tree_preserves_installation_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, source = Path(tmp, "repo"), Path(tmp, "source")
@@ -105,6 +122,34 @@ class UpdaterTests(unittest.TestCase):
                 mdd_update.perform(Path(tmp), Path(tmp), "../evil", "MddIdd/mdd-sim-gateway", status)
             with self.assertRaises(mdd_update.UpdateError):
                 mdd_update.perform(Path(tmp), Path(tmp), "1.0.2", "MddIdd/x/../y", status)
+
+
+class OrchestratorUpdateTests(unittest.TestCase):
+    def test_country_proxy_is_resolved_into_private_file_not_command_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "orchestrator"
+            root.mkdir()
+            (root / "update-request.json").write_text(json.dumps({
+                "version": "9.9.9", "repository": "MddIdd/mdd-sim-gateway",
+                "network": {"proxy_mode": "country", "proxy_country": "us"},
+            }), encoding="utf-8")
+            (root / "proxy-status.json").write_text(json.dumps({"exits": {"us": {
+                "ready": True, "proxy_host": mdd_orchestrator.COUNTRY_PROXY_LISTEN,
+                "proxy_port": 22538,
+            }}}), encoding="utf-8")
+            app = mdd_orchestrator.Orchestrator(
+                data, Path(__file__).resolve().parent.parent)
+            completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            with patch.object(app, "service_active", return_value=False), \
+                    patch.object(mdd_orchestrator, "run", return_value=completed) as run:
+                app.process_update_request()
+            network_path = data / "update" / "network.json"
+            self.assertEqual(json.loads(network_path.read_text())["proxy_url"],
+                             f"socks5h://{mdd_orchestrator.COUNTRY_PROXY_LISTEN}:22538")
+            command = run.call_args_list[-1].args[0]
+            self.assertNotIn("socks5h://", " ".join(command))
+            self.assertEqual(network_path.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

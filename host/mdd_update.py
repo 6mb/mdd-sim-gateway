@@ -24,7 +24,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
-import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 
 # Top-level entries that belong to the installation, not to a release: never replaced and
@@ -52,6 +52,16 @@ def atomic_json(path: Path, value: dict):
     os.replace(tmp, path)
 
 
+def read_network_config(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise UpdateError("could not read update network configuration") from exc
+    return value if isinstance(value, dict) else {}
+
+
 class Status:
     def __init__(self, path: Path, target: str):
         self.path, self.target = path, target
@@ -65,10 +75,59 @@ class Status:
                                 **self.extra})
 
 
-def download(url: str, destination: Path):
-    request = urllib.request.Request(url, headers={"User-Agent": "mdd-sim-gateway-updater"})
-    with urllib.request.urlopen(request, timeout=600) as response, open(destination, "wb") as out:
-        shutil.copyfileobj(response, out)
+def network_environment(proxy_url: str) -> dict[str, str]:
+    """Return a clean download environment, optionally carrying a validated proxy."""
+    env = dict(os.environ)
+    for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                 "ALL_PROXY"):
+        env.pop(name, None)
+    env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost,::1"
+    if not proxy_url:
+        return env
+    parsed = urlsplit(proxy_url)
+    if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"} \
+            or not parsed.hostname or any(ch in proxy_url for ch in "\r\n"):
+        raise UpdateError("invalid update proxy configuration")
+    env.update({"HTTP_PROXY": proxy_url, "HTTPS_PROXY": proxy_url, "ALL_PROXY": proxy_url,
+                "http_proxy": proxy_url, "https_proxy": proxy_url, "all_proxy": proxy_url})
+    return env
+
+
+def _redact_proxy_error(message: str, proxy_url: str) -> str:
+    redacted = str(message or "")
+    if proxy_url:
+        redacted = redacted.replace(proxy_url, "[update proxy]")
+        parsed = urlsplit(proxy_url)
+        if parsed.password:
+            redacted = redacted.replace(parsed.password, "***")
+    return redacted
+
+
+def redact_log(path: Path, proxy_url: str):
+    if not proxy_url or not path.is_file():
+        return
+    try:
+        original = path.read_text(encoding="utf-8", errors="replace")
+        redacted = _redact_proxy_error(original, proxy_url)
+        if redacted != original:
+            path.write_text(redacted, encoding="utf-8")
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def download(url: str, destination: Path, env: dict[str, str], proxy_url: str = ""):
+    """Download through curl so HTTP and SOCKS5(H) proxies are supported consistently."""
+    result = subprocess.run([
+        "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
+        "--tlsv1.2", "--retry", "3", "--retry-all-errors", "--connect-timeout", "20",
+        "--max-time", "600", "--user-agent", "mdd-sim-gateway-updater",
+        "--output", str(destination), url,
+    ], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if result.returncode:
+        detail = _redact_proxy_error(result.stderr, proxy_url).strip().splitlines()
+        tail = detail[-1] if detail else f"curl exited with {result.returncode}"
+        raise UpdateError(f"release download failed: {tail}")
 
 
 def extract(archive: Path, destination: Path) -> Path:
@@ -137,18 +196,20 @@ def apply_tree(source_root: Path, repo: Path):
             shutil.copytree(entry, target, symlinks=True)
 
 
-def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status):
+def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status,
+            proxy_url: str = ""):
     if not VERSION_RE.fullmatch(version):
         raise UpdateError(f"invalid target version: {version!r}")
     if not REPOSITORY_RE.fullmatch(repo_name):
         raise UpdateError(f"invalid repository: {repo_name!r}")
     (data / "update").mkdir(mode=0o700, parents=True, exist_ok=True)
+    env = network_environment(proxy_url)
     staging = Path(tempfile.mkdtemp(prefix="mdd-update.", dir=str(data / "update")))
     try:
         url = f"https://github.com/{repo_name}/archive/refs/tags/v{version}.tar.gz"
         status.publish("running", "downloading", url=url)
         archive = staging / "release.tar.gz"
-        download(url, archive)
+        download(url, archive, env, proxy_url)
 
         status.publish("running", "verifying")
         source_root = extract(archive, staging / "tree")
@@ -173,7 +234,9 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         log_path = data / "update" / "reload.log"
         with open(log_path, "w", encoding="utf-8") as log:
             result = subprocess.run(["sh", str(repo / "install.sh"), "reload"],
-                                    cwd=str(repo), stdout=log, stderr=subprocess.STDOUT)
+                                    cwd=str(repo), env=env, stdout=log,
+                                    stderr=subprocess.STDOUT)
+        redact_log(log_path, proxy_url)
         if result.returncode != 0:
             with open(log_path, encoding="utf-8", errors="replace") as log:
                 tail = "".join(log.readlines()[-40:])
@@ -189,14 +252,24 @@ def main():
     parser.add_argument("--data", required=True, type=Path)
     parser.add_argument("--version", required=True)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--network-config", type=Path)
     args = parser.parse_args()
     data = args.data.resolve()
     status = Status(data / "orchestrator" / "update-status.json", args.version)
     try:
-        perform(args.repo.resolve(), data, args.version, args.repository, status)
+        network_path = args.network_config.resolve() if args.network_config else None
+        network = read_network_config(network_path)
+        perform(args.repo.resolve(), data, args.version, args.repository, status,
+                str(network.get("proxy_url") or ""))
     except Exception as exc:  # published for the WebUI; the unit exit code is for journalctl
         status.publish("failed", "error", error=str(exc)[:4000])
         raise SystemExit(1)
+    finally:
+        if args.network_config:
+            try:
+                args.network_config.unlink()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

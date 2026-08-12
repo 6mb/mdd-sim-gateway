@@ -129,6 +129,13 @@ DEFAULTS = {
             "notification_history_days": 30,
             "support_bundle_log_lines": 500,
         },
+        # Software update traffic is direct by default. Operators on filtered networks can
+        # opt into a manual proxy or reuse one of the host orchestrator's country exits.
+        "updates": {
+            "proxy_mode": "direct",
+            "proxy_url": "",
+            "proxy_country": "",
+        },
         # Local lpac (eSIM LPA) integration. Binary is built by `./install.sh build-lpac` into
         # $MDD_DATA/lpac/ (STANDALONE layout). Empty lpac_bin → default path below.
         "esim": {
@@ -286,7 +293,8 @@ def load() -> dict:
             })
         esim_saved = data.get("settings", {}).get("esim", {}) or {}
         out["settings"]["esim"] = {**DEFAULTS["settings"]["esim"], **esim_saved}
-        for key in ("proxy", "hardware", "security", "maintenance", "device_defaults"):
+        for key in ("proxy", "hardware", "security", "maintenance", "device_defaults",
+                    "updates"):
             saved = data.get("settings", {}).get(key, {}) or {}
             out["settings"][key] = {**DEFAULTS["settings"][key], **saved}
         # Asterisk debug includes complete SIP messages and IMS identities.  Older manual
