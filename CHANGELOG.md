@@ -4,6 +4,18 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-08-12
+
+### Fixed
+
+- Release archives now include the CI-built WebUI and an archive checksum. One-click updates
+  verify and install that artifact before reload, so a Raspberry Pi no longer needs to pull a
+  Node image from Docker Hub to finish an update.
+- Added an explicit edition boundary: a full installation refuses the public GitHub update
+  channel instead of allowing a same-version public archive to replace full-edition source.
+- Added a one-release bootstrap manifest that safely recognizes the reviewed WebUI already
+  installed by v1.3.2, allowing the first artifact-aware update to complete offline.
+
 ## [1.3.2] - 2026-08-12
 
 ### Added

@@ -21,6 +21,14 @@ DEFAULT_REPOSITORY = "MddIdd/mdd-sim-gateway"
 _cache: tuple[float, dict] | None = None
 
 
+def edition() -> str:
+    try:
+        return open(os.path.join(os.path.dirname(__file__), "..", "..", "EDITION"),
+                    encoding="utf-8").read().strip()
+    except OSError:
+        return "full"
+
+
 class UpdateNetworkError(RuntimeError):
     pass
 
@@ -96,6 +104,11 @@ def check(force: bool = False) -> dict:
     }
     result = {"ok": False, "current": VERSION, "repository": repository_name,
               "update_available": False, "checked_at": int(now)}
+    if edition() != "public":
+        result["error"] = "Full-edition updates are installed from the private release channel"
+        result["error_code"] = "update.error.private_channel"
+        _cache = (now, result)
+        return dict(result)
     try:
         selection = _network_selection()
         proxy = _proxy_url(selection)
