@@ -447,6 +447,7 @@ class Orchestrator:
         status_path = self.root / "update-status.json"
         version = str(request.get("version") or "")
         repository = str(request.get("repository") or "")
+        network = request.get("network") or {}
 
         def fail(reason: str):
             atomic_json(status_path, {"state": "failed", "phase": "launch", "error": reason,
@@ -455,6 +456,31 @@ class Orchestrator:
         if not re.fullmatch(r"\d+(?:\.\d+)*(?:-[0-9A-Za-z.]+)?", version) \
                 or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
             fail("invalid update request")
+            return
+        mode = str(network.get("proxy_mode") or "direct").lower()
+        proxy_url = ""
+        if mode == "manual":
+            proxy_url = str(network.get("proxy_url") or "").strip()
+            parsed = urllib.parse.urlsplit(proxy_url)
+            if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"} \
+                    or not parsed.hostname or any(ch in proxy_url for ch in "\r\n"):
+                fail("invalid update proxy configuration")
+                return
+        elif mode == "country":
+            country = str(network.get("proxy_country") or "").strip().lower()
+            state = (read_json(self.status_path).get("exits") or {}).get(country) or {}
+            try:
+                proxy_port = int(state.get("proxy_port") or 0)
+            except (TypeError, ValueError):
+                proxy_port = 0
+            proxy_host = str(state.get("proxy_host") or "").strip()
+            if not re.fullmatch(r"[a-z]{2}", country) or not state.get("ready") \
+                    or proxy_host != COUNTRY_PROXY_LISTEN or not 1 <= proxy_port <= 65535:
+                fail("selected update country exit is not ready")
+                return
+            proxy_url = f"socks5h://{proxy_host}:{proxy_port}"
+        elif mode != "direct":
+            fail("invalid update proxy mode")
             return
         if self.dry_run:
             fail("dry-run orchestrator does not apply updates")
@@ -465,6 +491,10 @@ class Orchestrator:
         try:
             runner.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             shutil.copy2(self.repo / "host" / "mdd_update.py", runner)
+            network_path = runner.parent / "network.json"
+            # Proxy credentials stay in a root-only file and never appear in systemd's command
+            # line, unit metadata, progress status or journal output.
+            atomic_json(network_path, {"proxy_url": proxy_url})
         except OSError as exc:
             fail(f"could not stage the updater: {exc}")
             return
@@ -475,7 +505,7 @@ class Orchestrator:
                       "--description", "MDD Sim Gateway self-update",
                       sys.executable, str(runner), "--repo", str(self.repo),
                       "--data", str(self.data), "--version", version,
-                      "--repository", repository])
+                      "--repository", repository, "--network-config", str(network_path)])
         if result.returncode != 0:
             fail(f"systemd-run failed: {(result.stderr or result.stdout or '').strip()}")
 

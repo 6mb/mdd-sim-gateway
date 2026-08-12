@@ -32,6 +32,8 @@ sudo ./install.sh install --mode docker   # 控制面也运行在 Docker
 
 发现新版本时，左下角版本号会出现红点。点击后确认“立即升级”即可一键更新：控制面把请求写入编排器目录，主机上的 `mdd-sim-gateway-orchestrator` 以独立的临时 systemd 单元（`mdd-sim-gateway-update`）运行 `host/mdd_update.py` —— 下载对应 `vX.Y.Z` 标签的源码包、校验其中的 `VERSION`、备份当前代码到数据目录 `backups/` 后覆盖安装，最后执行 `install.sh reload` 重建并重启服务。升级绝不会自动发生：只有管理员在界面中确认后才开始，且 `data/`、`.env`、`.git`、虚拟环境等安装状态全部保留。日志见 `journalctl -u mdd-sim-gateway-update` 与数据目录下 `update/reload.log`。
 
+“系统设置 → 备份与更新”可为版本检查和升级下载选择联网方式：默认直连、手动 HTTP/HTTPS/SOCKS5 代理，或复用已就绪的国家出口。选择 SOCKS5 时建议使用 `socks5h://`，使 DNS 解析也通过代理。手动代理凭据仅保存在主机权限为 `0600` 的配置/临时文件中，不写入 systemd 命令行或升级状态。一键升级会把同一代理环境传给 `install.sh reload`；Docker daemon 自身的镜像代理仍属于独立的主机配置。
+
 也可以随时在主机上手动更新：备份并用受信任来源更新源码后执行：
 
 ```bash

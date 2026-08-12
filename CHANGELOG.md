@@ -4,6 +4,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-08-12
+
+### Added
+
+- Added a software-update connection setting that remains direct by default and can instead
+  use a manual HTTP(S)/SOCKS5 proxy or an existing ready country exit. Release checks, source
+  archive downloads and the subsequent reload share the selection; proxy credentials stay out
+  of systemd command lines, update status and logs.
+
 ## [1.3.1] - 2026-08-12
 
 ### Added

@@ -9,14 +9,65 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
-import urllib.error
-import urllib.request
+from urllib.parse import urlsplit
+
+import requests
 
 from .version import VERSION
 
 DEFAULT_REPOSITORY = "MddIdd/mdd-sim-gateway"
 _cache: tuple[float, dict] | None = None
+
+
+class UpdateNetworkError(RuntimeError):
+    pass
+
+
+def validate_network_settings(value: dict | None) -> dict:
+    """Validate and normalize the persisted update networking selection."""
+    value = value or {}
+    mode = str(value.get("proxy_mode") or "direct").strip().lower()
+    if mode not in {"direct", "manual", "country"}:
+        raise UpdateNetworkError("update proxy mode must be direct, manual or country")
+    result = {"proxy_mode": mode, "proxy_url": "", "proxy_country": ""}
+    if mode == "manual":
+        proxy = str(value.get("proxy_url") or "").strip()
+        parsed = urlsplit(proxy)
+        if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"} \
+                or not parsed.hostname or any(ch in proxy for ch in "\r\n"):
+            raise UpdateNetworkError("update proxy must be an HTTP(S) or SOCKS5 URL")
+        result["proxy_url"] = proxy
+    elif mode == "country":
+        country = str(value.get("proxy_country") or "").strip().lower()
+        if not re.fullmatch(r"[a-z]{2}", country):
+            raise UpdateNetworkError("select a country exit for software updates")
+        result["proxy_country"] = country
+    return result
+
+
+def _network_selection() -> dict:
+    from . import config as cfg
+    return validate_network_settings(cfg.get_settings().get("updates"))
+
+
+def _proxy_url(selection: dict) -> str:
+    mode = selection["proxy_mode"]
+    if mode == "direct":
+        return ""
+    if mode == "manual":
+        return selection["proxy_url"]
+    from . import egress
+    state = (egress.status().get("exits") or {}).get(selection["proxy_country"]) or {}
+    try:
+        port = int(state.get("proxy_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    host = str(state.get("proxy_host") or "").strip()
+    if not state.get("ready") or not host or not 1 <= port <= 65535:
+        raise UpdateNetworkError("selected country exit is not ready")
+    return f"socks5h://{host}:{port}"
 
 
 def repository() -> str:
@@ -43,12 +94,18 @@ def check(force: bool = False) -> dict:
         "User-Agent": f"mdd-sim-gateway/{VERSION}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    request = urllib.request.Request(url, headers=headers)
     result = {"ok": False, "current": VERSION, "repository": repository_name,
               "update_available": False, "checked_at": int(now)}
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            payload = json.load(response)
+        selection = _network_selection()
+        proxy = _proxy_url(selection)
+        session = requests.Session()
+        session.trust_env = False  # "direct" must really mean direct, regardless of service env.
+        if proxy:
+            session.proxies.update({"http": proxy, "https": proxy})
+        response = session.get(url, headers=headers, timeout=12)
+        response.raise_for_status()
+        payload = response.json()
         latest = str(payload.get("tag_name") or "").removeprefix("v")
         result.update({
             "ok": bool(latest),
@@ -58,19 +115,23 @@ def check(force: bool = False) -> dict:
             "published_at": str(payload.get("published_at") or ""),
             "notes": str(payload.get("body") or "")[:4000],
         })
-    except urllib.error.HTTPError as exc:
-        if exc.code in {401, 404}:
+    except requests.HTTPError as exc:
+        code = exc.response.status_code if exc.response is not None else 0
+        if code in {401, 404}:
             # Private repositories are intentionally invisible to GitHub's unauthenticated API.
             # Once the repository and a release are public, no GitHub account/token is needed.
             result["error"] = "No public release is available yet"
             result["error_code"] = "update.error.no_public_release"
-        elif exc.code == 403:
+        elif code == 403:
             result["error"] = "GitHub update check was rate-limited"
             result["error_code"] = "update.error.rate_limited"
         else:
-            result["error"] = f"GitHub returned HTTP {exc.code}"
+            result["error"] = f"GitHub returned HTTP {code}"
             result["error_code"] = "update.error.github"
-    except (OSError, ValueError, TypeError) as exc:
+    except UpdateNetworkError as exc:
+        result["error"] = str(exc)
+        result["error_code"] = "update.error.proxy"
+    except (requests.RequestException, OSError, ValueError, TypeError) as exc:
         result["error"] = f"Update service unavailable: {type(exc).__name__}"
         result["error_code"] = "update.error.unavailable"
     _cache = (now, result)
@@ -128,10 +189,12 @@ def request_apply() -> dict:
                 "error_code": info.get("error_code") or "update.error.not_available"}
     request_path, status_path = _apply_paths()
     now = int(time.time())
+    network = _network_selection()
     # Reset the visible status first so a stale success/failure from a previous run cannot be
     # mistaken for this run's outcome while the orchestrator picks the request up.
     _write_private_json(status_path, {"state": "running", "phase": "requested",
                                       "target": info["latest"], "updated_at": now})
     _write_private_json(request_path, {"version": info["latest"], "repository": repository(),
-                                       "requested_at": now})
+                                       "requested_at": now,
+                                       "network": network})
     return {"ok": True, "version": info["latest"]}

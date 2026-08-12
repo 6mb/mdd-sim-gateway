@@ -3276,6 +3276,11 @@ def api_put_settings(body: dict):
             raise HTTPException(400, "PushPlus token is required")
         if str(pushplus.get("template") or "html") not in {"html", "txt", "markdown", "json"}:
             raise HTTPException(400, "unsupported PushPlus template")
+    if "updates" in body:
+        try:
+            body["updates"] = update_check.validate_network_settings(body.get("updates"))
+        except update_check.UpdateNetworkError as exc:
+            raise HTTPException(400, str(exc)) from exc
     saved = cfg.update_settings(body)
     if defaults is not None:
         device_state.set_defaults(**defaults)
