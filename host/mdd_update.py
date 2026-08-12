@@ -16,6 +16,7 @@ Stdlib only (it runs before any requirements are reinstalled). Progress is publi
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -130,6 +131,24 @@ def download(url: str, destination: Path, env: dict[str, str], proxy_url: str = 
         raise UpdateError(f"release download failed: {tail}")
 
 
+def verify_release_archive(archive: Path, sums: Path):
+    expected = ""
+    for line in sums.read_text(encoding="utf-8").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[1].lstrip("*") == archive.name \
+                and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+            expected = parts[0].lower()
+            break
+    if not expected:
+        raise UpdateError("release checksum file does not name the update archive")
+    digest = hashlib.sha256()
+    with open(archive, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise UpdateError("release archive checksum mismatch")
+
+
 def extract(archive: Path, destination: Path) -> Path:
     """Unpack the GitHub source tarball and return its single top-level directory."""
     with tarfile.open(archive, "r:gz") as tar:
@@ -182,12 +201,19 @@ def apply_tree(source_root: Path, repo: Path):
                     continue
                 shutil.rmtree(child) if child.is_dir() else child.unlink()
             for child in entry.iterdir():
-                if child.name in preserved:
+                release_dist = child.name == "dist" and \
+                    (child / ".mdd-release-version").is_file()
+                if child.name in preserved and not release_dist:
                     continue
+                child_target = target / child.name
+                if child_target.is_dir():
+                    shutil.rmtree(child_target)
+                elif child_target.exists() or child_target.is_symlink():
+                    child_target.unlink()
                 if child.is_dir():
-                    shutil.copytree(child, target / child.name, symlinks=True)
+                    shutil.copytree(child, child_target, symlinks=True)
                 else:
-                    shutil.copy2(child, target / child.name)
+                    shutil.copy2(child, child_target)
         else:
             if target.is_dir():
                 shutil.rmtree(target)
@@ -206,17 +232,33 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
     env = network_environment(proxy_url)
     staging = Path(tempfile.mkdtemp(prefix="mdd-update.", dir=str(data / "update")))
     try:
-        url = f"https://github.com/{repo_name}/archive/refs/tags/v{version}.tar.gz"
+        archive_name = f"mdd-sim-gateway-v{version}.tar.gz"
+        base = f"https://github.com/{repo_name}/releases/download/v{version}"
+        url = f"{base}/{archive_name}"
         status.publish("running", "downloading", url=url)
-        archive = staging / "release.tar.gz"
+        archive = staging / archive_name
+        sums = staging / "SHA256SUMS"
         download(url, archive, env, proxy_url)
+        download(f"{base}/SHA256SUMS", sums, env, proxy_url)
 
         status.publish("running", "verifying")
+        verify_release_archive(archive, sums)
         source_root = extract(archive, staging / "tree")
         version_file = source_root / "VERSION"
         packaged = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else ""
         if packaged != version:
             raise UpdateError(f"release archive reports version {packaged!r}, expected {version!r}")
+        current_edition = (repo / "EDITION").read_text(encoding="utf-8").strip()
+        packaged_edition = (source_root / "EDITION").read_text(encoding="utf-8").strip()
+        if current_edition not in {"full", "public"} or packaged_edition != current_edition:
+            raise UpdateError(
+                f"release edition {packaged_edition!r} does not match installed edition "
+                f"{current_edition!r}")
+        release_dist = source_root / "webui" / "dist"
+        dist_version = (release_dist / ".mdd-release-version").read_text(
+            encoding="utf-8").strip() if release_dist.is_dir() else ""
+        if dist_version != version or not (release_dist / "index.html").is_file():
+            raise UpdateError("release archive has no matching prebuilt WebUI")
 
         status.publish("running", "backup")
         try:
@@ -233,7 +275,8 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         status.publish("running", "reloading")
         log_path = data / "update" / "reload.log"
         with open(log_path, "w", encoding="utf-8") as log:
-            result = subprocess.run(["sh", str(repo / "install.sh"), "reload"],
+            env["MDD_REUSE_WEBUI"] = "1"
+            result = subprocess.run(["sh", str(repo / "install.sh"), "reload", "--no-engines"],
                                     cwd=str(repo), env=env, stdout=log,
                                     stderr=subprocess.STDOUT)
         redact_log(log_path, proxy_url)

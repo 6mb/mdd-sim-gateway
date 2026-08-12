@@ -1,5 +1,6 @@
 """One-click self-update: control-plane request publishing + host updater file handling."""
 import importlib.util
+import hashlib
 import json
 import os
 import tempfile
@@ -73,6 +74,18 @@ class RequestApplyTests(unittest.TestCase):
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_release_archive_checksum_is_required_and_verified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp, "mdd-sim-gateway-v9.9.9.tar.gz")
+            archive.write_bytes(b"release")
+            digest = hashlib.sha256(b"release").hexdigest()
+            sums = Path(tmp, "SHA256SUMS")
+            sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+            mdd_update.verify_release_archive(archive, sums)
+            archive.write_bytes(b"changed")
+            with self.assertRaises(mdd_update.UpdateError):
+                mdd_update.verify_release_archive(archive, sums)
+
     def test_proxy_environment_is_explicit_and_not_added_to_curl_arguments(self):
         proxy = "socks5h://user:secret@127.0.0.1:1080"
         env = mdd_update.network_environment(proxy)
@@ -114,6 +127,18 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((repo / "control/app/new.py").read_text(encoding="utf-8"), "new")
             self.assertFalse((repo / "control/app/stale.py").exists(),
                              "files removed upstream must not linger in managed directories")
+
+    def test_apply_tree_replaces_only_marked_release_dist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, source = Path(tmp, "repo"), Path(tmp, "source")
+            (repo / "webui/dist").mkdir(parents=True)
+            (repo / "webui/dist/index.html").write_text("old", encoding="utf-8")
+            (source / "webui/dist").mkdir(parents=True)
+            (source / "webui/dist/index.html").write_text("new", encoding="utf-8")
+            (source / "webui/dist/.mdd-release-version").write_text(
+                "9.9.9\n", encoding="utf-8")
+            mdd_update.apply_tree(source, repo)
+            self.assertEqual((repo / "webui/dist/index.html").read_text(), "new")
 
     def test_perform_rejects_malformed_version_and_repository(self):
         with tempfile.TemporaryDirectory() as tmp:

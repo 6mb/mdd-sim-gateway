@@ -4,7 +4,7 @@
 
 MDD Sim Gateway 是面向自托管设备的多 SIM 通信网关。它把蜂窝模块、USB 读卡器、4G 数据、Wi‑Fi Calling、通话、短信、eSIM 与国家代理出口整合到一个中英文 Web 控制台中。
 
-当前版本：**1.3.2** · [English](README.en.md)
+当前版本：**1.3.3** · [English](README.en.md)
 
 > 本项目直接控制蜂窝模块、SIM、网络路由和 IMS。请只在你拥有或获准管理的设备及号码上使用；运营商是否开放 Wi‑Fi Calling 仍取决于套餐、区域、设备身份和网络策略。
 

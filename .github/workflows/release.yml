@@ -40,7 +40,14 @@ jobs:
       - name: Build checksummed source archive
         run: |
           archive="mdd-sim-gateway-${GITHUB_REF_NAME}.tar.gz"
-          git archive --format=tar.gz --prefix="mdd-sim-gateway-${GITHUB_REF_NAME}/" -o "$archive" HEAD
+          staging="$(mktemp -d)"
+          root="$staging/mdd-sim-gateway-${GITHUB_REF_NAME}"
+          mkdir -p "$root"
+          git archive HEAD | tar -x -C "$root"
+          rm -rf "$root/webui/dist"
+          cp -a webui/dist "$root/webui/dist"
+          printf '%s\n' "$(cat VERSION)" > "$root/webui/dist/.mdd-release-version"
+          tar -czf "$archive" -C "$staging" "mdd-sim-gateway-${GITHUB_REF_NAME}"
           sha256sum "$archive" > SHA256SUMS
       - name: Publish GitHub Release
         env:

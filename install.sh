@@ -20,7 +20,7 @@
 #
 # Usage:
 #   sudo ./install.sh install [--mode local|docker]   # full install (default mode: local)
-#   sudo ./install.sh reload  [--mode local|docker] [--no-cache] [--engines]
+#   sudo ./install.sh reload  [--mode local|docker] [--no-cache] [--engines|--no-engines]
 #   sudo ./install.sh build-lpac [--lpac-src PATH] [--dest DIR]   # local eSIM LPA (lpac)
 #   sudo ./install.sh enable-autostart | disable-autostart
 #   sudo ./install.sh uninstall [--purge]             # --purge also deletes ./data (+ venv)
@@ -624,6 +624,16 @@ build_webui_local() {
     info "reusing reviewed prebuilt WebUI at $WEBUI_DIST"
     return
   fi
+  # v1.3.3 bootstrap: v1.3.2's updater downloads GitHub's tag archive, which cannot contain
+  # ignored CI artifacts. Reuse the already-installed dist only when every file matches the
+  # reviewed manifest committed with this release. Newer updaters install a checksummed Release
+  # asset and set MDD_REUSE_WEBUI=1 explicitly, so this is not a trust-on-first-use shortcut.
+  webui_manifest="$REPO_DIR/webui/release-dist.SHA256SUMS"
+  if [ -f "$webui_manifest" ] && [ -f "$WEBUI_DIST/index.html" ] && have sha256sum && \
+      (cd "$REPO_DIR/webui" && sha256sum -c "$(basename -- "$webui_manifest")" >/dev/null 2>&1); then
+    info "reusing WebUI verified by the release manifest at $WEBUI_DIST"
+    return
+  fi
   info "building WebUI (webui/dist) via a pinned throwaway Node container (no host Node needed)…"
   docker run --rm -v "$REPO_DIR/webui":/host-webui "$WEBUI_BUILD_IMAGE" sh -euc '
     cp -a /host-webui /build && cd /build && rm -rf node_modules dist
@@ -860,7 +870,15 @@ cmd_reload() {
   need_root
   resolve_mode
   RECREATE_ENGINES=0
-  for a in $ARGS; do [ "$a" = "--engines" ] && RECREATE_ENGINES=1; done
+  PRESERVE_ENGINES=0
+  for a in $ARGS; do
+    [ "$a" = "--engines" ] && RECREATE_ENGINES=1
+    [ "$a" = "--no-engines" ] && PRESERVE_ENGINES=1
+  done
+  [ "$RECREATE_ENGINES" = 1 ] && [ "$PRESERVE_ENGINES" = 1 ] && \
+    die "--engines and --no-engines cannot be used together"
+  [ "$PRESERVE_ENGINES" = 1 ] && [ -n "$NOCACHE_FLAG" ] && \
+    die "--no-cache and --no-engines cannot be used together"
   info "reload (mode: $MODE)"
   # Engine image: ensure_engine_image compares the checkout against the image's fingerprints and
   # picks reuse / script-overlay / full rebuild by itself. --engines and --no-cache force the
@@ -869,7 +887,11 @@ cmd_reload() {
   docker_preflight
   ensure_singbox
   ensure_cellular_tools
-  if [ "$RECREATE_ENGINES" = 1 ] || [ -n "$NOCACHE_FLAG" ]; then
+  if [ "$PRESERVE_ENGINES" = 1 ]; then
+    docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 || \
+      die "--no-engines requires the existing engine image $ENGINE_IMAGE"
+    info "preserving the installed engine image (--no-engines)"
+  elif [ "$RECREATE_ENGINES" = 1 ] || [ -n "$NOCACHE_FLAG" ]; then
     ensure_engine_image force
   else
     ensure_engine_image
