@@ -170,7 +170,7 @@ def build_context(cfg):
         # carrier P-CSCF augments this; a bogus value can make some SMSCs reject MO SMS.
         "pani": (sip.get("pani") or r"IEEE-802.11\;i-wlan-node-id=ffffffffffff"),
         "access_type": (sip.get("access_type") or ""),
-        # Public edition uses a transparent product identity rather than impersonating a phone.
+        # Use a transparent product identity rather than impersonating a phone.
         "user_agent": "MDD-Sim-Gateway",
         "user_eq_phone": bool(sip.get("user_eq_phone", False)),
         # SDP identity (s=/o= lines) — Asterisk defaults s=Asterisk which fingerprints it.

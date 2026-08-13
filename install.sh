@@ -843,6 +843,9 @@ run_control() {
 # ------------------------------------------------------------------ subcommands
 cmd_install() {
   need_root
+  # Release assets carry this one-transition marker only so v1.3.4 can hand off safely.
+  # It is not product configuration and must not remain in the installed source tree.
+  rm -f "$REPO_DIR/EDITION"
   resolve_mode
   info "MDD Sim Gateway install — repo: $REPO_DIR  (mode: ${B}$MODE${N})"
   # The engine image compiles Asterisk + pcsc-lite + the Python SWu tunnel deps from source. On
@@ -895,6 +898,8 @@ cmd_install() {
 
 cmd_reload() {
   need_root
+  # See cmd_install: remove the compatibility marker after the old updater applies the archive.
+  rm -f "$REPO_DIR/EDITION"
   resolve_mode
   RECREATE_ENGINES=0
   PRESERVE_ENGINES=0

@@ -47,6 +47,11 @@ jobs:
           rm -rf "$root/webui/dist"
           cp -a webui/dist "$root/webui/dist"
           printf '%s\n' "$(cat VERSION)" > "$root/webui/dist/.mdd-release-version"
+          # v1.3.4's updater requires this legacy channel marker before it will apply an
+          # archive. Generate it only for the hand-off release; the new installer removes it.
+          if [ "$(cat VERSION)" = "1.3.5" ]; then
+            printf '%s\n' public > "$root/EDITION"
+          fi
           tar -czf "$archive" -C "$staging" "mdd-sim-gateway-${GITHUB_REF_NAME}"
           sha256sum "$archive" > SHA256SUMS
       - name: Publish GitHub Release

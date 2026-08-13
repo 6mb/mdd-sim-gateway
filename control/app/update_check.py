@@ -21,14 +21,6 @@ DEFAULT_REPOSITORY = "MddIdd/mdd-sim-gateway"
 _cache: tuple[float, dict] | None = None
 
 
-def edition() -> str:
-    try:
-        return open(os.path.join(os.path.dirname(__file__), "..", "..", "EDITION"),
-                    encoding="utf-8").read().strip()
-    except OSError:
-        return "full"
-
-
 class UpdateNetworkError(RuntimeError):
     pass
 
@@ -104,11 +96,6 @@ def check(force: bool = False) -> dict:
     }
     result = {"ok": False, "current": VERSION, "repository": repository_name,
               "update_available": False, "checked_at": int(now)}
-    if edition() != "public":
-        result["error"] = "Full-edition updates are installed from the private release channel"
-        result["error_code"] = "update.error.private_channel"
-        _cache = (now, result)
-        return dict(result)
     try:
         selection = _network_selection()
         proxy = _proxy_url(selection)
@@ -131,10 +118,9 @@ def check(force: bool = False) -> dict:
     except requests.HTTPError as exc:
         code = exc.response.status_code if exc.response is not None else 0
         if code in {401, 404}:
-            # Private repositories are intentionally invisible to GitHub's unauthenticated API.
-            # Once the repository and a release are public, no GitHub account/token is needed.
-            result["error"] = "No public release is available yet"
-            result["error_code"] = "update.error.no_public_release"
+            # Release checks are intentionally unauthenticated and never send a GitHub token.
+            result["error"] = "No release is available from the configured repository"
+            result["error_code"] = "update.error.no_release"
         elif code == 403:
             result["error"] = "GitHub update check was rate-limited"
             result["error_code"] = "update.error.rate_limited"

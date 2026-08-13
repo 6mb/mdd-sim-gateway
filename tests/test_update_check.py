@@ -25,9 +25,6 @@ class UpdateCheckTests(unittest.TestCase):
             "proxy_mode": "direct", "proxy_url": "", "proxy_country": ""})
         direct.start()
         self.addCleanup(direct.stop)
-        public = patch.object(update_check, "edition", return_value="public")
-        public.start()
-        self.addCleanup(public.stop)
 
     def test_newer_release_is_reported_without_applying_it(self):
         newer = list(update_check._version_tuple(update_check.VERSION))
@@ -56,7 +53,7 @@ class UpdateCheckTests(unittest.TestCase):
         with patch.dict("os.environ", {"MDD_UPDATE_REPOSITORY": "example/private"}):
             self.assertEqual(update_check.repository(), "example/private")
 
-    def test_public_release_request_never_sends_a_github_token(self):
+    def test_release_request_never_sends_a_github_token(self):
         payload = {"tag_name": "v1.0.0"}
         captured = {}
 
@@ -73,7 +70,7 @@ class UpdateCheckTests(unittest.TestCase):
         with patch("control.app.update_check.requests.Session.get",
                    return_value=_Response({}, 401)):
             result = update_check.check(True)
-        self.assertEqual(result["error_code"], "update.error.no_public_release")
+        self.assertEqual(result["error_code"], "update.error.no_release")
         self.assertNotIn("auth", result["error"].lower())
 
     def test_country_exit_is_used_as_socks_proxy(self):
@@ -88,14 +85,6 @@ class UpdateCheckTests(unittest.TestCase):
             update_check.check(True)
         self.assertFalse(session.trust_env)
         self.assertEqual(session.proxies["https"], "socks5h://172.17.0.1:22538")
-
-    def test_full_edition_refuses_the_public_release_channel(self):
-        with patch.object(update_check, "edition", return_value="full"), \
-                patch("control.app.update_check.requests.Session.get") as get:
-            result = update_check.check(True)
-        self.assertEqual(result["error_code"], "update.error.private_channel")
-        get.assert_not_called()
-
 
 if __name__ == "__main__":
     unittest.main()

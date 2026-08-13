@@ -344,7 +344,7 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
         volumes[os.path.join(eng, "entrypoint.sh")] = {"bind": "/entrypoint.sh", "mode": "ro"}
         volumes[os.path.join(eng, "templates")] = {"bind": "/opt/mdd-sim-gateway/templates", "mode": "ro"}
 
-    # Public edition: expose only the authenticated browser softphone transport. Standalone
+    # Expose only the authenticated browser softphone transport. Standalone
     # SIP UDP/TCP/TLS listeners are not published to the host.
     port_bindings = {f"{8089}/tcp": ports.get("webrtc", 8089)}
     # AMI grants system/command/originate. The manager dials the container bridge directly, so a

@@ -24,10 +24,10 @@ DATA_DIR = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
 CONFIG_PATH = os.path.join(DATA_DIR, "config.yaml")
 _lock = threading.RLock()
 
-# Public-edition compliance boundary. This is intentionally a source-level limit rather than
-# an environment variable: operators must not be able to turn the public build into a bulk-SIM
-# gateway by changing deployment configuration.
-PUBLIC_MAX_SIM_LINES = 5
+# Product safety boundary. This is intentionally a source-level limit rather than an environment
+# variable: operators must not be able to turn the gateway into a bulk-SIM service by changing
+# deployment configuration.
+MAX_SIM_LINES = 5
 
 
 class LineLimitError(ValueError):
@@ -265,9 +265,8 @@ def load() -> dict:
             merged["events"] = {**DEFAULTS["settings"][key]["events"],
                                 **(saved.get("events", {}) or {})}
             out["settings"][key] = merged
-        # The public edition supports outbound Telegram notifications only. Drop command
-        # settings left by an older/self-use configuration so an upgrade cannot preserve a
-        # remote call/SMS control channel.
+        # Telegram is notification-only. Drop command settings left by an older configuration
+        # so an upgrade cannot preserve a remote call/SMS control channel.
         out["settings"]["telegram"].pop("commands", None)
         # One private deployment previously appeared as a product-level "Universal Push"
         # preset. Present it as the ordinary custom webhook it really is, preserving its URL,
@@ -349,7 +348,7 @@ def load() -> dict:
         for inst in out["instances"].values():
             inst["debug"] = {**(inst.get("debug") or {}), "asterisk": False}
             # Browser WebRTC remains available through the authenticated Web UI, but the
-            # public edition never provisions standalone SIP accounts.
+            # the product never provisions standalone SIP accounts.
             (inst.setdefault("sip", {}))["external"] = []
         out["internal"] = data.get("internal", {})
         return out
@@ -588,9 +587,9 @@ def _upsert_instance_locked(inst: dict, unique_name: bool = False) -> dict:
     # instances with a computed `status` and `has_pin`); never persist them to config.
     inst = {k: v for k, v in inst.items() if k not in ("status", "has_pin")}
     existing = data["instances"].get(iid, {})
-    if not existing and len(data["instances"]) >= PUBLIC_MAX_SIM_LINES:
+    if not existing and len(data["instances"]) >= MAX_SIM_LINES:
         raise LineLimitError(
-            f"the public edition supports at most {PUBLIC_MAX_SIM_LINES} SIM lines")
+            f"MDD Sim Gateway supports at most {MAX_SIM_LINES} SIM lines")
     if "index" not in existing:
         inst["index"] = next_index(data)
     else:
@@ -637,8 +636,8 @@ def _upsert_instance_locked(inst: dict, unique_name: bool = False) -> dict:
     return merged
 
 
-def public_line_allowed(iid: str) -> bool:
-    """Whether a saved line is inside the public edition's deterministic five-line set.
+def line_allowed(iid: str) -> bool:
+    """Whether a saved line is inside the product's deterministic five-line set.
 
     Old/self-use installations may already contain more than five records. Keep their data so
     an upgrade is non-destructive, but prevent every engine start path from using line six and
@@ -652,7 +651,7 @@ def public_line_allowed(iid: str) -> bool:
         return index, str(item.get("id") or "")
 
     allowed = {str(item.get("id")) for item in
-               sorted(list_instances(), key=order)[:PUBLIC_MAX_SIM_LINES]}
+               sorted(list_instances(), key=order)[:MAX_SIM_LINES]}
     return str(iid) in allowed
 
 

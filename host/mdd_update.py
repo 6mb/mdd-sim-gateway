@@ -248,12 +248,6 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         packaged = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else ""
         if packaged != version:
             raise UpdateError(f"release archive reports version {packaged!r}, expected {version!r}")
-        current_edition = (repo / "EDITION").read_text(encoding="utf-8").strip()
-        packaged_edition = (source_root / "EDITION").read_text(encoding="utf-8").strip()
-        if current_edition not in {"full", "public"} or packaged_edition != current_edition:
-            raise UpdateError(
-                f"release edition {packaged_edition!r} does not match installed edition "
-                f"{current_edition!r}")
         release_dist = source_root / "webui" / "dist"
         dist_version = (release_dist / ".mdd-release-version").read_text(
             encoding="utf-8").strip() if release_dist.is_dir() else ""

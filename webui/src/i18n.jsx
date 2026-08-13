@@ -3,7 +3,6 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
-  'update.error.no_public_release': '当前还没有公开发布的版本',
   'update.error.proxy': '升级代理未配置或所选国家出口尚未就绪',
   Dashboard: '仪表盘', Softphone: '软电话', Messages: '短信', 'SIM Config': 'SIM 配置',
   Settings: '设置', Logs: '日志', Language: '语言', English: 'English', Chinese: '中文',
@@ -224,7 +223,7 @@ const zh = {
   Enable: '启用', Disable: '禁用', 'Delete profile {iccid}?': '确定删除配置文件 {iccid}？', Notifications: '通知', 'Process all': '全部处理',
   'Click Load to list notifications.': '点击“读取”列出通知。', 'No pending notifications.': '没有待处理通知。', 'No notifications to show.': '没有可显示的通知。',
   Overview: '概览', Devices: '设备', 'Network exits': '网络出口', 'System settings': '系统设置', Diagnostics: '诊断', '4G + VoWiFi unified': '4G 与 VoWiFi 一体化', device: '个设备', devices: '个设备', 'Close menu': '关闭菜单', 'Live device control': '实时设备控制', 'Compatibility view': '兼容视图',
-  'Public edition compliance warning': '合规警告：公开版仅限号码实名持有人自用，最多 5 条 SIM 线路。严禁诈骗、群呼、骚扰、验证码接收、出租线路、代拨转接或向第三人提供电信服务；使用者须遵守所在地法律与运营商协议。',
+  'Responsible use notice': '合规提示：仅限号码实名持有人在运营商允许的范围内自用，最多 5 条 SIM 线路。严禁诈骗、群呼、骚扰、验证码接收、出租线路、代拨转接或向第三人提供电信服务；使用者须遵守所在地法律与运营商协议。',
   'page.overview.subtitle': '所有模块、SIM 和通信能力的实时状态', 'page.devices.subtitle': '按物理模块管理 4G、VoWiFi、SIM 和硬件', 'page.calls.subtitle': '统一拨号、来电控制和通话记录', 'page.messages.subtitle': '跨模块查看、发送和管理短信', 'page.esim.subtitle': '管理 eUICC 配置文件与下载任务', 'page.egress.subtitle': '为每个 SIM 提供经过 UDP 验证的国家出口', 'page.notifications.subtitle': '配置 Webhook、Telegram、PushPlus 和投递状态', 'page.settings.subtitle': '常规、Web、通话、安全、备份和维护', 'page.diagnostics.subtitle': '健康检查、实时日志和脱敏支持包',
   '4G online': '4G 在线', 'VoWiFi online': 'VoWiFi 在线', 'Needs attention': '需处理', 'No communication devices found': '未发现通信设备', 'Connect a modem or smart-card reader. Discovery updates automatically.': '请连接蜂窝模块或智能卡读卡器，系统会自动发现。',
   '4G network': '4G 网络', 'Flight mode': '飞行模式', 'VoWiFi / WiFi Calling': 'VoWiFi / WiFi Calling', 'Changing 4G rebuilds SIM access. VoWiFi may reconnect for 20–60 seconds. Continue?': '切换 4G 会重建 SIM 访问通道，VoWiFi 可能中断 20–60 秒后自动恢复。是否继续？', '{action} {name}? The UI will wait for the real device state.': '{action}{name}？界面会等待设备返回真实状态。', 'Request accepted; waiting for device state': '请求已接受，正在等待设备状态', 'Capability change failed': '能力切换失败', 'Unified device control is not available on this backend': '当前后端尚未提供统一设备控制接口', 'Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.': '蜂窝数据、飞行模式和 VoWiFi 可独立控制。飞行模式会关闭模块射频；4G 开关只连接或断开移动数据。', 'Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.': '软件支持表示系统已实现相应技术路径；实际可用性仍取决于 SIM 套餐、运营商、所在区域、模块固件及设备身份策略。', 'Flight mode is enabled': '飞行模式已开启', 'New version available: v{version}': '发现新版本：v{version}', 'Release notes': '更新说明',
@@ -369,7 +368,7 @@ const zh = {
 }
 
 const en = {
-  'Public edition compliance warning': 'Compliance warning: the public edition is for use only by the verified subscriber, with at most five SIM lines. No fraud, bulk or nuisance calling, verification-code collection, line rental, third-party call forwarding, or telecommunications service for others. Follow local law and carrier terms.',
+  'Responsible use notice': 'Compliance notice: for use only by the verified subscriber where the carrier permits it, with at most five SIM lines. No fraud, bulk or nuisance calling, verification-code collection, line rental, third-party call forwarding, or telecommunications service for others. Follow local law and carrier terms.',
   'page.overview.subtitle': 'Live status of every modem, SIM and communication capability',
   'page.devices.subtitle': 'Manage 4G, VoWiFi, SIM and hardware by physical device',
   'page.calls.subtitle': 'Unified dialer, incoming call controls and call history',
@@ -386,8 +385,7 @@ const en = {
   'cap.help.degraded': 'Some functions are impaired; review the reason',
   'cap.help.error': 'Startup failed; review the reason', 'cap.help.unsupported': 'Unsupported by this device or backend',
   'channel.status.allocating': 'Allocating', 'channel.status.ready': 'Ready', 'channel.status.error': 'Allocation failed', 'channel.status.stopped': 'Not allocated', 'channel.role.pin': 'PIN keeper', 'channel.role.swu': 'VoWiFi / EAP-AKA', 'channel.role.ims': 'IMS / Asterisk',
-  'update.error.no_release': 'No published release is available yet',
-  'update.error.no_public_release': 'No public release is available yet',
+  'update.error.no_release': 'No release is available yet',
   'update.error.rate_limited': 'GitHub temporarily rate-limited update checks; try again later',
   'update.error.github': 'The GitHub update service returned an error',
   'update.error.unavailable': 'The update service is temporarily unavailable',
