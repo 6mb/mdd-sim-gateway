@@ -1,36 +1,61 @@
-# MDD Sim Gateway
+<p align="center">
+  <img src="assets/logo-lockup.svg" width="520" alt="MDD Sim Gateway">
+</p>
 
-![MDD Sim Gateway](assets/logo-lockup.svg)
+<p align="center"><strong>Turn physical SIMs and eSIMs into a self-hosted gateway for VoWiFi, calls, SMS and isolated network egress.</strong></p>
 
-MDD Sim Gateway is a self-hosted multi-SIM communications gateway. It brings cellular
-modems, USB smart-card readers, 4G data, Wi-Fi Calling, voice, SMS, eSIM management and
-country-specific proxy exits into one bilingual Web console.
+<p align="center">
+  <a href="README.md">中文</a> ·
+  <a href="#quick-install">Quick install</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/INSTALL.md">Installation</a> ·
+  <a href="https://github.com/MddIdd/mdd-sim-gateway/discussions">Discussions</a>
+</p>
 
-Current version: **1.3.4** · [中文](README.md)
+MDD Sim Gateway is a self-hosted multi-SIM communications gateway for Debian, Ubuntu and Armbian ARM64 hosts. It brings cellular modems, USB smart-card readers, IMS, EAP-AKA, eSIM, ModemManager and sing-box into one bilingual Web console.
 
-> **Compliance warning (public edition):** This software is only for use by the verified subscriber of a number where the carrier expressly permits that use. Do not use it for fraud, bulk or nuisance calling, marketing, verification-code collection, renting numbers or lines, call forwarding for others, concealing the controller's location, or providing telecommunications services to third parties. Users must follow local law, subscriber identity rules, and carrier terms. This project grants no telecom licence or carrier authorisation. The public edition stores and runs at most **five SIM lines** and provides neither standalone SIP accounts nor Telegram commands for calls, SMS, or hangup. Technical restrictions do not make any particular use lawful.
+| Real SIM authentication | Calls and SMS | Multi-modem control | Isolated country exits |
+|---|---|---|---|
+| Perform EAP-AKA and IMS-AKA inside a physical SIM/eSIM without reading Ki/OP/OPc | Browser softphone, SMS, call history and incoming notifications | Manage cellular modems, PC/SC readers and eUICCs in one console | Route each SIM's ePDG through its own country TUN and fail closed when UDP checks fail |
 
-> This software directly controls cellular radios, SIMs, network routes and IMS. Use it only
-> with devices and numbers you own or are authorized to manage. Carrier support for Wi-Fi
-> Calling still depends on the plan, region, device identity and network policy.
+## Interface tour
 
-### Interface preview
+![MDD Sim Gateway English interface tour (fictional demo data)](assets/product-tour.gif)
 
-#### Overview
+<p align="center">Overview → device management → browser calling → messages · All identities and content shown are fictional demo data</p>
+
+## Quick install
+
+Use an ARM64 Debian, Ubuntu or Armbian host with systemd, Docker, USB and a stable network connection.
+
+```bash
+git clone https://github.com/MddIdd/mdd-sim-gateway.git
+cd mdd-sim-gateway
+sudo ./install.sh install
+```
+
+When installation completes, open `https://<gateway-address>:8443` and create the administrator account immediately on a trusted LAN or VPN. See [Installation](docs/INSTALL.md) for prerequisites, the full install process and upgrades.
+
+> This software directly controls cellular radios, SIMs, network routes and IMS. Carrier support for Wi-Fi Calling still depends on the plan, region, device identity and network policy.
+
+## Architecture
+
+![MDD Sim Gateway architecture](docs/architecture.svg)
+
+## Full screenshots
+
+<details>
+<summary>View the Overview, Devices, Calls and Messages screens</summary>
 
 ![MDD Sim Gateway English overview (fictional demo data)](screenshots/overview-redacted.en.png)
 
-#### Devices
-
 ![MDD Sim Gateway English devices page (fictional demo data)](screenshots/devices-redacted.en.png)
-
-#### Calls
 
 ![MDD Sim Gateway English calls page (fictional demo data)](screenshots/calls-redacted.en.png)
 
-#### Messages
-
 ![MDD Sim Gateway English messages page (fictional demo data)](screenshots/messages-redacted.en.png)
+
+</details>
 
 ## Capabilities
 
@@ -60,26 +85,13 @@ The Santi Electronics SCR Prime has been verified on physical hardware. Support 
 describes the implemented path; it does not guarantee that every SIM, firmware build or carrier
 will permit the service.
 
-## Install
-
-The recommended target is an ARM64 Debian, Ubuntu or Armbian host with systemd, Docker, USB,
-TUN support and a stable network connection.
-
-```bash
-git clone https://github.com/MddIdd/mdd-sim-gateway.git
-cd mdd-sim-gateway
-sudo ./install.sh install
-```
+## What the installer does
 
 The installer reuses a working system Docker daemon, or installs the distribution package when
 Docker is absent. It provisions pcscd, ModemManager/NetworkManager, checksummed sing-box and
 Xray-core, a pinned
 lpac source build, the Web console and the per-SIM VoWiFi engine. It does not prune Docker or
 modify unrelated containers.
-
-Open `https://<gateway-address>:8443` and create the administrator account immediately while the
-gateway is on a trusted LAN or VPN. Until first-run setup is complete, another client that can
-reach the management port could claim the initial administrator account.
 
 Common commands:
 
@@ -93,6 +105,18 @@ sudo ./install.sh uninstall
 
 See [installation](docs/INSTALL.md), [architecture](docs/ARCHITECTURE.md),
 [troubleshooting](docs/TROUBLESHOOTING.md) and [security](SECURITY.md) for details.
+
+## Responsible use
+
+> **Compliance warning (public edition):** This software is only for use by the verified subscriber of a number where the carrier expressly permits that use. Do not use it for fraud, bulk or nuisance calling, marketing, verification-code collection, renting numbers or lines, call forwarding for others, concealing the controller's location, or providing telecommunications services to third parties. Users must follow local law, subscriber identity rules, and carrier terms. This project grants no telecom licence or carrier authorisation. The public edition stores and runs at most **five SIM lines** and provides neither standalone SIP accounts nor Telegram commands for calls, SMS, or hangup. Technical restrictions do not make any particular use lawful.
+
+## Community and feedback
+
+- Installation, hardware and carrier compatibility: [GitHub Discussions](https://github.com/MddIdd/mdd-sim-gateway/discussions)
+- Reproducible defects and concrete feature requests: [GitHub Issues](https://github.com/MddIdd/mdd-sim-gateway/issues/new/choose)
+- Code and documentation contributions: [CONTRIBUTING.md](CONTRIBUTING.md)
+
+If the project is useful to you, save it on GitHub and share a redacted hardware or carrier compatibility result.
 
 ## Country exits
 
