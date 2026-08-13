@@ -6,7 +6,7 @@ from unittest.mock import patch
 from control.app import config
 
 
-class PublicEditionTests(unittest.TestCase):
+class ProductBoundaryTests(unittest.TestCase):
     def temp_config(self):
         temp = tempfile.TemporaryDirectory()
         paths = patch.multiple(
@@ -19,7 +19,7 @@ class PublicEditionTests(unittest.TestCase):
     def test_sixth_sim_line_is_refused_but_existing_lines_remain_editable(self):
         temp, paths = self.temp_config()
         with temp, paths:
-            for iid in range(1, config.PUBLIC_MAX_SIM_LINES + 1):
+            for iid in range(1, config.MAX_SIM_LINES + 1):
                 config.upsert_instance({"id": str(iid), "name": f"SIM {iid}"})
             with self.assertRaises(config.LineLimitError):
                 config.upsert_instance({"id": "6", "name": "SIM 6"})
@@ -49,8 +49,8 @@ class PublicEditionTests(unittest.TestCase):
                 str(iid): {"id": str(iid), "index": iid}
                 for iid in range(1, 8)
             }})
-            self.assertTrue(config.public_line_allowed("5"))
-            self.assertFalse(config.public_line_allowed("6"))
+            self.assertTrue(config.line_allowed("5"))
+            self.assertFalse(config.line_allowed("6"))
 
 
 if __name__ == "__main__":

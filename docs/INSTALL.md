@@ -24,16 +24,16 @@ sudo ./install.sh install --mode docker   # 控制面也运行在 Docker
 
 如果系统 Docker 已经可以连接，安装脚本只复用它，不升级版本、不修改 daemon 配置、不执行 prune，也不操作其他项目的容器或镜像。MDD 容器带有归属标签；发现同名外部容器、8443 端口冲突或 rootless Docker 时会停止并给出错误。蜂窝与 TUN/PCSC 引擎需要系统级 Docker daemon，因此不支持 rootless 模式。
 
-版本检查始终使用 GitHub 公共 Release API，不读取或发送 GitHub Token。仓库仍为私有或尚未发布 Release 时，界面显示“尚无公开发布版本”；仓库与 Release 公开后即可直接检查。
+版本检查始终使用 GitHub Release API，不读取或发送 GitHub Token。配置的仓库不可访问或尚未发布 Release 时，界面会显示尚无可用发布版本。
 
 安装完成后，在受信的局域网或 VPN 中立即打开 `https://主机地址:8443`，创建至少 10 字符的管理员密码。首次设置完成前，任何能访问该端口的客户端都可申领初始管理员。配置自有证书时，证书和私钥应只允许 root 读取。运行数据目录默认为 `0700`，凭据文件为 `0600`。
 
 ## 更新
 
-发现新版本时，左下角版本号会出现红点。点击后确认“立即升级”即可一键更新：控制面把请求写入编排器目录，主机上的 `mdd-sim-gateway-orchestrator` 以独立的临时 systemd 单元（`mdd-sim-gateway-update`）运行 `host/mdd_update.py` —— 下载对应 `vX.Y.Z` Release 资产、校验 SHA-256、版本和发行版类型，备份当前代码到数据目录 `backups/` 后覆盖安装，最后复用资产内已构建的 WebUI 并执行 `install.sh reload --no-engines` 重启控制服务。升级绝不会自动发生：只有管理员在界面中确认后才开始，且 `data/`、`.env`、`.git`、虚拟环境和已有 Engine 镜像、容器全部保留。Engine 变更仍按本项目的构建机部署流程单独发布。日志见 `journalctl -u mdd-sim-gateway-update` 与数据目录下 `update/reload.log`。
+发现新版本时，左下角版本号会出现红点。点击后确认“立即升级”即可一键更新：控制面把请求写入编排器目录，主机上的 `mdd-sim-gateway-orchestrator` 以独立的临时 systemd 单元（`mdd-sim-gateway-update`）运行 `host/mdd_update.py` —— 下载对应 `vX.Y.Z` Release 资产、校验 SHA-256 和版本，备份当前代码到数据目录 `backups/` 后覆盖安装，最后复用资产内已构建的 WebUI 并执行 `install.sh reload --no-engines` 重启控制服务。升级绝不会自动发生：只有管理员在界面中确认后才开始，且 `data/`、`.env`、`.git`、虚拟环境和已有 Engine 镜像、容器全部保留。Engine 变更仍按本项目的构建机部署流程单独发布。日志见 `journalctl -u mdd-sim-gateway-update` 与数据目录下 `update/reload.log`。
 
 “系统设置 → 备份与更新”可为版本检查和升级下载选择联网方式：默认直连、手动 HTTP/HTTPS/SOCKS5 代理，或复用已就绪的国家出口。选择 SOCKS5 时建议使用 `socks5h://`，使 DNS 解析也通过代理。手动代理凭据仅保存在主机权限为 `0600` 的配置/临时文件中，不写入 systemd 命令行或升级状态。一键升级会把同一代理环境传给 `install.sh reload`；Docker daemon 自身的镜像代理仍属于独立的主机配置。
-正式 Release 归档包内含 CI 预构建的 `webui/dist`，一键升级校验整个归档后直接复用，因此不需要在树莓派上下载 Node 镜像或编译前端。完整版和公开版的 `EDITION` 必须一致；完整版不会接受 GitHub 公开版归档。
+正式 Release 归档包内含 CI 预构建的 `webui/dist`，一键升级校验整个归档后直接复用，因此不需要在树莓派上下载 Node 镜像或编译前端。GitHub `main` 与其 Release 是唯一支持的更新通道。
 
 也可以随时在主机上手动更新：备份并用受信任来源更新源码后执行：
 

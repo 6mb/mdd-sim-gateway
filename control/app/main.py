@@ -117,14 +117,14 @@ def _carrier_description(inst: dict | None, card_info: dict | None,
     return {**resolved, "current_network": current}
 
 
-def _public_card_info(value: dict) -> dict:
+def _client_card_info(value: dict) -> dict:
     """Card monitor view for authenticated clients, without carrier matching material."""
     return {key: item for key, item in value.items()
             if key not in {"carrier_identity", "spn", "gid1", "gid2"}}
 
 
-def _public_cards(values: list[dict] | None = None) -> list[dict]:
-    return [_public_card_info(value) for value in (values if values is not None
+def _client_cards(values: list[dict] | None = None) -> list[dict]:
+    return [_client_card_info(value) for value in (values if values is not None
                                                     else hub.cards_list())]
 
 
@@ -260,7 +260,7 @@ def _ensure_card_draft(info: dict) -> dict | None:
             "debug": {"asterisk": False, "charon": False},
         }, unique_name=True)
     except cfg.LineLimitError:
-        log.warning("public edition line limit reached; ignoring newly detected SIM %s",
+        log.warning("SIM line limit reached; ignoring newly detected SIM %s",
                     iccid[-4:])
         return None
     egress.publish()
@@ -429,11 +429,11 @@ PCSC_MAINTENANCE_WINDOW_SECONDS = 45
 def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
                           reason: str = "manual"):
     """Translate fail-closed egress errors into an actionable API response."""
-    if not cfg.public_line_allowed(str(inst.get("id") or "")):
+    if not cfg.line_allowed(str(inst.get("id") or "")):
         raise HTTPException(409, {
-            "code": "public_line_limit",
-            "message": (f"The public edition supports at most "
-                        f"{cfg.PUBLIC_MAX_SIM_LINES} SIM lines. Delete an existing line "
+            "code": "line_limit",
+            "message": (f"MDD Sim Gateway supports at most "
+                        f"{cfg.MAX_SIM_LINES} SIM lines. Delete an existing line "
                         "before starting this one."),
         })
     try:
@@ -889,7 +889,7 @@ async def card_monitor():
             # The first completed scan is always announced, even when it found nothing:
             # it is what turns the UI's "detecting devices" state into a real answer.
             if changed or first:
-                await hub.broadcast({"type": "cards", "cards": _public_cards()})
+                await hub.broadcast({"type": "cards", "cards": _client_cards()})
             # Only a completed scan counts: a failed first scan must retry as "first"
             # (readers seen later may belong to already-running engines).
             hub.scanned = True
@@ -1827,10 +1827,10 @@ async def lifespan(app: FastAPI):
     # Keep every saved record, but stop excess engines before background recovery begins.
     for saved_line in cfg.list_instances():
         iid = str(saved_line.get("id") or "")
-        if iid and not cfg.public_line_allowed(iid):
+        if iid and not cfg.line_allowed(iid):
             try:
                 await asyncio.to_thread(engine.stop, iid)
-                log.warning("stopped line %s because it exceeds the public edition limit", iid)
+                log.warning("stopped line %s because it exceeds the SIM line limit", iid)
             except Exception as exc:  # noqa: BLE001 - startup must continue to surface status
                 log.error("could not stop over-limit line %s: %s", iid, exc)
     # Legacy history used a free-form line name. Map only unique, non-numeric current names;
@@ -2035,7 +2035,7 @@ async def api_sim_detect(reader_index: int = 0):
     name = rlist[reader_index]
     async with hub.reader_lock(name):
         return await asyncio.to_thread(
-            lambda: _public_card_info(sim.read_card(reader_index).dict()))
+            lambda: _client_card_info(sim.read_card(reader_index).dict()))
 
 
 def _resolve_reader_index(body: dict) -> int:
@@ -2118,8 +2118,8 @@ async def api_verify_pin(body: dict):
                         "id": str(inst["id"]), **_carrier_identity_update(c)})
                 card_entry["matched"] = inst["id"] if inst else None
                 hub.cards[c.reader] = card_entry
-                res["card"] = _public_card_info(card_entry)
-                await hub.broadcast({"type": "cards", "cards": _public_cards()})
+                res["card"] = _client_card_info(card_entry)
+                await hub.broadcast({"type": "cards", "cards": _client_cards()})
             except Exception as e:  # noqa
                 log.debug("post-verify re-read failed: %r", e)
     return res
@@ -2242,7 +2242,7 @@ async def _esim_refresh_card(name: str, idx: int):
         log.debug("post-LPA card refresh failed: %r", e)
         info.update(index=idx, name=name, present=True)
     hub.cards[name] = info
-    await hub.broadcast({"type": "cards", "cards": _public_cards()})
+    await hub.broadcast({"type": "cards", "cards": _client_cards()})
     if info.get("matched"):
         asyncio.create_task(_auto_start_hotplugged_line(str(info["matched"])))
     return info
@@ -2286,7 +2286,7 @@ async def api_cards():
         cards = await asyncio.to_thread(scan)
         return {"cards": _with_detected_imei(cards)}
     _refresh_card_matches()
-    return {"cards": _public_cards()}
+    return {"cards": _client_cards()}
 
 
 @app.get("/api/ports/suggest")
@@ -2567,7 +2567,7 @@ async def api_provision(body: dict):
         inst = cfg.upsert_instance(inst)
     except cfg.LineLimitError as exc:
         raise HTTPException(409, {
-            "code": "public_line_limit", "message": str(exc)}) from exc
+            "code": "line_limit", "message": str(exc)}) from exc
     hub._msisdn_tries.pop(str(inst["id"]), None)
     hub.reset_health(inst["id"])
     # engine.start force-removes any existing container; retire AMI first so a cached
@@ -2576,7 +2576,7 @@ async def api_provision(body: dict):
     await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
                             dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
     _refresh_card_matches()
-    await hub.broadcast({"type": "cards", "cards": _public_cards()})
+    await hub.broadcast({"type": "cards", "cards": _client_cards()})
     safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
     return {"ok": True, "instance": safe}
 
@@ -3287,7 +3287,7 @@ def api_put_settings(body: dict):
             notify_push.build_webhook_request(webhook, sample)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             raise HTTPException(400, f"invalid webhook configuration: {exc}")
-    # Telegram is notification-only in the public edition. Ignore stale/self-use clients that
+    # Telegram is notification-only. Ignore stale clients that
     # still submit a remote command configuration.
     (body.get("telegram") or {}).pop("commands", None)
     pushplus = body.get("pushplus") or {}
@@ -3582,7 +3582,7 @@ async def api_instance_upsert(body: dict):
         inst = cfg.upsert_instance(body)
     except cfg.LineLimitError as exc:
         raise HTTPException(409, {
-            "code": "public_line_limit", "message": str(exc)}) from exc
+            "code": "line_limit", "message": str(exc)}) from exc
     applied = False
     # A running line holds its config in the engine container (rendered instance.json:
     # WebRTC credentials, IMEI, SMSC, User-Agent, …). Editing the config alone doesn't reach
@@ -3667,7 +3667,7 @@ async def api_instance_delete(iid: str, delete_history: bool = True, confirm_id:
         replacement = next((item for item in replacements if item.get("enabled", True)), None)
         if replacement:
             asyncio.create_task(_auto_start_hotplugged_line(str(replacement["id"])))
-    await hub.broadcast({"type": "cards", "cards": _public_cards()})
+    await hub.broadcast({"type": "cards", "cards": _client_cards()})
     await hub.broadcast({"type": "line", "instance": str(iid), "event": "deleted"})
     if delete_history:
         await hub.broadcast({"type": "sms", "instance": str(iid),

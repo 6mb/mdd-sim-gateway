@@ -4,6 +4,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- Made the GitHub `main` branch and its Releases the single supported product and update line.
+  Safety boundaries now use product-level names, and release updates no longer depend on
+  distribution metadata.
+- Redesigned the repository homepage around a concise value proposition, interface tour, quick
+  install and architecture overview; added matching Chinese and English demo GIFs.
+- Added a discreet GitHub Star link beside the existing repository link in the Web console.
+
 ## [1.3.4] - 2026-08-13
 
 ### Added
@@ -30,8 +39,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - Release archives now include the CI-built WebUI and an archive checksum. One-click updates
   verify and install that artifact before reload, so a Raspberry Pi no longer needs to pull a
   Node image from Docker Hub to finish an update.
-- Added an explicit edition boundary: a full installation refuses the public GitHub update
-  channel instead of allowing a same-version public archive to replace full-edition source.
+- Added a release-channel guard that prevented an incompatible source distribution from
+  replacing an installed tree with the same version number.
 - Added a one-release bootstrap manifest that safely recognizes the reviewed WebUI already
   installed by v1.3.2, allowing the first artifact-aware update to complete offline.
 

@@ -3,6 +3,8 @@ import importlib.util
 import hashlib
 import json
 import os
+import shutil
+import tarfile
 import tempfile
 import time
 import unittest
@@ -139,6 +141,41 @@ class UpdaterTests(unittest.TestCase):
                 "9.9.9\n", encoding="utf-8")
             mdd_update.apply_tree(source, repo)
             self.assertEqual((repo / "webui/dist/index.html").read_text(), "new")
+
+    def test_perform_accepts_release_without_distribution_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, data, payload = base / "repo", base / "data", base / "payload"
+            source = payload / "mdd-sim-gateway-v9.9.9"
+            (source / "webui/dist").mkdir(parents=True)
+            (source / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            (source / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+            (source / "webui/dist/index.html").write_text("new", encoding="utf-8")
+            (source / "webui/dist/.mdd-release-version").write_text(
+                "9.9.9\n", encoding="utf-8")
+            archive = base / "release.tar.gz"
+            with tarfile.open(archive, "w:gz") as handle:
+                handle.add(source, arcname=source.name)
+            sums = base / "SHA256SUMS"
+            sums.write_text(
+                f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  "
+                "mdd-sim-gateway-v9.9.9.tar.gz\n", encoding="utf-8")
+            repo.mkdir()
+            data.mkdir()
+            (repo / "VERSION").write_text("1.3.4\n", encoding="utf-8")
+            status = mdd_update.Status(data / "orchestrator/status.json", "9.9.9")
+
+            def fake_download(_url, destination, _env, _proxy=""):
+                shutil.copy2(sums if destination.name == "SHA256SUMS" else archive,
+                             destination)
+
+            completed = type("Completed", (), {"returncode": 0})()
+            with patch.object(mdd_update, "download", side_effect=fake_download), \
+                    patch.object(mdd_update.subprocess, "run", return_value=completed):
+                mdd_update.perform(repo, data, "9.9.9", "MddIdd/mdd-sim-gateway", status)
+
+            self.assertEqual((repo / "VERSION").read_text().strip(), "9.9.9")
+            self.assertFalse((repo / "EDITION").exists())
 
     def test_perform_rejects_malformed_version_and_repository(self):
         with tempfile.TemporaryDirectory() as tmp:
