@@ -82,6 +82,7 @@ export const api = {
   saveSettings: (patch) => j('PUT', '/api/settings', patch),
   egressStatus: () => j('GET', '/api/egress/status'),
   testEgress: (country) => j('POST', `/api/egress/${encodeURIComponent(country)}/test`, {}),
+  testProxyProfile: (profileId, profile) => j('POST', `/api/egress/profile/${encodeURIComponent(profileId)}/test`, profile || {}),
   refreshEgress: () => j('POST', '/api/egress/refresh', {}),
   testWebhook: (config) => j('POST', '/api/notifications/webhook/test', config || {}),
   testTelegram: (config) => j('POST', '/api/notifications/telegram/test', config || {}),

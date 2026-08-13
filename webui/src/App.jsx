@@ -115,7 +115,7 @@ export default function App() {
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
-  const showToast = useCallback((message) => { clearTimeout(toastTimer.current); setToast(message); toastTimer.current=setTimeout(()=>setToast(null),5000) }, [])
+  const showToast = useCallback((message) => { clearTimeout(toastTimer.current); setToast({ message, id: Date.now() }); toastTimer.current=setTimeout(()=>setToast(null),5000) }, [])
   const openUpdateDialog=useCallback(update=>{setSystemMeta(s=>({...s,update}));setUpdateOpen(true)},[])
   const expireAuth=useCallback(()=>{
     setCsrf('')
@@ -209,7 +209,7 @@ export default function App() {
     <button className="u-menu" onClick={()=>setMenuOpen(!menuOpen)}>☰</button>
     {menuOpen&&<button className="u-scrim" aria-label={t('Close menu')} onClick={()=>setMenuOpen(false)}/>}
     <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header><div className="u-content"><div className="u-note" role="note">{t('Public edition compliance warning')}</div>{content}</div></main>
-    {toast&&<div className="u-toast">{toast}</div>}
+    {toast&&<div className="u-toast" key={toast.id} role="status">{toast.message}</div>}
     {updateOpen&&systemMeta.update?.update_available&&<UpdateModal update={systemMeta.update} current={systemMeta.version} t={t} onClose={()=>setUpdateOpen(false)}/>}
   </div>
 }

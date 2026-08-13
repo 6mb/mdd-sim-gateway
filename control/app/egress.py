@@ -9,7 +9,14 @@ attempt from leaking through the wrong country's default route.
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
+from pathlib import Path
+import shutil
+import socket
+import struct
+import subprocess
+import tempfile
 import time
 from copy import deepcopy
 
@@ -27,6 +34,216 @@ RESELECT_MIN_STABLE_SECONDS = float(os.environ.get("MDD_EXIT_RESELECT_MIN_STABLE
 
 class EgressError(RuntimeError):
     pass
+
+
+def _recv_exact(stream: socket.socket, size: int) -> bytes:
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = stream.recv(remaining)
+        if not chunk:
+            raise EgressError("SOCKS5 proxy closed the UDP negotiation")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def test_udp_proxy(host: str, port: int, timeout: float = 8.0,
+                   username: str = "", password: str = "") -> int:
+    """Send one DNS query through a SOCKS5 UDP ASSOCIATE and return latency in ms.
+
+    Country exits expose a loopback/bridge-only SOCKS5 listener. Testing that listener checks
+    the complete configured outbound, including the UDP path VoWiFi IKE actually requires.
+    """
+    started = time.monotonic()
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout) as stream:
+            stream.settimeout(timeout)
+            methods = b"\x00\x02" if username or password else b"\x00"
+            stream.sendall(b"\x05" + bytes([len(methods)]) + methods)
+            method = _recv_exact(stream, 2)
+            if method == b"\x05\x02":
+                user, secret = username.encode(), password.encode()
+                if not user or len(user) > 255 or len(secret) > 255:
+                    raise EgressError("SOCKS5 username or password is invalid")
+                stream.sendall(b"\x01" + bytes([len(user)]) + user
+                               + bytes([len(secret)]) + secret)
+                if _recv_exact(stream, 2) != b"\x01\x00":
+                    raise EgressError("SOCKS5 username or password was rejected")
+            elif method != b"\x05\x00":
+                raise EgressError("SOCKS5 proxy rejected UDP test negotiation")
+            stream.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
+            head = _recv_exact(stream, 4)
+            if head[:2] != b"\x05\x00":
+                raise EgressError(f"SOCKS5 proxy rejected UDP associate (code {head[1]})")
+            atyp = head[3]
+            if atyp == 1:
+                relay_host = socket.inet_ntoa(_recv_exact(stream, 4))
+            elif atyp == 3:
+                relay_host = _recv_exact(stream, _recv_exact(stream, 1)[0]).decode("ascii")
+            elif atyp == 4:
+                relay_host = socket.inet_ntop(socket.AF_INET6, _recv_exact(stream, 16))
+            else:
+                raise EgressError("SOCKS5 proxy returned an invalid UDP relay address")
+            relay_port = struct.unpack("!H", _recv_exact(stream, 2))[0]
+            if relay_host in {"0.0.0.0", "::"}:
+                relay_host = host
+
+            query_id = os.urandom(2)
+            # A cloudflare.com A query with recursion desired.
+            dns = query_id + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" \
+                + b"\x0acloudflare\x03com\x00\x00\x01\x00\x01"
+            packet = b"\x00\x00\x00\x01" + socket.inet_aton("1.1.1.1") \
+                + struct.pack("!H", 53) + dns
+            family = socket.AF_INET6 if ":" in relay_host else socket.AF_INET
+            with socket.socket(family, socket.SOCK_DGRAM) as udp:
+                udp.settimeout(timeout)
+                udp.sendto(packet, (relay_host, relay_port))
+                response, _ = udp.recvfrom(4096)
+            if len(response) < 22 or response[0:3] != b"\x00\x00\x00":
+                raise EgressError("SOCKS5 proxy returned an invalid UDP response")
+            # Skip the variable SOCKS destination header before checking the DNS transaction.
+            response_atyp = response[3]
+            offset = 4 + (4 if response_atyp == 1 else 16 if response_atyp == 4
+                          else 1 + response[4] if response_atyp == 3 else -100) + 2
+            if offset < 6 or response[offset:offset + 2] != query_id \
+                    or not (response[offset + 2] & 0x80):
+                raise EgressError("UDP DNS response did not match the test request")
+    except EgressError:
+        raise
+    except (OSError, ValueError, struct.error) as exc:
+        raise EgressError(f"UDP test failed: {exc}") from exc
+    return max(1, round((time.monotonic() - started) * 1000))
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _write_private_json(path: Path, value: dict):
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _wait_tcp(port: int, process: subprocess.Popen, timeout: float = 4.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise EgressError("temporary proxy process exited during startup")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=.2):
+                return
+        except OSError:
+            time.sleep(.08)
+    raise EgressError("temporary proxy process did not become ready")
+
+
+def _stop_process(process: subprocess.Popen | None):
+    if not process or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _orchestrator_module():
+    path = Path(__file__).resolve().parents[2] / "host" / "mdd_orchestrator.py"
+    spec = importlib.util.spec_from_file_location("mdd_proxy_test_orchestrator", path)
+    if not spec or not spec.loader:
+        raise EgressError("proxy protocol support is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
+    """Test a node/SOCKS5 profile without assigning it to or changing a country exit."""
+    kind = str(profile.get("type") or "").lower()
+    if kind == "socks5":
+        host = str(profile.get("server") or "").strip()
+        port = int(profile.get("port") or 1080)
+        if not host or not 0 < port <= 65535:
+            raise EgressError("SOCKS5 server or port is invalid")
+        return test_udp_proxy(host, port, timeout, str(profile.get("username") or ""),
+                              str(profile.get("password") or ""))
+    if kind != "node":
+        raise EgressError("only individual nodes and SOCKS5 proxies can be tested here")
+
+    value = str(profile.get("value") or "").strip()
+    if not value:
+        raise EgressError("node share link is empty")
+    singbox = shutil.which(os.environ.get("MDD_SINGBOX_BIN", "sing-box"))
+    if not singbox:
+        raise EgressError("sing-box executable not found")
+    helper = _orchestrator_module()
+    node = helper.parse_share_link(value) if value.lower().startswith("vless://") else None
+    xhttp = bool(node and str(node.get("network") or "").lower() == "xhttp")
+    local_port, bridge_port = _free_loopback_port(), _free_loopback_port()
+    if xhttp:
+        outbound = {"type": "socks", "tag": "test-out", "version": "5",
+                    "server": "127.0.0.1", "server_port": bridge_port}
+    else:
+        outbound = (helper.clash_outbound(node, "test-out") if node
+                    else helper.parse_manual_outbound(value, "test-out"))
+    if not helper.outbound_supports_udp(outbound):
+        raise EgressError("this node protocol does not support UDP")
+
+    sing_config = {
+        "log": {"level": "warn"},
+        "inbounds": [{"type": "socks", "tag": "test-in", "listen": "127.0.0.1",
+                      "listen_port": local_port}],
+        "outbounds": [outbound],
+        "route": {"rules": [{"inbound": ["test-in"], "outbound": "test-out"}],
+                  "auto_detect_interface": True},
+    }
+    sing_process = xray_process = None
+    with tempfile.TemporaryDirectory(prefix="mdd-proxy-test-") as directory:
+        root = Path(directory)
+        sing_path = root / "sing-box.json"
+        _write_private_json(sing_path, sing_config)
+        check = subprocess.run([singbox, "check", "-c", str(sing_path)], text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+        if check.returncode:
+            raise EgressError("node configuration is invalid")
+        try:
+            if xhttp:
+                xray = shutil.which(os.environ.get("MDD_XRAY_BIN", "xray"))
+                if not xray:
+                    raise EgressError("Xray-core executable not found for XHTTP node")
+                xray_config = {
+                    "log": {"loglevel": "warning"},
+                    "inbounds": [{"listen": "127.0.0.1", "port": bridge_port,
+                                  "protocol": "socks", "tag": "test-in",
+                                  "settings": {"auth": "noauth", "udp": True,
+                                               "ip": "127.0.0.1"}}],
+                    "outbounds": [helper.xray_xhttp_outbound(node, "test-out")],
+                    "routing": {"domainStrategy": "AsIs", "rules": [{"type": "field",
+                                "inboundTag": ["test-in"], "outboundTag": "test-out"}]},
+                }
+                xray_path = root / "xray.json"
+                _write_private_json(xray_path, xray_config)
+                xcheck = subprocess.run([xray, "run", "-test", "-config", str(xray_path)],
+                                        text=True, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, timeout=8)
+                if xcheck.returncode:
+                    raise EgressError("XHTTP node configuration is invalid")
+                xray_process = subprocess.Popen([xray, "run", "-config", str(xray_path)],
+                                                stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL)
+                _wait_tcp(bridge_port, xray_process)
+            sing_process = subprocess.Popen([singbox, "run", "-c", str(sing_path)],
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+            _wait_tcp(local_port, sing_process)
+            return test_udp_proxy("127.0.0.1", local_port, timeout)
+        finally:
+            _stop_process(sing_process)
+            _stop_process(xray_process)
 
 
 def _atomic_json(path: str, value: dict):

@@ -15,6 +15,7 @@ import re
 import secrets
 import socket
 import threading
+import urllib.parse
 from copy import deepcopy
 
 import yaml
@@ -70,8 +71,10 @@ DEFAULTS = {
         # host-side orchestrator is installed/configured. When enabled, a line fails closed if
         # its SIM country has no healthy exit (unless that country explicitly selects direct).
         "proxy": {
+            "schema_version": 2,
             "enabled": False,
             "missing_policy": "error",
+            "profiles": {},
             "subscription_url": "",
             "existing_singbox_config": "",
             "refresh_minutes": 30,
@@ -297,6 +300,47 @@ def load() -> dict:
                     "updates"):
             saved = data.get("settings", {}).get(key, {}) or {}
             out["settings"][key] = {**DEFAULTS["settings"][key], **saved}
+        # Proxy profiles were introduced after the original single-subscription/country-form
+        # layout.  Expose a lossless v2 view immediately, but do not rewrite config.yaml until
+        # the operator next saves Settings.
+        proxy = out["settings"]["proxy"]
+        profiles = deepcopy(proxy.get("profiles") or {})
+        exits = deepcopy(proxy.get("exits") or {})
+        legacy_url = str(proxy.get("subscription_url") or "").strip()
+        if legacy_url and "legacy-subscription" not in profiles:
+            profiles["legacy-subscription"] = {
+                "name": "Original subscription", "type": "subscription",
+                "url": legacy_url, "refresh_minutes": int(proxy.get("refresh_minutes") or 30),
+            }
+        for country, exit_cfg in list(exits.items()):
+            if not isinstance(exit_cfg, dict) or exit_cfg.get("profile_id"):
+                continue
+            mode = str(exit_cfg.get("mode") or "subscription").lower()
+            if mode == "subscription" and legacy_url:
+                exit_cfg["profile_id"] = "legacy-subscription"
+            elif mode == "manual":
+                profile_id = f"legacy-{country}"
+                value = exit_cfg.get("outbound_json") or exit_cfg.get("proxy_url") or ""
+                kind = "socks5" if str(value).lower().startswith(("socks://", "socks5://")) else "node"
+                migrated = {"name": f"{str(country).upper()} legacy proxy", "type": kind}
+                if kind == "socks5":
+                    parsed = urllib.parse.urlsplit(str(value))
+                    migrated.update({"server": parsed.hostname or "", "port": parsed.port or 1080,
+                                     "username": urllib.parse.unquote(parsed.username or ""),
+                                     "password": urllib.parse.unquote(parsed.password or "")})
+                else:
+                    migrated["value"] = value
+                profiles.setdefault(profile_id, migrated)
+                exit_cfg["profile_id"] = profile_id
+            elif mode == "existing":
+                profile_id = f"legacy-{country}"
+                profiles.setdefault(profile_id, {"name": f"{str(country).upper()} imported outbound",
+                                                  "type": "existing",
+                                                  "outbound_tag": exit_cfg.get("outbound_tag") or ""})
+                exit_cfg["profile_id"] = profile_id
+        proxy["schema_version"] = 2
+        proxy["profiles"] = profiles
+        proxy["exits"] = exits
         # Asterisk debug includes complete SIP messages and IMS identities.  Older manual
         # provisioning forms accidentally enabled it by default, so normalize every loaded
         # line as well as new writes; this makes an upgrade safe before the operator next edits

@@ -6,7 +6,7 @@ MDD Sim Gateway is a self-hosted multi-SIM communications gateway. It brings cel
 modems, USB smart-card readers, 4G data, Wi-Fi Calling, voice, SMS, eSIM management and
 country-specific proxy exits into one bilingual Web console.
 
-Current version: **1.3.3** · [中文](README.md)
+Current version: **1.3.4** · [中文](README.md)
 
 > **Compliance warning (public edition):** This software is only for use by the verified subscriber of a number where the carrier expressly permits that use. Do not use it for fraud, bulk or nuisance calling, marketing, verification-code collection, renting numbers or lines, call forwarding for others, concealing the controller's location, or providing telecommunications services to third parties. Users must follow local law, subscriber identity rules, and carrier terms. This project grants no telecom licence or carrier authorisation. The public edition stores and runs at most **five SIM lines** and provides neither standalone SIP accounts nor Telegram commands for calls, SMS, or hangup. Technical restrictions do not make any particular use lawful.
 
@@ -39,8 +39,9 @@ Current version: **1.3.3** · [中文](README.md)
 - Perform EAP-AKA and IMS-AKA in the physical SIM/eSIM without reading or storing Ki/OP/OPc.
 - Show each modem UICC's three logical-channel allocations, roles and explicit failures.
 - Provide an authenticated browser softphone, SMS, call history and incoming-event notifications; the public edition does not accept standalone SIP clients.
-- Filter Clash subscription nodes by country and run each country through an isolated sing-box
-  TUN. VoWiFi fails closed unless the selected exit passes a runtime UDP check.
+- Maintain reusable subscriptions, individual nodes and SOCKS5 proxies, then assign one to each
+  country. sing-box owns the isolated TUNs; Xray-core carries Reality/XHTTP nodes. VoWiFi fails
+  closed unless the selected exit passes a runtime UDP check.
 - Send standard/custom Webhooks, Telegram notifications and PushPlus messages.
 - Telegram is notification-only and does not accept remote control commands.
 - Manage eUICC profiles through a pinned local lpac build, including dual-SE readers.
@@ -71,7 +72,8 @@ sudo ./install.sh install
 ```
 
 The installer reuses a working system Docker daemon, or installs the distribution package when
-Docker is absent. It provisions pcscd, ModemManager/NetworkManager, checksummed sing-box, a pinned
+Docker is absent. It provisions pcscd, ModemManager/NetworkManager, checksummed sing-box and
+Xray-core, a pinned
 lpac source build, the Web console and the per-SIM VoWiFi engine. It does not prune Docker or
 modify unrelated containers.
 
@@ -94,9 +96,11 @@ See [installation](docs/INSTALL.md), [architecture](docs/ARCHITECTURE.md),
 
 ## Country exits
 
-Add a Clash subscription in Network Exits, then configure a country. Matching applies to node
-names. All matching nodes enter a sing-box `urltest` pool, and the UI reports the node actually
-selected. A separate UDP probe is mandatory because IKEv2/ESP NAT traversal depends on UDP
+Add one or more subscriptions, individual nodes or SOCKS5 servers to the proxy library, then assign
+one to each country. Subscription exits retain name filtering and automatic/manual node selection;
+individual nodes and SOCKS5 entries are used directly. Reality/XHTTP share links use a loopback-only
+Xray-core bridge. The eye control is off by default, masking subscription URLs, node links and
+SOCKS5 details. A separate UDP probe is mandatory because IKEv2/ESP NAT traversal depends on UDP
 500/4500. Only that SIM's ePDG routes enter the country's dedicated TUN.
 
 ## Security and privacy
