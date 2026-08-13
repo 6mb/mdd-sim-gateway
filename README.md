@@ -1,34 +1,63 @@
-# MDD Sim Gateway
+<p align="center">
+  <img src="assets/logo-lockup.svg" width="520" alt="MDD Sim Gateway">
+</p>
 
-![MDD Sim Gateway](assets/logo-lockup.svg)
+<p align="center"><strong>把物理 SIM 和 eSIM 变成自己可控的 VoWiFi、通话、短信与独立网络出口网关。</strong></p>
 
-MDD Sim Gateway 是面向自托管设备的多 SIM 通信网关。它把蜂窝模块、USB 读卡器、4G 数据、Wi‑Fi Calling、通话、短信、eSIM 与国家代理出口整合到一个中英文 Web 控制台中。
+<p align="center">
+  <a href="README.en.md">English</a> ·
+  <a href="#快速安装">快速安装</a> ·
+  <a href="docs/ARCHITECTURE.md">架构</a> ·
+  <a href="docs/INSTALL.md">安装文档</a> ·
+  <a href="https://github.com/MddIdd/mdd-sim-gateway/discussions">社区讨论</a>
+</p>
 
-当前版本：**1.3.4** · [English](README.en.md)
+MDD Sim Gateway 是面向 Debian / Ubuntu / Armbian ARM64 设备的自托管多 SIM 通信网关。它将蜂窝模块、USB 读卡器、IMS、EAP-AKA、eSIM、ModemManager 和 sing-box 整合进一个中英文 Web 控制台。
 
-> 本项目直接控制蜂窝模块、SIM、网络路由和 IMS。请只在你拥有或获准管理的设备及号码上使用；运营商是否开放 Wi‑Fi Calling 仍取决于套餐、区域、设备身份和网络策略。
+| 真实 SIM 鉴权 | 通话与短信 | 多模块管理 | 独立国家出口 |
+|---|---|---|---|
+| 在物理 SIM/eSIM 内完成 EAP-AKA 与 IMS-AKA，不读取 Ki/OP/OPc | 浏览器软电话、短信收发、通话记录与来电通知 | 统一管理蜂窝模块、PC/SC 读卡器和 eUICC | 为不同 SIM 的 ePDG 路由分配独立国家 TUN，UDP 失败时不泄漏 |
 
-> **合规警告（公开版）：** 本软件仅供号码实名持有人在运营商明确允许的范围内自用。严禁用于诈骗、群呼、营销骚扰、验证码接收、号码或线路出租、代拨转接、隐藏实际控制地点，或向第三人提供电信服务。使用者必须遵守所在地法律、电话实名制和运营商协议；本项目不构成任何电信业务许可或运营商授权。公开版最多保存和运行 **5 条 SIM 线路**，不提供独立 SIP 账号或 Telegram 远程拨号、发短信及挂断功能。技术限制不代表某种使用方式当然合法。
+## 界面导览
 
-### 界面预览
+![MDD Sim Gateway 中文界面导览（使用虚构演示数据）](assets/product-tour.zh-CN.gif)
 
-#### 概览
+<p align="center">概览 → 设备管理 → 浏览器通话 → 短信　·　界面中的身份与内容均为虚构演示数据</p>
+
+## 快速安装
+
+推荐使用具备 systemd、Docker、USB 和稳定网络的 Debian、Ubuntu 或 Armbian ARM64 主机。
+
+```bash
+git clone https://github.com/MddIdd/mdd-sim-gateway.git
+cd mdd-sim-gateway
+sudo ./install.sh install
+```
+
+安装完成后访问 `https://<网关地址>:8443`，并在受信的局域网或 VPN 中立即创建管理员账号。完整的前置检查、安装过程和升级方式见 [安装与升级](docs/INSTALL.md)。
+
+> 本项目直接控制蜂窝模块、SIM、网络路由和 IMS。运营商是否开放 Wi‑Fi Calling 仍取决于套餐、区域、设备身份和网络策略。
+
+## 系统架构
+
+![MDD Sim Gateway 系统架构](docs/architecture.svg)
+
+## 完整截图
+
+<details>
+<summary>查看概览、设备、通话和短信页面</summary>
 
 ![MDD Sim Gateway 中文概览（使用虚构演示数据）](screenshots/overview-redacted.zh-CN.png)
 
-#### 设备
-
 ![MDD Sim Gateway 中文设备页（使用虚构演示数据）](screenshots/devices-redacted.zh-CN.png)
-
-#### 通话
 
 ![MDD Sim Gateway 中文通话页（使用虚构演示数据）](screenshots/calls-redacted.zh-CN.png)
 
-#### 短信
-
 ![MDD Sim Gateway 中文短信页（使用虚构演示数据）](screenshots/sms-redacted.zh-CN.png)
 
-## 能做什么
+</details>
+
+## 核心能力
 
 - 自动识别蜂窝模块与普通 PC/SC 读卡器；模块可同时管理 4G 和 VoWiFi，读卡器仅显示其支持的 VoWiFi 能力。
 - 每个物理模块独立保存 4G、飞行模式和 VoWiFi 期望状态：4G 开关只控制移动数据承载，飞行模式单独控制射频，VoWiFi 独立启停；状态按各自 ModemManager 对象读取。
@@ -43,8 +72,6 @@ MDD Sim Gateway 是面向自托管设备的多 SIM 通信网关。它把蜂窝�
 - 使用 lpac 管理 eUICC 配置文件；支持需要显式选择安全元件的双 SE 卡。
 - 中英文界面、HTTPS、首次管理员设置、支持按钮或 Enter 提交的会话登录、CSRF、防暴力登录、审计记录、脱敏支持包、备份与版本检查。
 
-![系统架构](docs/architecture.svg)
-
 ## 硬件模型
 
 | 设备 | 4G 数据 | Wi‑Fi Calling | SIM 访问方式 |
@@ -57,15 +84,8 @@ MDD Sim Gateway 是面向自托管设备的多 SIM 通信网关。它把蜂窝�
 
 三体电子 SCR Prime 已通过本项目实机验证；“支持”表示系统具备相应技术路径，不代表所有 SIM、固件或运营商都会放行。多模块 4G 使用独立 ModemManager 对象、NetworkManager 连接和 bearer。
 
-## 快速安装
 
-推荐 Debian/Ubuntu/Armbian ARM64 主机，具备 systemd、Docker、USB 和稳定网络。
-
-```bash
-git clone https://github.com/MddIdd/mdd-sim-gateway.git
-cd mdd-sim-gateway
-sudo ./install.sh install
-```
+## 安装器会做什么
 
 安装脚本会自动：
 
@@ -76,9 +96,6 @@ sudo ./install.sh install
 5. 安装 systemd 服务并设置开机启动。
 
 已有 Docker 不会被升级、重配或清理；安装前会检查 rootless 模式、端口占用与容器归属，只管理带 MDD 标记的容器。
-
-首次打开 `https://<网关地址>:8443` 创建管理员账号。自签名证书可用于初次部署；长期使用建议在设置中配置受信任证书。
-请在受信的局域网或 VPN 中立即完成首次设置；在管理员账号建立前，任何能访问管理端口的客户端都可以申领首个管理员。
 
 常用命令：
 
@@ -91,6 +108,18 @@ sudo ./install.sh uninstall
 ```
 
 完整说明见 [安装与升级](docs/INSTALL.md)，系统边界见 [架构说明](docs/ARCHITECTURE.md)，问题排查见 [故障排查](docs/TROUBLESHOOTING.md)。
+
+## 使用边界
+
+> **合规警告（公开版）：** 本软件仅供号码实名持有人在运营商明确允许的范围内自用。严禁用于诈骗、群呼、营销骚扰、验证码接收、号码或线路出租、代拨转接、隐藏实际控制地点，或向第三人提供电信服务。使用者必须遵守所在地法律、电话实名制和运营商协议；本项目不构成任何电信业务许可或运营商授权。公开版最多保存和运行 **5 条 SIM 线路**，不提供独立 SIP 账号或 Telegram 远程拨号、发短信及挂断功能。技术限制不代表某种使用方式当然合法。
+
+## 社区与反馈
+
+- 安装、硬件和运营商兼容性讨论：[GitHub Discussions](https://github.com/MddIdd/mdd-sim-gateway/discussions)
+- 可复现的缺陷或明确的功能请求：[GitHub Issues](https://github.com/MddIdd/mdd-sim-gateway/issues/new/choose)
+- 参与代码或文档贡献：[CONTRIBUTING.md](CONTRIBUTING.md)
+
+如果项目对你有用，欢迎在 GitHub 上收藏它，并分享经过脱敏的硬件或运营商兼容性结果。
 
 ## 国家出口如何工作
 
