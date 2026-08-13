@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-08-13
+
 ### Changed
 
 - Made the GitHub `main` branch and its Releases the single supported product and update line.
