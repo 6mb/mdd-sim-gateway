@@ -332,12 +332,19 @@ function formatBytes(value) {
   return `${(n / 1024 ** 3).toFixed(1)} GiB`
 }
 
+function EyeIcon({ open }) {
+  return <svg className="u-eye-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.4 12s3.5-6 9.6-6 9.6 6 9.6 6-3.5 6-9.6 6-9.6-6-9.6-6Z"/><circle cx="12" cy="12" r="2.7"/>{!open && <path d="M4 4 20 20"/>}</svg>
+}
+
 export function EgressPage({ showToast }) {
   const { t, language } = useI18n()
   const [s, setS] = useState(null)
   const [live, setLive] = useState(null)
   const [newCountry, setNewCountry] = useState('')
+  const [profileDraft, setProfileDraft] = useState(null)
+  const [revealSensitive, setRevealSensitive] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [profileTests, setProfileTests] = useState({})
   const loadLive = () => api.egressStatus().then(setLive).catch(() => setLive(null))
   useEffect(() => {
     api.settings().then(setS).catch(() => setS({ proxy: {} }))
@@ -348,30 +355,89 @@ export function EgressPage({ showToast }) {
     const timer = setInterval(loadLive, 5000)
     return () => clearInterval(timer)
   }, [])
+  useEffect(() => {
+    if (!profileDraft) return undefined
+    const closeOnEscape = event => { if (event.key === 'Escape') setProfileDraft(null) }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [profileDraft])
   if (!s) return <p>{t('Loading')}…</p>
-  const proxy = s.proxy || { exits: {} }
+  const proxy = s.proxy || { profiles: {}, exits: {} }
   const patch = p => setS(x => ({ ...x, proxy: { ...x.proxy, ...p } }))
+  const profiles = proxy.profiles || {}
+  const profileTypeLabel = profile => profile.type === 'subscription' ? t('Subscription link') : profile.type === 'node' ? t('Individual node') : profile.type === 'existing' ? t('Imported outbound') : 'SOCKS5'
   const patchExit = (country, p) => patch({ exits: { ...(proxy.exits || {}), [country]: { ...(proxy.exits?.[country] || {}), ...p } } })
+  const patchProfile = (id, p) => patch({ profiles: { ...profiles, [id]: { ...profiles[id], ...p } } })
   const removeExit = country => { const exits = { ...(proxy.exits || {}) }; delete exits[country]; patch({ exits }) }
-  const addExit = () => { if (!newCountry) return; patchExit(newCountry, { enabled: true, mode: 'subscription', keywords: countryKeywords(newCountry) }); setNewCountry('') }
+  const openAddProfile = () => setProfileDraft({ type: 'subscription', name: '', url: '', refresh_minutes: 30, value: '', server: '', port: 1080, username: '', password: '' })
+  const confirmAddProfile = () => {
+    if (!profileDraft) return
+    const id = `proxy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+    const name = profileDraft.name.trim() || t(profileDraft.type === 'subscription' ? 'New subscription' : profileDraft.type === 'node' ? 'New node' : 'New SOCKS5 proxy')
+    const detail = profileDraft.type === 'subscription'
+      ? { url: profileDraft.url.trim(), refresh_minutes: profileDraft.refresh_minutes || 30 }
+      : profileDraft.type === 'node'
+        ? { value: profileDraft.value.trim() }
+        : { server: profileDraft.server.trim(), port: profileDraft.port || 1080, username: profileDraft.username, password: profileDraft.password }
+    patch({ profiles: { ...profiles, [id]: { name, type: profileDraft.type, ...detail } } })
+    setProfileDraft(null)
+  }
+  const draftReady = !!profileDraft && (profileDraft.type === 'subscription' ? !!profileDraft.url.trim() : profileDraft.type === 'node' ? !!profileDraft.value.trim() : !!profileDraft.server.trim() && +profileDraft.port > 0 && +profileDraft.port <= 65535)
+  const removeProfile = id => {
+    const countries = Object.entries(proxy.exits || {}).filter(([, ex]) => ex.profile_id === id).map(([country]) => country.toUpperCase())
+    if (countries.length) { showToast(t('This proxy is used by: {countries}', { countries: countries.join(', ') })); return }
+    const next = { ...profiles }; delete next[id]; patch({ profiles: next })
+  }
+  const testProfile = async id => {
+    setProfileTests(x => ({ ...x, [id]: { busy: true } }))
+    try {
+      const result = await api.testProxyProfile(id, profiles[id])
+      setProfileTests(x => ({ ...x, [id]: { ok: true, latency: result.latency_ms } }))
+      showToast(t('UDP test passed ({latency} ms)', { latency: result.latency_ms }))
+    } catch (error) {
+      const translated = t(error.message)
+      const message = translated === error.message
+        ? t('UDP test failed. Check the proxy address, credentials, protocol and UDP support.')
+        : translated
+      setProfileTests(x => ({ ...x, [id]: { ok: false, error: message } }))
+      showToast(message)
+    }
+  }
+  const addExit = () => { if (!newCountry) return; patchExit(newCountry, { enabled: true, profile_id: '', keywords: countryKeywords(newCountry) }); setNewCountry('') }
   const available = COUNTRY_CODES.filter(code => !proxy.exits?.[code]).sort((a, b) => countryLabel(a, language).localeCompare(countryLabel(b, language)))
   const save = async () => { setSaving(true); try { await api.saveSettings(s); await api.refreshEgress(); showToast(t('Saved')); setTimeout(loadLive, 1000) } catch (e) { showToast(`${t('Error')}: ${e.message}`) } finally { setSaving(false) } }
   return <div className="u-page">
-    <div className="card u-panel">
-      <div className="u-card-head"><div><h2>{t('Clash subscription')}</h2><p>{t('Nodes must pass a runtime UDP test before VoWiFi uses them.')}</p></div><div className="u-head-actions"><Badge state={live ? 'on' : 'off'}>{live ? t('Status available') : t('Status unavailable')}</Badge><label className="u-title-toggle"><span>{t('Automatic country routing (fail-closed)')}</span><input type="checkbox" className="u-toggle" checked={!!proxy.enabled} onChange={e => patch({ enabled: e.target.checked })} /></label></div></div>
-      <label>{t('Subscription URL')}</label><input className="mono" type="password" value={proxy.subscription_url || ''} onChange={e => patch({ subscription_url: e.target.value })} placeholder="https://…" />
-      {Object.values(proxy.exits || {}).some(ex => ex.mode === 'existing') && <><label>{t('Existing sing-box config')}</label><input className="mono" value={proxy.existing_singbox_config || ''} onChange={e => patch({ existing_singbox_config: e.target.value })} placeholder="/etc/sing-box/config.json" /></>}
-      <div className="u-compact-field"><label>{t('Refresh interval (minutes)')}</label><input type="number" min="1" value={proxy.refresh_minutes || 30} onChange={e => patch({ refresh_minutes: +e.target.value })} /></div>
-    </div>
+    <div className="card u-panel u-routing-policy"><div className="u-card-head"><div><h2>{t('Country proxy routing')}</h2><p>{t('When enabled, VoWiFi uses the proxy assigned to its SIM country and never falls back to the default network if that exit fails.')}</p></div><div className="u-head-actions"><Badge state={proxy.enabled && live ? 'on' : 'off'}>{proxy.enabled ? (live ? t('Enabled') : t('Status unavailable')) : t('Disabled')}</Badge><label className="u-title-toggle"><span>{t('Enable country proxy exits')}</span><input type="checkbox" className="u-toggle" checked={!!proxy.enabled} onChange={e => patch({ enabled: e.target.checked })} /></label></div></div><p className="u-routing-impact">{proxy.enabled ? t('On: each line uses its country exit. If the proxy or UDP validation fails, only that line’s VoWiFi stops; it will not leak through the host’s default network.') : t('Off: country exits are bypassed and VoWiFi uses the host’s default network. Country assignments and proxy settings are kept for later.')}</p>{Object.values(profiles).some(profile => profile.type === 'existing') && <><label>{t('Existing sing-box config')}</label><input className="mono" value={proxy.existing_singbox_config || ''} onChange={e => patch({ existing_singbox_config: e.target.value })} placeholder="/etc/sing-box/config.json" /></>}</div>
+    <div className="u-section-title u-proxy-library-head"><div><h2>{t('Proxy library')}</h2><p>{t('Add reusable subscriptions, individual nodes, or SOCKS5 proxies, then assign them to country exits below.')}</p></div><div className="u-proxy-toolbar"><button className="u-icon-button" type="button" aria-pressed={revealSensitive} onClick={() => setRevealSensitive(x => !x)} title={t(revealSensitive ? 'Hide sensitive information' : 'Show sensitive information')}><EyeIcon open={revealSensitive}/><span>{t('Sensitive information')}</span></button><button className="btn btn-primary" onClick={openAddProfile}>{t('+ Add proxy')}</button></div></div>
+    {!Object.keys(profiles).length ? <Empty title={t('No proxies configured')} detail={t('Add a subscription, individual node, or SOCKS5 proxy above.')} /> : <div className="u-proxy-list">{Object.entries(profiles).map(([id, profile]) => {
+      const usedBy = Object.entries(proxy.exits || {}).filter(([, ex]) => ex.profile_id === id).map(([country]) => countryLabel(country, language))
+      return <div className="card u-proxy-row" key={id}>
+        <div className="u-proxy-identity"><span className="u-proxy-kind">{profileTypeLabel(profile)}</span><input aria-label={t('Name')} value={profile.name || ''} onChange={e => patchProfile(id, { name: e.target.value })} />{usedBy.length ? <small>{t('Used by {countries}', { countries: usedBy.join(', ') })}</small> : <small>{t('Not assigned to a country exit')}</small>}</div>
+        <div className="u-proxy-primary">
+          {profile.type === 'subscription' && <><label>{t('Subscription URL')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.url || ''} onChange={e => patchProfile(id, { url: e.target.value })} placeholder="https://…" /></>}
+          {profile.type === 'node' && <><label>{t('Node share link')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.value || ''} onChange={e => patchProfile(id, { value: e.target.value })} placeholder="vless://…" /></>}
+          {profile.type === 'socks5' && <><label>{t('Server')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} value={profile.server || ''} onChange={e => patchProfile(id, { server: e.target.value })} /></>}
+          {profile.type === 'existing' && <><label>{t('Existing outbound tag')}</label><input value={profile.outbound_tag || ''} onChange={e => patchProfile(id, { outbound_tag: e.target.value })} /></>}
+        </div>
+        <div className="u-proxy-secondary">
+          {profile.type === 'subscription' && <><label>{t('Refresh interval')}</label><div className="u-number-suffix"><input type="number" min="1" value={profile.refresh_minutes || 30} onChange={e => patchProfile(id, { refresh_minutes: +e.target.value })} /><span>{t('minutes')}</span></div></>}
+          {profile.type === 'node' && <small>{t('Reality/XHTTP and common share-link protocols')}</small>}
+          {profile.type === 'socks5' && <><label>{t('Port')}</label><input type="number" min="1" max="65535" value={profile.port || 1080} onChange={e => patchProfile(id, { port: +e.target.value })} /></>}
+          {profile.type === 'existing' && <small>{t('Compatibility entry')}</small>}
+        </div>
+        {profile.type === 'socks5' && <div className="u-proxy-auth"><div><label>{t('Username')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.username || ''} onChange={e => patchProfile(id, { username: e.target.value })} /></div><div><label>{t('Password')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="new-password" value={profile.password || ''} onChange={e => patchProfile(id, { password: e.target.value })} /></div></div>}
+        <div className="u-proxy-actions">{['node', 'socks5'].includes(profile.type) && <><button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test UDP')}</button>{profileTests[id]?.ok && <small className="u-test-ok">{t('Passed')} · {profileTests[id].latency} ms</small>}{profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && <small className="u-test-error" title={profileTests[id].error}>{t('Failed')}</small>}</>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
+      </div>
+    })}</div>}
     <div className="u-section-title"><div><h2>{t('Country exits')}</h2><p>{t('If no healthy UDP exit exists, only that SIM’s VoWiFi stops; 4G remains available.')}</p></div><div className="u-inline u-add-exit"><select value={newCountry} onChange={e => setNewCountry(e.target.value)}><option value="">{t('Select a country/region…')}</option>{available.map(code => <option key={code} value={code}>{countryLabel(code, language)}</option>)}</select><button className="btn btn-primary" disabled={!newCountry} onClick={addExit}>{t('+ Add')}</button></div></div>
     {!Object.keys(proxy.exits || {}).length ? <Empty title={t('No country exits configured')} detail={t('Choose a country above, then configure its node source and keywords.')} /> : <div className="u-device-grid">{Object.entries(proxy.exits).map(([country, ex]) => {
       const st = live?.exits?.[country]
+      const selected = profiles[ex.profile_id]
+      const subscription = selected?.type === 'subscription'
       return <div className="card u-panel" key={country}><div className="u-card-head"><h3>{countryLabel(country, language)}</h3><div className="u-head-actions"><Badge state={st?.ready ? 'on' : st ? 'error' : 'off'}>{st?.ready ? t('UDP verified') : t('Not connected')}</Badge><label className="u-title-toggle"><span>{t('Enabled')}</span><input type="checkbox" className="u-toggle" checked={ex.enabled !== false} onChange={e => patchExit(country, { enabled: e.target.checked })} /></label></div></div>
-        <label>{t('Exit source')}</label><select value={ex.mode || 'subscription'} onChange={e => patchExit(country, { mode: e.target.value })}><option value="subscription">{t('Automatic selection from subscription')}</option><option value="manual">{t('Specified proxy URL')}</option><option value="existing">{t('Import an existing outbound')}</option><option value="direct">{t('Explicit direct connection')}</option></select>
-        {(ex.mode || 'subscription') === 'subscription' && <><label>{t('Node-name keywords (comma-separated)')}</label><input value={(ex.keywords || []).join(', ')} onChange={e => patchExit(country, { keywords: e.target.value.split(',').map(x => x.trim()).filter(Boolean) })} /></>}
-        {ex.mode === 'manual' && <><label>{t('Node link or proxy URL')}</label><textarea className="mono" rows="3" value={ex.proxy_url || ''} onChange={e => patchExit(country, { proxy_url: e.target.value })} placeholder={'vless://…  trojan://…  hysteria2://…  ss://…  vmess://…\nsocks5://user:pass@host:port\n{ "type": "vless", "server": "…", … }'} /><p className="u-note">{t('Paste a node share link, a socks5:// URL, or a raw sing-box outbound object. The node must be able to carry UDP, or VoWiFi IKE cannot use it.')}</p></>}
-        {ex.mode === 'existing' && <><label>{t('Existing outbound tag')}</label><input value={ex.outbound_tag || ''} onChange={e => patchExit(country, { outbound_tag: e.target.value })} /></>}
-        {(ex.mode || 'subscription') === 'subscription'
+        <label>{t('Exit proxy')}</label><select value={ex.mode === 'direct' ? '__direct' : ex.profile_id || ''} onChange={e => patchExit(country, e.target.value === '__direct' ? { mode: 'direct', profile_id: '' } : { mode: '', profile_id: e.target.value })}><option value="">{t('Select a proxy…')}</option>{Object.entries(profiles).map(([id, item]) => <option key={id} value={id}>{item.name || t('Unnamed proxy')} · {profileTypeLabel(item)}</option>)}<option value="__direct">{t('Explicit direct connection')}</option></select>
+        {subscription && <><label>{t('Node-name keywords (comma-separated)')}</label><input value={(ex.keywords || []).join(', ')} onChange={e => patchExit(country, { keywords: e.target.value.split(',').map(x => x.trim()).filter(Boolean) })} /></>}
+        {subscription
           ? <><label>{t('Current node')}</label>
             {/* The pinned name is kept in the list even when the live status is missing, so
                 opening this page before the orchestrator answers cannot silently drop it. */}
@@ -400,6 +466,25 @@ export function EgressPage({ showToast }) {
       </div>
     })}</div>}
     <button className="btn btn-primary" disabled={saving} onClick={save}>{t('Save and apply')}</button>
+    {profileDraft && <div className="u-modal-backdrop" onClick={() => setProfileDraft(null)}>
+      <div className="card u-proxy-modal" role="dialog" aria-modal="true" aria-labelledby="add-proxy-title" onClick={e => e.stopPropagation()}>
+        <div className="u-proxy-modal-head"><div><h2 id="add-proxy-title">{t('Add proxy')}</h2><p>{t('Choose a source type. You can change the details before adding it to the library.')}</p></div><button className="u-modal-close" type="button" onClick={() => setProfileDraft(null)} aria-label={t('Cancel')}>×</button></div>
+        <div className="u-proxy-type-grid">
+          {[
+            ['subscription', t('Subscription link'), t('Paste a Clash subscription URL. The gateway fetches it automatically, extracts compatible nodes, and refreshes it on schedule.'), '↻'],
+            ['node', t('Individual node'), t('Paste one share link. Supports VLESS Reality/XHTTP, Trojan, Hysteria2, Shadowsocks and VMess.'), '◇'],
+            ['socks5', 'SOCKS5', t('Connect to a SOCKS5 server directly. It must support UDP ASSOCIATE for VoWiFi.'), '⇄'],
+          ].map(([type, title, detail, icon]) => <button type="button" key={type} className={`u-proxy-type ${profileDraft.type === type ? 'active' : ''}`} onClick={() => setProfileDraft({ ...profileDraft, type })}><span className="u-proxy-type-icon" aria-hidden="true">{icon}</span><b>{title}</b><small>{detail}</small></button>)}
+        </div>
+        <div className="u-proxy-modal-form">
+          <label>{t('Name')} <span>{t('optional')}</span></label><input autoFocus value={profileDraft.name} onChange={e => setProfileDraft({ ...profileDraft, name: e.target.value })} placeholder={t(profileDraft.type === 'subscription' ? 'New subscription' : profileDraft.type === 'node' ? 'New node' : 'New SOCKS5 proxy')} />
+          {profileDraft.type === 'subscription' && <><label>{t('Subscription URL')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profileDraft.url} onChange={e => setProfileDraft({ ...profileDraft, url: e.target.value })} placeholder="https://…" /><label>{t('Refresh interval (minutes)')}</label><input type="number" min="1" value={profileDraft.refresh_minutes} onChange={e => setProfileDraft({ ...profileDraft, refresh_minutes: +e.target.value })} /></>}
+          {profileDraft.type === 'node' && <><label>{t('Node share link')}</label><textarea className="mono" rows="4" value={profileDraft.value} onChange={e => setProfileDraft({ ...profileDraft, value: e.target.value })} placeholder="vless://…" /></>}
+          {profileDraft.type === 'socks5' && <div className="u-form-grid"><div><label>{t('Server')}</label><input className="mono" value={profileDraft.server} onChange={e => setProfileDraft({ ...profileDraft, server: e.target.value })} placeholder="proxy.example.com" /></div><div><label>{t('Port')}</label><input type="number" min="1" max="65535" value={profileDraft.port} onChange={e => setProfileDraft({ ...profileDraft, port: +e.target.value })} /></div><div><label>{t('Username (optional)')}</label><input value={profileDraft.username} onChange={e => setProfileDraft({ ...profileDraft, username: e.target.value })} /></div><div><label>{t('Password (optional)')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="new-password" value={profileDraft.password} onChange={e => setProfileDraft({ ...profileDraft, password: e.target.value })} /></div></div>}
+        </div>
+        <div className="u-modal-actions"><button className="btn btn-ghost" onClick={() => setProfileDraft(null)}>{t('Cancel')}</button><button className="btn btn-primary" disabled={!draftReady} onClick={confirmAddProfile}>{t('Add to proxy library')}</button></div>
+      </div>
+    </div>}
   </div>
 }
 

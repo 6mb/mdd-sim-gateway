@@ -99,6 +99,9 @@ CCID_SHA256="6d5e6a6884090831ed155ee75cbc03aed252bd8158d94f507a94f05ebaba296c"
 SINGBOX_VERSION="${MDD_SINGBOX_VERSION:-1.13.15}"
 SINGBOX_SHA256_AMD64="a3a3ff223b23c3f4731d0a17cb0ef94c97ce257c70721a5b07dc7ca079203c9f"
 SINGBOX_SHA256_ARM64="f0810bbb5722ae36635687c421019defcc8b328d31a0b3c287901f331747ca93"
+XRAY_VERSION="${MDD_XRAY_VERSION:-26.3.27}"
+XRAY_SHA256_AMD64="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+XRAY_SHA256_ARM64="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
 LPAC_VERSION="${MDD_LPAC_VERSION:-2.3.0}"
 LPAC_COMMIT="c2fcf5e4b21c712d54e35a11da2ad9ad134fb821"
 CMAKE_SHA256_AMD64="0dc2e9a6860f06bf10bd8fadc03e35d9eeb4df46e33763a7e480e987758f385c"
@@ -163,6 +166,28 @@ ensure_singbox() {
   rm -rf "$temporary"
   trap - EXIT HUP INT TERM
   sing-box version | head -n1
+}
+
+ensure_xray() {
+  arch=$(host_arch)
+  if have xray && xray version 2>/dev/null | grep -q "$XRAY_VERSION"; then
+    info "Xray-core $XRAY_VERSION already installed"
+    return
+  fi
+  case "$arch" in
+    amd64) asset="Xray-linux-64.zip"; digest=$XRAY_SHA256_AMD64 ;;
+    arm64) asset="Xray-linux-arm64-v8a.zip"; digest=$XRAY_SHA256_ARM64 ;;
+  esac
+  have unzip || pkg_install unzip
+  temporary=$(mktemp -d /tmp/mdd-xray.XXXXXX)
+  trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+  info "installing Xray-core $XRAY_VERSION ($arch)…"
+  download_verified "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/${asset}" "$temporary/$asset" "$digest"
+  unzip -q "$temporary/$asset" -d "$temporary/xray"
+  install -m 0755 "$temporary/xray/xray" /usr/local/bin/xray
+  rm -rf "$temporary"
+  trap - EXIT HUP INT TERM
+  xray version | head -n1
 }
 
 ensure_cellular_tools() {
@@ -750,6 +775,7 @@ run_orchestrator() {
   [ -n "$VPCD_LIB" ] && info "virtual smart-card driver: $VPCD_LIB" \
     || warn "libifdvpcd.so not found; native readers work, modem virtual slots will stay unavailable"
   have sing-box || die "sing-box installation failed"
+  have xray || die "Xray-core installation failed"
   cat > "$ORCHESTRATOR_UNIT" <<EOF
 [Unit]
 Description=MDD Sim Gateway host egress and modem orchestrator
@@ -832,6 +858,7 @@ cmd_install() {
   fi
   ensure_pcscd
   ensure_singbox
+  ensure_xray
   ensure_cellular_tools
   if [ ! -x "$MDD_DATA_DIR/lpac/lpac" ]; then
     saved_args=$ARGS; ARGS=""; cmd_build_lpac; ARGS=$saved_args
@@ -886,6 +913,7 @@ cmd_reload() {
   ensure_docker
   docker_preflight
   ensure_singbox
+  ensure_xray
   ensure_cellular_tools
   if [ "$PRESERVE_ENGINES" = 1 ]; then
     docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 || \
@@ -1044,6 +1072,7 @@ cmd_status() {
   docker ps -a --filter "name=^${ENGINE_PREFIX}" --format '  {{.Names}}  {{.Status}}' 2>/dev/null || true
   printf '%sDependencies:%s\n' "$B" "$N"
   if have sing-box; then printf '  sing-box  %s\n' "$(sing-box version 2>/dev/null | head -1)"; else printf '  sing-box  (not installed)\n'; fi
+  if have xray; then printf '  Xray-core  %s\n' "$(xray version 2>/dev/null | head -1)"; else printf '  Xray-core  (not installed)\n'; fi
   if have mmcli; then printf '  ModemManager  %s\n' "$(mmcli --version 2>/dev/null | head -1)"; else printf '  ModemManager  (not installed)\n'; fi
   if [ -x "$MDD_DATA_DIR/lpac/lpac" ]; then printf '  lpac  installed\n'; else printf '  lpac  (not installed)\n'; fi
 }

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from control.app import egress
 from host.mdd_orchestrator import (Orchestrator, clash_outbound, parse_manual_outbound,
-                                   parse_proxy_url)
+                                   parse_proxy_url, parse_share_link, xray_xhttp_outbound)
 
 
 class CountryEgressTests(unittest.TestCase):
@@ -126,6 +126,42 @@ class PastedNodeTests(unittest.TestCase):
         self.assertEqual(outbound["tls"]["server_name"], "cdn.example.net")
         self.assertEqual(outbound["transport"], {"type": "ws", "path": "/ws",
                                                  "headers": {"Host": "cdn.example.net"}})
+
+    def test_reality_link_keeps_public_key_short_id_and_fingerprint(self):
+        node = parse_share_link(
+            "vless://uuid-1@reality.example.net:443?security=reality&type=tcp"
+            "&sni=www.microsoft.com&fp=firefox&pbk=public-key&sid=abcd")
+        outbound = clash_outbound(node, "exit-us")
+        self.assertEqual(outbound["tls"]["reality"]["public_key"], "public-key")
+        self.assertEqual(outbound["tls"]["reality"]["short_id"], "abcd")
+        self.assertEqual(outbound["tls"]["utls"]["fingerprint"], "firefox")
+
+    def test_reality_xhttp_link_builds_native_xray_outbound(self):
+        node = parse_share_link(
+            "vless://uuid-2@xhttp.example.net:443?security=reality&type=xhttp"
+            "&sni=www.microsoft.com&fp=chrome&pbk=public-key&sid=0123"
+            "&host=cdn.example.net&path=%2Fupdates&mode=packet-up&packetEncoding=xudp")
+        outbound = xray_xhttp_outbound(node, "out-one")
+        stream = outbound["streamSettings"]
+        self.assertEqual(stream["network"], "xhttp")
+        self.assertEqual(stream["realitySettings"]["publicKey"], "public-key")
+        self.assertEqual(stream["xhttpSettings"]["path"], "/updates")
+        self.assertEqual(outbound["settings"]["vnext"][0]["users"][0]["packetEncoding"],
+                         "xudp")
+
+    def test_xhttp_profile_is_bridged_through_loopback_socks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp), Path.cwd(), dry_run=True)
+            config, states = app.build_proxy_config({
+                "profiles": {"node-one": {"name": "Tokyo XHTTP", "type": "node",
+                    "value": "vless://uuid@x.example.net:443?security=reality&type=xhttp"
+                             "&sni=www.microsoft.com&pbk=public-key&sid=abcd"}},
+                "exits": {"jp": {"enabled": True, "profile_id": "node-one"}},
+            })
+            bridge = next(x for x in config["outbounds"] if x["tag"] == "exit-jp")
+            self.assertEqual((bridge["type"], bridge["server"]), ("socks", "127.0.0.1"))
+            self.assertEqual(app.next_xray_config["inbounds"][0]["settings"]["udp"], True)
+            self.assertEqual(states["jp"]["node"], "Tokyo XHTTP")
 
     def test_trojan_link_honours_insecure_flag(self):
         outbound = parse_manual_outbound(

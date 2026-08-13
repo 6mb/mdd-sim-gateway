@@ -167,6 +167,22 @@ def parse_share_link(url: str) -> dict:
         node.update({"type": "vless", "uuid": userinfo, "flow": query.get("flow") or "",
                      "tls": str(query.get("security") or "").lower()
                      in ("tls", "reality", "xtls")})
+        if str(query.get("security") or "").lower() == "reality":
+            node["reality-opts"] = {"public-key": query.get("pbk") or query.get("publicKey") or "",
+                                    "short-id": query.get("sid") or query.get("shortId") or ""}
+            node["client-fingerprint"] = query.get("fp") or "chrome"
+        if query.get("alpn"):
+            node["alpn"] = [x for x in query["alpn"].split(",") if x]
+        if node["network"] == "xhttp":
+            try:
+                extra = json.loads(unquote(query.get("extra") or "{}"))
+            except (TypeError, ValueError):
+                extra = {}
+            node["xhttp-opts"] = {"host": query.get("host") or "",
+                                  "path": unquote(query.get("path") or "/"),
+                                  "mode": query.get("mode") or "auto",
+                                  "extra": extra if isinstance(extra, dict) else {}}
+            node["packet-encoding"] = query.get("packetEncoding") or "xudp"
     elif scheme == "trojan":
         node.update({"type": "trojan", "password": userinfo})
     elif scheme in ("hysteria2", "hy2"):
@@ -275,7 +291,38 @@ def clash_node_supports_udp(node: dict) -> bool:
     if kind in {"ss", "shadowsocks"} and node.get("plugin"):
         return False
     network = str(node.get("network") or "").lower()
-    return network in {"", "tcp", "ws"}
+    return network in {"", "tcp", "ws", "xhttp"}
+
+
+def xray_xhttp_outbound(node: dict, tag: str) -> dict:
+    """Convert a VLESS XHTTP node to Xray-core's native outbound form."""
+    if str(node.get("type") or "").lower() != "vless" \
+            or str(node.get("network") or "").lower() != "xhttp":
+        raise ValueError("XHTTP currently requires a VLESS node")
+    reality = node.get("reality-opts") or {}
+    if not reality.get("public-key"):
+        raise ValueError("Reality XHTTP node is missing its public key (pbk)")
+    user = {"id": str(node.get("uuid") or ""), "encryption": "none",
+            "flow": str(node.get("flow") or "")}
+    if node.get("packet-encoding"):
+        user["packetEncoding"] = str(node["packet-encoding"])
+    xhttp = node.get("xhttp-opts") or {}
+    stream = {"network": "xhttp", "security": "reality",
+              "realitySettings": {
+                  "serverName": node.get("servername") or node.get("server"),
+                  "fingerprint": node.get("client-fingerprint") or "chrome",
+                  "publicKey": reality.get("public-key"),
+                  "shortId": reality.get("short-id") or "",
+              },
+              "xhttpSettings": {"host": xhttp.get("host") or "",
+                                "path": xhttp.get("path") or "/",
+                                "mode": xhttp.get("mode") or "auto"}}
+    if isinstance(xhttp.get("extra"), dict) and xhttp["extra"]:
+        stream["xhttpSettings"]["extra"] = xhttp["extra"]
+    return {"protocol": "vless", "tag": tag,
+            "settings": {"vnext": [{"address": node.get("server"),
+                                     "port": int(node.get("port") or 0), "users": [user]}]},
+            "streamSettings": stream}
 
 
 def outbound_supports_udp(outbound: dict) -> bool:
@@ -357,6 +404,7 @@ class Orchestrator:
         self.device_desired_path = self.root / "devices-desired.json"
         self.device_status_path = self.root / "devices-status.json"
         self.generated = self.root / "sing-box.json"
+        self.xray_generated = self.root / "xray.json"
         self.cache = self.root / "subscription.yaml"
         # The selector process is our child, so a service restart also restarts sing-box.
         # Recover the last observed choices before rendering its new defaults; otherwise a
@@ -407,6 +455,13 @@ class Orchestrator:
         # currently carrying their tunnels, so a restart needs no re-ranking.
         self.exit_resume: dict[str, str] = {}
         self.singbox = None
+        self.xray = None
+        self.last_xray_fingerprint = ""
+        self.next_xray_config = None
+        self._xray_inbounds: list[dict] = []
+        self._xray_outbounds: list[dict] = []
+        self._xray_rules: list[dict] = []
+        self._xray_ports: dict[str, int] = {}
         self.bridges: dict[str, subprocess.Popen] = {}
         self.last_proxy_fingerprint = ""
         self.applied_cellular_backend: bool | None = None
@@ -1004,59 +1059,121 @@ class Orchestrator:
                 return
         self.applied_timezone = timezone
 
-    def subscription(self, url: str, refresh_minutes: int) -> dict:
-        stale = not self.cache.exists() or time.time() - self.cache.stat().st_mtime > max(1, refresh_minutes) * 60
+    def subscription(self, url: str, refresh_minutes: int, profile_id: str = "legacy") -> dict:
+        safe_id = slug(profile_id)[:64]
+        cache = self.root / "subscriptions" / f"{safe_id}.yaml"
+        # Preserve the pre-profile cache for a seamless first restart after upgrade.
+        if profile_id == "legacy" and self.cache.exists() and not cache.exists():
+            cache.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shutil.copy2(self.cache, cache)
+        stale = not cache.exists() or time.time() - cache.stat().st_mtime > max(1, refresh_minutes) * 60
         if stale:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "mdd-sim-gateway/1"})
                 with urllib.request.urlopen(req, timeout=20) as response:
                     body = response.read(8 * 1024 * 1024)
-                self.cache.parent.mkdir(parents=True, exist_ok=True)
-                self.cache.write_bytes(body)
+                cache.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                cache.write_bytes(body)
+                os.chmod(cache, 0o600)
             except Exception:
                 # A refresh outage must not discard the last known-good subscription. The
                 # urltest pool keeps probing its members while we retry the feed next cycle.
-                if not self.cache.exists():
+                if not cache.exists():
                     raise
         if yaml is None:
             raise RuntimeError("PyYAML is required for subscription mode")
-        return yaml.safe_load(self.cache.read_text(encoding="utf-8")) or {}
+        return yaml.safe_load(cache.read_text(encoding="utf-8")) or {}
+
+    def xhttp_bridge_outbound(self, node: dict, sing_tag: str, runtime_id: str) -> dict:
+        """Register one loopback-only Xray XHTTP endpoint and return its sing-box detour."""
+        if runtime_id not in self._xray_ports:
+            # Stable allocation with collision probing. Ports never leave loopback.
+            port = 24000 + int(hashlib.sha256(runtime_id.encode()).hexdigest()[:6], 16) % 1000
+            used = set(self._xray_ports.values())
+            while port in used:
+                port = 24000 + ((port - 23999) % 1000)
+            self._xray_ports[runtime_id] = port
+            inbound_tag, outbound_tag = f"in-{slug(runtime_id)}", f"out-{slug(runtime_id)}"
+            self._xray_inbounds.append({"listen": "127.0.0.1", "port": port,
+                                        "protocol": "socks", "tag": inbound_tag,
+                                        "settings": {"auth": "noauth", "udp": True,
+                                                     "ip": "127.0.0.1"}})
+            self._xray_outbounds.append(xray_xhttp_outbound(node, outbound_tag))
+            self._xray_rules.append({"type": "field", "inboundTag": [inbound_tag],
+                                     "outboundTag": outbound_tag})
+        return {"type": "socks", "tag": sing_tag, "version": "5",
+                "server": "127.0.0.1", "server_port": self._xray_ports[runtime_id]}
+
+    def node_outbound(self, node: dict, tag: str, runtime_id: str) -> dict:
+        if str(node.get("network") or "").lower() == "xhttp":
+            return self.xhttp_bridge_outbound(node, tag, runtime_id)
+        return clash_outbound(node, tag)
 
     def build_proxy_config(self, proxy: dict) -> tuple[dict, dict]:
         inbounds, outbounds, rules, state = [], [], [], {}
+        self._xray_inbounds, self._xray_outbounds, self._xray_rules, self._xray_ports = [], [], [], {}
         tun_index = 0
         existing_path = str(proxy.get("existing_singbox_config") or "").strip()
         existing = read_json(Path(existing_path)) if existing_path else {}
         existing_by_tag = {x.get("tag"): x for x in existing.get("outbounds", []) if x.get("tag")}
-        subscription = None
+        subscriptions: dict[str, dict] = {}
+        profiles = proxy.get("profiles") or {}
         for country, exit_cfg in sorted((proxy.get("exits") or {}).items()):
             country = str(country).lower()
             if not re.fullmatch(r"[a-z]{2}", country) or not exit_cfg.get("enabled"):
                 continue
             mode = str(exit_cfg.get("mode") or "subscription").lower()
+            profile_id = str(exit_cfg.get("profile_id") or "").strip()
+            profile = profiles.get(profile_id) if profile_id else None
+            if isinstance(profile, dict):
+                profile_type = str(profile.get("type") or "").lower()
+                mode = "subscription" if profile_type == "subscription" else "existing" \
+                    if profile_type == "existing" else "manual"
             tag = f"exit-{country}"
             if mode == "direct":
                 state[country] = {"ready": True, "mode": mode, "interface": ""}
                 continue
             try:
                 if mode == "manual":
-                    outbound = parse_manual_outbound(
-                        exit_cfg.get("outbound_json") or exit_cfg.get("proxy_url") or "", tag)
+                    value = (profile or {}).get("value") if profile else None
+                    if profile and profile.get("type") == "socks5" and not value:
+                        host = str(profile.get("server") or "").strip()
+                        port = int(profile.get("port") or 1080)
+                        outbound = {"type": "socks", "tag": tag, "version": "5",
+                                    "server": host, "server_port": port}
+                        if profile.get("username"):
+                            outbound["username"] = str(profile["username"])
+                        if profile.get("password"):
+                            outbound["password"] = str(profile["password"])
+                        if not host:
+                            raise ValueError("SOCKS5 server is empty")
+                    else:
+                        value = value or exit_cfg.get("outbound_json") or exit_cfg.get("proxy_url") or ""
+                        text = str(value or "").strip()
+                        if text.lower().startswith("vless://"):
+                            node = parse_share_link(text)
+                            outbound = self.node_outbound(node, tag, profile_id or f"country-{country}")
+                        else:
+                            outbound = parse_manual_outbound(value, tag)
                 elif mode == "existing":
-                    source_tag = str(exit_cfg.get("outbound_tag") or "").strip()
+                    source_tag = str((profile or {}).get("outbound_tag")
+                                     or exit_cfg.get("outbound_tag") or "").strip()
                     if source_tag not in existing_by_tag:
                         raise ValueError(f"outbound tag {source_tag!r} not found in existing config")
                     outbound = dict(existing_by_tag[source_tag]); outbound["tag"] = tag
                     if not outbound_supports_udp(outbound):
                         raise ValueError(f"outbound {source_tag!r} is not UDP-capable")
                 elif mode == "subscription":
-                    if subscription is None:
-                        url = str(proxy.get("subscription_url") or "").strip()
+                    subscription_id = profile_id or "legacy"
+                    if subscription_id not in subscriptions:
+                        url = str((profile or {}).get("url") or proxy.get("subscription_url") or "").strip()
                         if not url:
                             raise ValueError("subscription URL is empty")
-                        subscription = self.subscription(url, int(proxy.get("refresh_minutes") or 30))
+                        refresh = int((profile or {}).get("refresh_minutes")
+                                      or proxy.get("refresh_minutes") or 30)
+                        subscriptions[subscription_id] = self.subscription(url, refresh, subscription_id)
                     words = [str(x).lower() for x in (exit_cfg.get("keywords") or []) if str(x).strip()]
-                    nodes = subscription.get("proxies") or []
+                    nodes = subscriptions[subscription_id].get("proxies") or []
                     named = [n for n in nodes if not words or any(
                         node_keyword_matches(n.get("name", ""), w) for w in words)]
                     matches = [n for n in named if clash_node_supports_udp(n)]
@@ -1069,7 +1186,8 @@ class Orchestrator:
                     member_names = {}
                     for index, node in enumerate(matches[:32]):
                         member_tag = f"{tag}-{index}"
-                        outbounds.append(clash_outbound(node, member_tag))
+                        outbounds.append(self.node_outbound(
+                            node, member_tag, f"{subscription_id}-{hashlib.sha256(str(node).encode()).hexdigest()[:12]}"))
                         member_tags.append(member_tag)
                         member_names[member_tag] = str(node.get("name") or member_tag)
                     # An operator can pin one node by its subscription name. Pinning matches on
@@ -1126,7 +1244,8 @@ class Orchestrator:
                 state[country] = {"ready": True, "mode": mode, "interface": iface,
                                   "proxy_host": COUNTRY_PROXY_LISTEN,
                                   "proxy_port": proxy_port,
-                                  "node": str(outbound.get("server") or outbound.get("type"))}
+                                  "node": str((profile or {}).get("name")
+                                              or outbound.get("server") or outbound.get("type"))}
                 if mode == "subscription":
                     # Kept only in memory until the Clash API reports which urltest member is
                     # active. proxy-status.json publishes the original subscription node name,
@@ -1153,6 +1272,11 @@ class Orchestrator:
                 state[country] = {"ready": False, "mode": mode, "error": str(exc), "terminal": True}
         config = {"log": {"level": "info"}, "inbounds": inbounds,
                   "outbounds": outbounds, "route": {"rules": rules, "auto_detect_interface": True}}
+        self.next_xray_config = ({"log": {"loglevel": "warning"},
+                                  "inbounds": self._xray_inbounds,
+                                  "outbounds": self._xray_outbounds,
+                                  "routing": {"domainStrategy": "AsIs", "rules": self._xray_rules}}
+                                 if self._xray_inbounds else None)
         if any(value.get("mode") == "subscription" and value.get("ready")
                for value in state.values()):
             # Loopback-only: used to resolve urltest's current member tag to the human-readable
@@ -1438,6 +1562,47 @@ class Orchestrator:
             raise RuntimeError("sing-box exited during startup")
         self.last_proxy_fingerprint = fingerprint
 
+    def apply_xray(self, config: dict | None):
+        if not config:
+            if self.xray and self.xray.poll() is None:
+                self.xray.terminate()
+                try: self.xray.wait(5)
+                except subprocess.TimeoutExpired: self.xray.kill(); self.xray.wait()
+            self.xray = None
+            self.last_xray_fingerprint = ""
+            return
+        fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+        if fingerprint == self.last_xray_fingerprint and self.xray and self.xray.poll() is None:
+            return
+        if self.dry_run:
+            atomic_json(self.xray_generated, config)
+            self.last_xray_fingerprint = fingerprint
+            return
+        binary = shutil.which(os.environ.get("MDD_XRAY_BIN", "xray"))
+        if not binary:
+            raise RuntimeError("Xray-core executable not found; it is required by XHTTP nodes")
+        candidate = self.xray_generated.with_name("xray.candidate.json")
+        atomic_json(candidate, config)
+        check = run([binary, "run", "-test", "-config", str(candidate)])
+        if check.returncode:
+            raise RuntimeError("Xray config invalid: " + (check.stderr or check.stdout).strip())
+        old, old_config = self.xray, self.xray_generated.read_bytes() if self.xray_generated.exists() else None
+        if old and old.poll() is None:
+            old.terminate()
+            try: old.wait(5)
+            except subprocess.TimeoutExpired: old.kill(); old.wait()
+        os.replace(candidate, self.xray_generated)
+        self.xray = subprocess.Popen([binary, "run", "-config", str(self.xray_generated)])
+        time.sleep(0.6)
+        if self.xray.poll() is not None:
+            if old_config is not None:
+                self.xray_generated.write_bytes(old_config)
+                self.xray = subprocess.Popen([binary, "run", "-config", str(self.xray_generated)])
+            else:
+                self.xray = None
+            raise RuntimeError("Xray exited during startup")
+        self.last_xray_fingerprint = fingerprint
+
     @staticmethod
     def resolve(host: str) -> list[str]:
         result = set()
@@ -1495,6 +1660,7 @@ class Orchestrator:
                 self.apply_routes(set())
                 if self.singbox and self.singbox.poll() is None: self.singbox.terminate()
                 self.singbox = None; self.last_proxy_fingerprint = ""
+                self.apply_xray(None)
                 for line in desired.get("lines") or []:
                     lines_status[str(line.get("id"))] = {"ready": True, "mode": "direct"}
                 atomic_json(self.status_path, {"updated_at": int(time.time()), "enabled": False,
@@ -1503,7 +1669,10 @@ class Orchestrator:
             config, exits_state = self.build_proxy_config(proxy)
             configured = [x for x in exits_state.values() if x.get("mode") != "direct" and x.get("ready")]
             if configured:
+                self.apply_xray(self.next_xray_config)
                 self.apply_singbox(config)
+            else:
+                self.apply_xray(None)
             # Ranking must come first: update_selected_nodes then reports the node this cycle
             # actually settled on, so proxy-status.json never shows the pre-selection default.
             self.process_reselect_requests(exits_state)
@@ -1861,6 +2030,7 @@ class Orchestrator:
         # repeated here for non-signal exits.
         self.request_stop()
         if self.singbox and self.singbox.poll() is None: self.singbox.terminate()
+        if self.xray and self.xray.poll() is None: self.xray.terminate()
         self.stop_bridges()
 
 

@@ -4,6 +4,25 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-08-13
+
+### Added
+
+- Added a reusable proxy library for subscriptions, individual share-link nodes and SOCKS5
+  servers. Country exits now bind to a library entry; subscriptions retain country filtering
+  and automatic or pinned node selection, while individual nodes and SOCKS5 are used directly.
+- Added VLESS Reality/XHTTP support through a loopback-only, checksummed Xray-core bridge, while
+  preserving Reality parameters and common VLESS, Trojan, Hysteria2 and Shadowsocks share links.
+- Added standalone SOCKS5 UDP-associate tests for individual nodes and SOCKS5 entries, with
+  latency and localized errors. Tests use an isolated temporary runtime, need no country
+  assignment and do not change active exits or VoWiFi lines.
+
+### Changed
+
+- Redesigned Network Exits around a top-level country-routing switch, compact horizontal proxy
+  rows, an add-proxy dialog, masked sensitive fields with an explicit reveal control, and clearer
+  country assignment behavior. Notifications now appear from the top center of the screen.
+
 ## [1.3.3] - 2026-08-12
 
 ### Fixed

@@ -4,7 +4,7 @@
 
 MDD Sim Gateway 是面向自托管设备的多 SIM 通信网关。它把蜂窝模块、USB 读卡器、4G 数据、Wi‑Fi Calling、通话、短信、eSIM 与国家代理出口整合到一个中英文 Web 控制台中。
 
-当前版本：**1.3.3** · [English](README.en.md)
+当前版本：**1.3.4** · [English](README.en.md)
 
 > 本项目直接控制蜂窝模块、SIM、网络路由和 IMS。请只在你拥有或获准管理的设备及号码上使用；运营商是否开放 Wi‑Fi Calling 仍取决于套餐、区域、设备身份和网络策略。
 
@@ -37,7 +37,7 @@ MDD Sim Gateway 是面向自托管设备的多 SIM 通信网关。它把蜂窝�
 - 自动读取 IMSI、ICCID、MCC/MNC、SIM SPN/GID 和模块 IMEI；使用内置 AOSP Carrier ID 数据离线识别宿主网络与部分 MVNO，PIN 开启时仅在本机加密边界内使用。
 - 每张模块 SIM 显式展示三条逻辑通道的容量、实际分配、用途和错误；部分分配失败会主动释放已打开通道。
 - 登录后使用的浏览器软电话、短信收发、通话记录和来电通知；公开版不开放独立 SIP 客户端接入。
-- Clash 订阅按国家筛选节点，由 sing-box 建立独立 TUN；候选节点必须通过 UDP 健康检查，失败时按 SIM 故障关闭，不泄漏到错误国家。
+- 可建立包含多个订阅、具体节点和 SOCKS5 的代理库，再为国家出口复用其中一项；Reality/XHTTP 节点由 Xray-core 兼容层承载，其余节点与国家 TUN 由 sing-box 管理。候选节点必须通过 UDP 健康检查，失败时按 SIM 故障关闭，不泄漏到错误国家。
 - 标准 GET/POST Webhook、Telegram（直连/手动代理/国家出口）和 PushPlus。
 - Telegram 仅用于单向推送来电、短信和设备状态通知，不接受远程控制指令。
 - 使用 lpac 管理 eUICC 配置文件；支持需要显式选择安全元件的双 SE 卡。
@@ -70,7 +70,7 @@ sudo ./install.sh install
 安装脚本会自动：
 
 1. 检查并复用现有系统 Docker（没有时才从发行版安装），安装 pcscd、ModemManager/NetworkManager；
-2. 按架构下载 sing-box 1.13.15 并验证 SHA-256；
+2. 按架构下载 sing-box 1.13.15 与 Xray-core 26.3.27 并验证 SHA-256；
 3. 下载固定版本 lpac 2.3.0 源码并本地构建；
 4. 构建 MDD 控制面、WebUI 与每 SIM VoWiFi 引擎；
 5. 安装 systemd 服务并设置开机启动。
@@ -94,7 +94,9 @@ sudo ./install.sh uninstall
 
 ## 国家出口如何工作
 
-在“网络出口”填写 Clash 订阅后，为 SIM 国家添加一个出口。关键词匹配的是订阅中的**节点名称**，所有匹配节点进入 sing-box `urltest` 池；界面显示实际选中的节点名。系统额外验证 UDP 能力，因为 IKEv2/ESP NAT 穿越依赖 UDP 500/4500。每个国家使用独立 TUN（例如 `mdd-jp`），只有对应 SIM 的 ePDG 路由进入该接口。
+先在“网络出口”的代理库中添加一个或多个订阅、具体节点或 SOCKS5 代理，再为 SIM 国家选择出口。订阅模式继续用关键词匹配**节点名称**并允许自动/固定节点；选择具体节点或 SOCKS5 时则直接使用该项。Reality/XHTTP 分享链接通过本机回环上的 Xray-core 接入，不向局域网开放端口。界面中的眼睛开关默认关闭，订阅地址、节点链接和 SOCKS5 信息均以星号遮挡。
+
+系统对所有非直连出口额外验证 UDP 能力，因为 IKEv2/ESP NAT 穿越依赖 UDP 500/4500。每个国家使用独立 TUN（例如 `mdd-jp`），只有对应 SIM 的 ePDG 路由进入该接口。
 
 ## 安全与隐私
 

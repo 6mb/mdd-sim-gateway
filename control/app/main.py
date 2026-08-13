@@ -3244,6 +3244,26 @@ def api_get_settings():
 def api_put_settings(body: dict):
     # Ignore the legacy field from older cached clients. Product identity is fixed.
     body.pop("system_name", None)
+    proxy = body.get("proxy")
+    if proxy is not None:
+        if not isinstance(proxy, dict) or not isinstance(proxy.get("profiles", {}), dict) \
+                or not isinstance(proxy.get("exits", {}), dict):
+            raise HTTPException(400, "invalid proxy library")
+        profiles = proxy.get("profiles") or {}
+        for profile_id, profile in profiles.items():
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(profile_id)) \
+                    or not isinstance(profile, dict):
+                raise HTTPException(400, "invalid proxy profile id")
+            if str(profile.get("type") or "") not in {"subscription", "node", "socks5", "existing"}:
+                raise HTTPException(400, "invalid proxy profile type")
+            if not str(profile.get("name") or "").strip():
+                raise HTTPException(400, "proxy profile name is required")
+        for country, exit_cfg in (proxy.get("exits") or {}).items():
+            if not egress.normalize_country(country) or not isinstance(exit_cfg, dict):
+                raise HTTPException(400, "invalid country exit")
+            profile_id = str(exit_cfg.get("profile_id") or "")
+            if profile_id and profile_id not in profiles:
+                raise HTTPException(400, f"country exit references unknown proxy {profile_id!r}")
     if "timezone" in body:
         try:
             ZoneInfo(str(body.get("timezone") or ""))
@@ -3300,12 +3320,18 @@ def api_egress_refresh():
         os.remove(cache)
     except FileNotFoundError:
         pass
+    cache_dir = os.path.join(cfg.DATA_DIR, "orchestrator", "subscriptions")
+    try:
+        for name in os.listdir(cache_dir):
+            if name.endswith(".yaml"):
+                os.remove(os.path.join(cache_dir, name))
+    except FileNotFoundError:
+        pass
     egress.publish()
     return {"ok": True, "requested_at": int(time.time())}
 
 
-@app.post("/api/egress/{country}/test")
-async def api_egress_test(country: str):
+async def _test_egress_country(country: str):
     country = egress.normalize_country(country)
     exits = (cfg.get_settings().get("proxy") or {}).get("exits") or {}
     if not country or country not in exits:
@@ -3316,12 +3342,39 @@ async def api_egress_test(country: str):
     while time.monotonic() < deadline:
         latest = (egress.status().get("exits") or {}).get(country) or {}
         if latest.get("ready"):
+            host, port = str(latest.get("proxy_host") or ""), int(latest.get("proxy_port") or 0)
+            if not host or not port:
+                raise HTTPException(503, "country exit has no UDP test endpoint")
+            try:
+                latency = await asyncio.to_thread(egress.test_udp_proxy, host, port)
+            except egress.EgressError as exc:
+                raise HTTPException(503, str(exc)) from exc
             return {"ok": True, "country": country, "node": latest.get("node") or "",
-                    "interface": latest.get("interface") or ""}
+                    "interface": latest.get("interface") or "", "latency_ms": latency}
         if latest.get("error"):
             break
         await asyncio.sleep(.5)
     raise HTTPException(503, latest.get("error") or "no healthy UDP-capable node is ready")
+
+
+@app.post("/api/egress/profile/{profile_id}/test")
+async def api_egress_profile_test(profile_id: str, body: dict | None = None):
+    saved = ((cfg.get_settings().get("proxy") or {}).get("profiles") or {}).get(profile_id)
+    profile = body if isinstance(body, dict) and body else saved
+    if not isinstance(profile, dict):
+        raise HTTPException(404, "save this proxy before testing it")
+    if profile.get("type") not in {"node", "socks5"}:
+        raise HTTPException(400, "only individual nodes and SOCKS5 proxies can be tested here")
+    try:
+        latency = await asyncio.to_thread(egress.test_proxy_profile, profile)
+    except egress.EgressError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {"ok": True, "profile_id": profile_id, "latency_ms": latency}
+
+
+@app.post("/api/egress/{country}/test")
+async def api_egress_test(country: str):
+    return await _test_egress_country(country)
 
 
 def _test_push_payload() -> dict:
