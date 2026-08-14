@@ -29,6 +29,23 @@ class ManageChannelTests(unittest.TestCase):
         self.assertIsNone(rewritten)
         self.assertEqual(response, bytes.fromhex("9000"))
 
+    def test_closing_the_channel_restores_the_usim_file_system(self):
+        """The LPA leaves the ISD-R selected on a channel pin_keeper shares, and pcscd only
+        power-cycles the card once every client is gone — so the next ADF.USIM select would
+        fail and the line would report NO_CARD with a perfectly good SIM in the reader."""
+        card = ModemCard.__new__(ModemCard)
+        selected = []
+        card.select_mf = lambda channel: selected.append(channel)
+
+        self.assertEqual(card.transmit(self.CLOSE, 2), bytes.fromhex("9000"))
+        self.assertEqual(selected, [2])
+
+    def test_opening_a_channel_does_not_disturb_the_selection(self):
+        card = ModemCard.__new__(ModemCard)
+        card.select_mf = lambda channel: self.fail("MF must not be reselected on open")
+
+        self.assertEqual(card.transmit(self.OPEN, 1), bytes.fromhex("019000"))
+
     def test_a_select_after_the_open_is_forced_onto_the_real_channel(self):
         select = bytes.fromhex("01A40400" + "10" + "A0000005591010FFFFFFFF8900000100")
         rewritten, response = ModemCard.on_channel(select, 3)

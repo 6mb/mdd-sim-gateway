@@ -234,9 +234,24 @@ class ModemCard:
         rewritten = bytes(((apdu[0] & 0xFC) | channel,)) + apdu[1:]
         return rewritten, None
 
+    @staticmethod
+    def closes_logical_channel(apdu) -> bool:
+        return len(apdu) >= 3 and apdu[1] == 0x70 and apdu[2] == 0x80
+
     def transmit(self, apdu, channel):
         rewritten, local_response = self.on_channel(apdu, channel)
         if local_response is not None:
+            if self.closes_logical_channel(apdu):
+                # An LPA leaves the ISD-R selected here when it closes its channel, but the
+                # slot is shared: pin_keeper and the engine come back to the same real UICC
+                # channel expecting the plain USIM view, and their ADF.USIM select fails
+                # against an eUICC application. pcscd only power-cycles the card when every
+                # client is gone, so restore the file system now instead of waiting for it.
+                try:
+                    self.select_mf(channel)
+                except ModemError as exc:
+                    print("[bridge] slot channel %d could not restore MF after an LPA "
+                          "session: %s" % (channel, exc), flush=True)
             return local_response
         try:
             return self.csim(rewritten)

@@ -155,6 +155,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   logical channel before it can select the ISD-R, and lpac reports that refusal as a bare
   `euicc_init`, so eSIM management over a cellular module could never start. The slot already
   owns a UICC channel, so OPEN now reports it and CLOSE is acknowledged without releasing it.
+  Closing that channel also restores the USIM file system, because the slot is shared with
+  PIN keeping and the engine and an eUICC application left selected there reads as no card.
 - Stopped reporting "this card is not an eUICC" for a reader that simply holds no card, and
   added `install.sh diagnose`: one masked report covering reader definitions, live readers,
   bridges, sockets, orchestrator state and an lpac read per module reader.
