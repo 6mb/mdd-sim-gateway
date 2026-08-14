@@ -157,6 +157,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   owns a UICC channel, so OPEN now reports it and CLOSE is acknowledged without releasing it.
   Closing that channel also restores the USIM file system, because the slot is shared with
   PIN keeping and the engine and an eUICC application left selected there reads as no card.
+- Stopped a device from reporting the last problem of a line that was just switched off.
+  The status cache kept serving that observation until the next poll, which is how a module
+  could read "no SIM card" with its SIM in the reader. A disabled line now reports stopped
+  immediately, and switching VoWiFi off records the stop the way an explicit stop does.
 - Stopped reporting "this card is not an eUICC" for a reader that simply holds no card, and
   added `install.sh diagnose`: one masked report covering reader definitions, live readers,
   bridges, sockets, orchestrator state and an lpac read per module reader.

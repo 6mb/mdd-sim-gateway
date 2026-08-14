@@ -1729,7 +1729,10 @@ def _cached_line_status(inst: dict) -> dict:
     """Return an immediate status snapshot without contacting Docker/Asterisk/AMI."""
     iid = str(inst["id"])
     cached = hub.status_cache.get(iid)
-    if cached:
+    # A disabled line is stopped by definition, so the last sample taken while it ran says
+    # nothing about it now. Serving that cache is what left a device reading "no SIM card"
+    # after VoWiFi was switched off, until the next poll happened to overwrite it.
+    if cached and (inst.get("enabled", True) or cached.get("state") == "STOPPED"):
         return dict(cached)
     if not inst.get("enabled", True):
         return _with_status_activity(iid, {
@@ -3393,6 +3396,16 @@ async def api_device_capabilities(device_id: str, body: dict):
                 running_ids.append(str(inst["id"]))
                 await asyncio.to_thread(engine.stop, str(inst["id"]))
                 await hub.drop_ami(str(inst["id"]))
+                if not wanted["vowifi_enabled"]:
+                    # Record the stop the way an explicit line stop does. Otherwise the last
+                    # observation of the running line — NO_CARD, REGISTERING, whatever it was
+                    # — stays authoritative until the next poll and the UI reports a problem
+                    # with a line the operator just switched off.
+                    hub.status_cache[str(inst["id"])] = _with_status_activity(
+                        str(inst["id"]),
+                        {"state": "STOPPED", "label": status_mod.LABELS["STOPPED"],
+                         "reason_code": "stopped", "reason": "Stopped.", "detail": {}})
+                    hub.status_sampled_at[str(inst["id"])] = time.monotonic()
 
         device_state.set_desired(device_id,
                                  cellular_enabled=wanted["cellular_enabled"],
