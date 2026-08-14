@@ -216,7 +216,18 @@ class ModemCard:
         if apdu[0] == 0xFF:
             return None, bytes.fromhex("6D00")
         if apdu[1] == 0x70:
-            return None, bytes.fromhex("6881")
+            # MANAGE CHANNEL. This slot already owns one UICC logical channel, opened with
+            # AT+CCHO when the bridge started, and the modem cannot nest another one inside
+            # it. Answer locally instead of refusing: an LPA opens a channel before it can
+            # select the ISD-R, so a flat rejection made every eSIM read on a module fail
+            # in euicc_init. OPEN reports the channel this slot is already on (the APDU
+            # rewrite below forces it anyway) and CLOSE is acknowledged without releasing
+            # it, because the slot outlives the caller that asked.
+            if apdu[2] == 0x00:
+                return None, bytes((channel, 0x90, 0x00))
+            if apdu[2] == 0x80:
+                return None, bytes.fromhex("9000")
+            return None, bytes.fromhex("6A86")
         # 0xA0 is the legacy GSM class and has no logical-channel encoding.
         if apdu[0] == 0xA0:
             return None, bytes.fromhex("6881")

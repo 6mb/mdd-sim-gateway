@@ -5,9 +5,40 @@ from unittest.mock import patch
 
 from host import mdd_orchestrator
 from host.mdd_orchestrator import Orchestrator
-from host.vpcd_modem_bridge import (ModemError, ModemManagerCard,
+from host.vpcd_modem_bridge import (ModemCard, ModemError, ModemManagerCard,
                                     allocate_logical_channels,
                                     logical_channel_metadata, serve_slot)
+
+
+class ManageChannelTests(unittest.TestCase):
+    """An LPA opens a logical channel before it can select the ISD-R. The slot is already
+    on one, opened with AT+CCHO, and the modem cannot nest another inside it — so the
+    bridge answers MANAGE CHANNEL itself. Refusing it failed every eSIM read on a module
+    with a bare `euicc_init`, exactly as lpac's PC/SC driver reports that failure."""
+
+    OPEN = bytes.fromhex("0070000001")      # lpac's APDU_OPENLOGICCHANNEL
+    CLOSE = bytes.fromhex("00708001" + "00")
+
+    def test_open_reports_the_channel_this_slot_already_holds(self):
+        rewritten, response = ModemCard.on_channel(self.OPEN, 2)
+        self.assertIsNone(rewritten)                       # never reaches the modem
+        self.assertEqual(response, bytes.fromhex("029000"))  # lpac requires 3 bytes, SW 9x
+
+    def test_close_is_acknowledged_without_releasing_the_slot(self):
+        rewritten, response = ModemCard.on_channel(self.CLOSE, 2)
+        self.assertIsNone(rewritten)
+        self.assertEqual(response, bytes.fromhex("9000"))
+
+    def test_a_select_after_the_open_is_forced_onto_the_real_channel(self):
+        select = bytes.fromhex("01A40400" + "10" + "A0000005591010FFFFFFFF8900000100")
+        rewritten, response = ModemCard.on_channel(select, 3)
+        self.assertIsNone(response)
+        self.assertEqual(rewritten[0], 0x03)
+        self.assertEqual(rewritten[1:], select[1:])
+
+    def test_an_unknown_manage_channel_variant_is_still_refused(self):
+        _rewritten, response = ModemCard.on_channel(bytes.fromhex("0070400001"), 1)
+        self.assertEqual(response, bytes.fromhex("6A86"))
 
 
 class ModemBackendTests(unittest.TestCase):

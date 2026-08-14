@@ -151,6 +151,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   switch stays disabled until one does — a fresh module could never be provisioned, and
   turning VoWiFi off to run an eSIM operation emptied the reader instead. Bridges now follow
   the hardware: every connected module has one.
+- Answered MANAGE CHANNEL inside the module SIM bridge instead of refusing it. An LPA opens a
+  logical channel before it can select the ISD-R, and lpac reports that refusal as a bare
+  `euicc_init`, so eSIM management over a cellular module could never start. The slot already
+  owns a UICC channel, so OPEN now reports it and CLOSE is acknowledged without releasing it.
 - Stopped reporting "this card is not an eUICC" for a reader that simply holds no card, and
   added `install.sh diagnose`: one masked report covering reader definitions, live readers,
   bridges, sockets, orchestrator state and an lpac read per module reader.
