@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import tempfile
 import time
@@ -631,6 +632,31 @@ modem.3gpp.registration-state : unknown
                 self.assertEqual(app.driver_slots(), mdd_orchestrator.VPCD_PACKAGED_SLOTS)
                 drivers.joinpath(".mdd-vpcd-slots-4").touch()
                 self.assertEqual(app.driver_slots(), 4)
+
+    def test_each_modem_reader_uses_an_independent_vpcd_library_image(self):
+        """libifdvpcd's ctx array is process-global, so two readers must not share a DSO."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "libifdvpcd.so"
+            source.write_bytes(b"test-vpcd-driver")
+            config_path = root / "reader.conf.d" / "mdd-sim-gateway-modems"
+            app = Orchestrator(root / "data", root, dry_run=False)
+
+            with patch.dict(os.environ, {
+                    "MDD_VPCD_LIBRARY": str(source),
+                    "MDD_VPCD_DRIVER_INSTANCE_DIR": str(root / "isolated"),
+            }):
+                first = app.reader_stanza({"id": "modem-a"}, 0x3C00, config_path)
+                second = app.reader_stanza({"id": "modem-b"}, 0x3D00, config_path)
+
+            first_path = root / "isolated" / "libifdvpcd-mdd-3c00.so"
+            second_path = root / "isolated" / "libifdvpcd-mdd-3d00.so"
+            self.assertIn(f"LIBPATH {first_path}", first)
+            self.assertIn(f"LIBPATH {second_path}", second)
+            self.assertNotEqual(first_path, second_path)
+            self.assertEqual(first_path.read_bytes(), source.read_bytes())
+            self.assertEqual(second_path.read_bytes(), source.read_bytes())
+            self.assertNotEqual(first_path.stat().st_ino, second_path.stat().st_ino)
 
     def test_a_logged_refusal_skips_the_remaining_grace_period(self):
         """ModemManager writes its refusal to its own journal. Waiting the full grace

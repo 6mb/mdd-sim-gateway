@@ -2231,10 +2231,64 @@ class Orchestrator:
         except OSError as exc:
             print(f"could not retire identity document for {old_id}: {exc}", flush=True)
 
-    def reader_stanza(self, modem: dict, base: int) -> str:
+    def vpcd_library(self) -> Path:
+        """Return the installed upstream VPCD IFD handler.
+
+        ``MDD_VPCD_LIBRARY`` is primarily a relocatable-install/test hook.  Instance copies
+        are deliberately excluded from discovery by looking for the exact upstream basename.
+        """
+        configured = os.environ.get("MDD_VPCD_LIBRARY", "").strip()
+        if configured:
+            return Path(configured)
         candidates = list(Path("/usr/local/lib").glob("**/libifdvpcd.so"))
         candidates += list(Path("/usr/lib").glob("**/libifdvpcd.so"))
-        library = str(candidates[0]) if candidates else "/usr/local/lib/libifdvpcd.so"
+        return candidates[0] if candidates else Path("/usr/local/lib/libifdvpcd.so")
+
+    def isolated_vpcd_library(self, base: int, config_path: Path) -> Path:
+        """Give each modem its own loaded copy of libifdvpcd.
+
+        Upstream libifdvpcd stores its connections in a process-global ``ctx[slot]`` array
+        and indexes it with only the low (slot) half of the PC/SC LUN.  If two configured
+        readers load the same shared object, their slot 0/1/2 contexts alias: the later
+        modem can overwrite the earlier modem even though pcscd still lists both readers and
+        every bridge TCP socket remains established.  A distinct shared-object file per base
+        port gives the dynamic loader a separate data segment and therefore a separate slot
+        array for every modem.
+        """
+        source = self.vpcd_library()
+        directory = Path(os.environ.get(
+            "MDD_VPCD_DRIVER_INSTANCE_DIR",
+            str(config_path.parent / ".mdd-vpcd-drivers"),
+        ))
+        target = directory / f"libifdvpcd-mdd-{int(base):04x}.so"
+        if self.dry_run:
+            return target
+        if not source.is_file():
+            # The installer already reports a missing driver. Avoid repeating the same
+            # warning on every reconciliation cycle while retaining its expected path in
+            # the generated definition for when the package is repaired.
+            return source
+        try:
+            source_bytes = source.read_bytes()
+            if target.is_file() and target.read_bytes() == source_bytes:
+                return target
+            directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+            os.chmod(directory, 0o755)
+            temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+            temporary.write_bytes(source_bytes)
+            os.chmod(temporary, 0o755)
+            os.replace(temporary, target)
+            return target
+        except OSError as exc:
+            # A single-modem deployment still works with the original library.  Keep the
+            # gateway available and make the isolation failure explicit in the journal.
+            print(f"could not isolate VPCD driver for port {base}: {exc}; using {source}",
+                  flush=True)
+            return source
+
+    def reader_stanza(self, modem: dict, base: int, config_path: Path | None = None) -> str:
+        config_path = config_path or self.reader_config_path
+        library = self.isolated_vpcd_library(base, config_path)
         return (f"FRIENDLYNAME \"VoWiFi Modem {modem['id']}\"\n"
                 f"DEVICENAME /dev/null:0x{base:04X}\nLIBPATH {library}\n"
                 f"CHANNELID 0x{base:04X}\n")
@@ -2304,15 +2358,19 @@ class Orchestrator:
         # dialling a port pcscd will never listen on for the life of the process.
         slots = max(1, min(VPCD_CHANNEL_CAPACITY, self.driver_slots(),
                            int(hardware.get("vpcd_slots") or VPCD_CHANNEL_CAPACITY)))
-        # Keep reader definitions stable for every detected modem. A capability toggle only
-        # starts/stops that modem's bridge; it must not restart pcscd and disturb other lines.
-        reader_config = "\n".join(self.reader_stanza(m, assignments[m["id"]]["base_port"])
-                                  for m in modems)
         # Resolved per cycle, not cached: the path is an environment override and tests (and
         # a relocated install) expect a change to take effect without a restart.
         config_path = Path(os.environ.get(
             "MDD_VPCD_READER_CONFIG", "/etc/reader.conf.d/mdd-sim-gateway-modems"))
         self.reader_config_path = config_path
+        # Keep reader definitions stable for every detected modem. A capability toggle only
+        # starts/stops that modem's bridge; it must not restart pcscd and disturb other lines.
+        # Each definition points at its own copy of libifdvpcd because the upstream driver has
+        # process-global per-slot state and cannot isolate two modems in one shared object.
+        reader_config = "\n".join(
+            self.reader_stanza(m, assignments[m["id"]]["base_port"], config_path)
+            for m in modems
+        )
         legacy_config = config_path.with_name("vowifi-modems")
         legacy_present = legacy_config.exists() and legacy_config != config_path
         distro_disabled = self.disable_distro_vpcd_reader(config_path)
