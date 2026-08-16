@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control.app import device_state
 from host import mdd_orchestrator
@@ -800,6 +800,25 @@ modem.3gpp.registration-state : unknown
             self.assertEqual(document["shared"]["modem_backend"], "serial")
             self.assertEqual(document["shared"]["cellular_backend"],
                              "disabled-by-configuration")
+
+    def test_serial_mode_never_touches_the_modem_radio_port(self):
+        """VoWiFi-only mode gives the direct bridge exclusive ownership of the AT port.
+
+        The PVE field host rejects ordinary pyserial DTR/RTS setup with EPROTO.  Sending
+        AT+CFUN before the virtualisation-tolerant bridge starts left both modems unable to
+        answer its first ATE0 command, despite cellular and flight mode being unsupported.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=False)
+            app._serial_mode = True
+            serial_module = SimpleNamespace(Serial=Mock())
+            with patch("host.mdd_orchestrator.serial", serial_module):
+                app.apply_device_radios(
+                    [{"id": "a", "tty": "/dev/ttyUSB2"}],
+                    {"a": {"cellular_enabled": True, "flight_mode": False}},
+                    through_modemmanager=False)
+            serial_module.Serial.assert_not_called()
+            self.assertEqual(app.radio_states, {})
 
     def test_standing_down_skips_the_modem_reset(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -1371,6 +1371,15 @@ class Orchestrator:
     def apply_device_radios(self, discovered: list[dict], desired_devices: dict,
                             through_modemmanager: bool):
         """Apply independent RF (flight mode) and cellular-data intent per modem."""
+        # Configured serial mode is VoWiFi-only: the UI publishes both cellular data and
+        # flight mode as unsupported, and the direct SIM bridge must be the sole owner of
+        # the AT port.  Opening the port here just to send AT+CFUN=1 is therefore both
+        # contradictory and harmful.  In particular, QEMU USB passthrough may reject the
+        # pyserial DTR/RTS control transfer with EPROTO; the subsequent bridge then inherits
+        # an unresponsive port and times out on ATE0.  The bridge has its own virtualisation-
+        # tolerant serial implementation, so leave the modem entirely to it in this mode.
+        if self._serial_mode:
+            return
         for modem in discovered:
             device_id = modem["id"]
             wanted = desired_devices.get(device_id) or {}
