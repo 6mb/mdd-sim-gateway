@@ -12,6 +12,10 @@ VID="2c7c"
 PID="0125"
 APPLY=0
 VMID=""
+SYS_USB_ROOT="${MDD_PVE_SYS_USB_ROOT:-/sys/bus/usb/devices}"
+PVE_CONFIG_ROOT="${MDD_PVE_CONFIG_ROOT:-/etc/pve/qemu-server}"
+USB_DEV_ROOT="${MDD_PVE_USB_DEV_ROOT:-/dev/bus/usb}"
+PROC_ROOT="${MDD_PVE_PROC_ROOT:-/proc}"
 
 usage() {
   cat <<'EOF'
@@ -24,6 +28,7 @@ known MDD two-modem args, and starts the VM again if it was running before.
 Safety rules:
   * exactly two 2c7c:0125 devices must be present;
   * existing PVE usbN entries cause a refusal (avoids duplicate passthrough);
+  * another VM configured for or holding either physical port causes a refusal;
   * unrelated custom qm args are never overwritten.
 EOF
 }
@@ -59,7 +64,7 @@ fi
 qm status "$VMID" >/dev/null
 
 rows=()
-for device in /sys/bus/usb/devices/*; do
+for device in "$SYS_USB_ROOT"/*; do
   [[ -f "$device/idVendor" && -f "$device/idProduct" ]] || continue
   [[ "$(<"$device/idVendor")" == "$VID" ]] || continue
   [[ "$(<"$device/idProduct")" == "$PID" ]] || continue
@@ -82,7 +87,11 @@ if ((${#rows[@]} != 2)); then
   exit 1
 fi
 
-mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -t'|' -k1,1n -k2,2V)
+sorted_rows=()
+while IFS= read -r row; do
+  sorted_rows+=("$row")
+done < <(printf '%s\n' "${rows[@]}" | sort -t'|' -k1,1n -k2,2V)
+rows=("${sorted_rows[@]}")
 IFS='|' read -r bus1 port1 devnum1 sysfs1 <<<"${rows[0]}"
 IFS='|' read -r bus2 port2 devnum2 sysfs2 <<<"${rows[1]}"
 
@@ -90,6 +99,78 @@ printf 'Detected modem 1: bus=%s port=%s device=%s sysfs=%s\n' \
   "$bus1" "$port1" "$devnum1" "$sysfs1"
 printf 'Detected modem 2: bus=%s port=%s device=%s sysfs=%s\n' \
   "$bus2" "$port2" "$devnum2" "$sysfs2"
+
+target_topologies=("$bus1-$port1" "$bus2-$port2")
+config_conflicts=()
+if [[ -d "$PVE_CONFIG_ROOT" ]]; then
+  shopt -s nullglob
+  for other_config in "$PVE_CONFIG_ROOT"/*.conf; do
+    other_vmid="${other_config##*/}"
+    other_vmid="${other_vmid%.conf}"
+    [[ "$other_vmid" == "$VMID" ]] && continue
+
+    while IFS= read -r line; do
+      [[ "$line" =~ ^usb[0-9]+: ]] || continue
+      if [[ "$line" == *"host=$VID:$PID"* ]]; then
+        config_conflicts+=("VM $other_vmid: $line")
+        continue
+      fi
+      for topology in "${target_topologies[@]}"; do
+        [[ "$line" == *"host=$topology"* ]] || continue
+        config_conflicts+=("VM $other_vmid: $line")
+      done
+    done <"$other_config"
+
+    other_args="$(sed -n 's/^args: //p' "$other_config")"
+    [[ -n "$other_args" ]] || continue
+    for row in "${rows[@]}"; do
+      IFS='|' read -r other_bus other_port _ _ <<<"$row"
+      if [[ "$other_args" =~ hostbus=$other_bus,hostport=$other_port([,[:space:]]|$) ]]; then
+        config_conflicts+=("VM $other_vmid args: $other_args")
+      fi
+    done
+  done
+  shopt -u nullglob
+fi
+
+if ((${#config_conflicts[@]})); then
+  printf 'ERROR: another VM is configured for the detected EC25 USB device(s):\n' >&2
+  printf '  %s\n' "${config_conflicts[@]}" >&2
+  printf 'Remove the duplicate passthrough before binding VM %s. No change made.\n' \
+    "$VMID" >&2
+  exit 1
+fi
+
+if ! command -v fuser >/dev/null 2>&1; then
+  printf 'ERROR: fuser was not found; cannot verify exclusive USB ownership.\n' >&2
+  exit 1
+fi
+
+holder_conflicts=()
+for row in "${rows[@]}"; do
+  IFS='|' read -r holder_bus _ holder_devnum _ <<<"$row"
+  device_node="$(printf '%s/%03d/%03d' "$USB_DEV_ROOT" "$holder_bus" "$holder_devnum")"
+  while IFS= read -r holder_pid; do
+    cmdline_path="$PROC_ROOT/$holder_pid/cmdline"
+    if [[ ! -r "$cmdline_path" ]]; then
+      holder_conflicts+=("PID $holder_pid holds $device_node (command unavailable)")
+      continue
+    fi
+    holder_cmd="$(tr '\0' ' ' <"$cmdline_path")"
+    holder_vmid="$(sed -n -E 's/.*(^|[[:space:]])-id[[:space:]]+([0-9]+)([[:space:]]|$).*/\2/p' <<<"$holder_cmd")"
+    if [[ "$holder_vmid" != "$VMID" ]]; then
+      holder_conflicts+=("PID $holder_pid VM ${holder_vmid:-unknown} holds $device_node")
+    fi
+  done < <(fuser "$device_node" 2>/dev/null | tr ' ' '\n' | sed -n '/^[0-9][0-9]*$/p')
+done
+
+if ((${#holder_conflicts[@]})); then
+  printf 'ERROR: another process or VM already holds the detected EC25 USB device(s):\n' >&2
+  printf '  %s\n' "${holder_conflicts[@]}" >&2
+  printf 'Stop the conflicting VM/process before binding VM %s. No change made.\n' \
+    "$VMID" >&2
+  exit 1
+fi
 
 new_args="-device qemu-xhci,id=x1 -device qemu-xhci,id=x2"
 new_args+=" -device usb-host,hostbus=$bus1,hostport=$port1,bus=x1.0"

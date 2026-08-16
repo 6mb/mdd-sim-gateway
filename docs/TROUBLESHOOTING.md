@@ -74,9 +74,10 @@ sudo systemctl restart docker
    bash tools/pve-bind-ec25-modems.sh --apply 104
    ```
 
-   脚本只在恰好发现两块 `2c7c:0125` 时工作，并拒绝覆盖未知的 QEMU `args` 或已有
-   `usbN` 配置。它依据 sysfs 的 `busnum + devpath` 绑定，不使用每次插拔都会变化的
-   `Device` 编号。脚本需要在换口后手动执行；不会因 USB 瞬断自动关闭生产 VM。
+   脚本只在恰好发现两块 `2c7c:0125` 时工作，并拒绝覆盖未知的 QEMU `args`、已有
+   `usbN` 配置，以及已由其他 VM 配置或持有的相同物理 USB 口。它依据 sysfs 的
+   `busnum + devpath` 绑定，不使用每次插拔都会变化的 `Device` 编号。脚本需要在换口后
+   手动执行；不会因 USB 瞬断自动关闭生产 VM。
 
 3. 可选：调高宿主机 usbfs 缓冲上限（无害保险）：内核参数 `usbcore.usbfs_memory_mb=1000`。
 
