@@ -34,12 +34,14 @@ class UpdateCheckTests(unittest.TestCase):
         newer[-1] += 1
         payload = {"tag_name": "v" + ".".join(map(str, newer)),
                    "html_url": "https://example.invalid/release",
-                   "published_at": "2026-08-01T00:00:00Z", "body": "notes"}
+                   "published_at": "2026-08-01T00:00:00Z", "body": "notes",
+                   "assets": [{"name": "mdd-sim-gateway-v9.9.9.tar.gz", "size": 1234}]}
         with patch("control.app.update_check.requests.Session.get",
                    return_value=_Response(payload)):
             result = update_check.check(True)
         self.assertTrue(result["update_available"])
         self.assertEqual(result["current"], update_check.VERSION)
+        self.assertEqual(result["asset_sizes"]["mdd-sim-gateway-v9.9.9.tar.gz"], 1234)
         self.assertNotIn("apply", result)
 
     def test_semantic_comparison(self):

@@ -564,6 +564,17 @@ class Orchestrator:
         version = str(request.get("version") or "")
         repository = str(request.get("repository") or "")
         network = request.get("network") or {}
+        raw_asset_sizes = request.get("asset_sizes") or {}
+        asset_sizes = {}
+        if isinstance(raw_asset_sizes, dict):
+            for name, size in raw_asset_sizes.items():
+                try:
+                    parsed_size = int(size)
+                except (TypeError, ValueError):
+                    continue
+                if re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", str(name)) \
+                        and 0 < parsed_size < 20 * 1024 * 1024 * 1024:
+                    asset_sizes[str(name)] = parsed_size
 
         def fail(reason: str):
             atomic_json(status_path, {"state": "failed", "phase": "launch", "error": reason,
@@ -573,16 +584,21 @@ class Orchestrator:
                 or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
             fail("invalid update request")
             return
-        mode = str(network.get("proxy_mode") or "direct").lower()
-        proxy_url = ""
-        if mode == "library":
-            profile_id = str(network.get("proxy_profile_id") or "").strip()
-            desired = read_json(self.desired_path)
-            proxy = desired.get("proxy") or {}
+        desired = read_json(self.desired_path)
+        proxy = desired.get("proxy") or {}
+        live = read_json(self.status_path).get("exits") or {}
+
+        def resolve_route(selection: dict) -> dict:
+            mode = str(selection.get("proxy_mode") or "direct").lower()
+            if mode == "direct":
+                return {"proxy_url": "", "route": "direct", "route_name": ""}
+            if mode != "library":
+                raise ValueError("invalid update proxy mode")
+            profile_id = str(selection.get("proxy_profile_id") or "").strip()
             profile = (proxy.get("profiles") or {}).get(profile_id) or {}
             if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", profile_id) or not profile:
-                fail("selected update proxy is not in the proxy library")
-                return
+                raise ValueError("selected update proxy is not in the proxy library")
+            route_name = str(profile.get("name") or profile_id).strip()[:120]
             if profile.get("type") == "socks5":
                 host = str(profile.get("server") or "").strip()
                 try:
@@ -590,15 +606,13 @@ class Orchestrator:
                 except (TypeError, ValueError):
                     port = 0
                 if not host or not 1 <= port <= 65535 or any(ch in host for ch in "\r\n/@"):
-                    fail("selected SOCKS5 update proxy is invalid")
-                    return
+                    raise ValueError("selected SOCKS5 update proxy is invalid")
                 username = urllib.parse.quote(str(profile.get("username") or ""), safe="")
                 password = urllib.parse.quote(str(profile.get("password") or ""), safe="")
                 auth = f"{username}:{password}@" if username or password else ""
                 proxy_url = f"socks5h://{auth}{host}:{port}"
             else:
                 exits = proxy.get("exits") or {}
-                live = read_json(self.status_path).get("exits") or {}
                 state = next((live.get(country) or {} for country, exit_cfg in exits.items()
                               if isinstance(exit_cfg, dict) and exit_cfg.get("enabled")
                               and exit_cfg.get("profile_id") == profile_id
@@ -609,11 +623,25 @@ class Orchestrator:
                     proxy_port = 0
                 proxy_host = str(state.get("proxy_host") or "").strip()
                 if proxy_host != COUNTRY_PROXY_LISTEN or not 1 <= proxy_port <= 65535:
-                    fail("selected update proxy has no ready country exit")
-                    return
+                    raise ValueError("selected update proxy has no ready country exit")
                 proxy_url = f"socks5h://{proxy_host}:{proxy_port}"
-        elif mode != "direct":
-            fail("invalid update proxy mode")
+            return {"proxy_url": proxy_url, "route": "library", "route_name": route_name}
+
+        requested_routes = request.get("networks")
+        selections = requested_routes if isinstance(requested_routes, list) else [network]
+        routes, route_error = [], ""
+        for selection in selections:
+            if not isinstance(selection, dict):
+                continue
+            try:
+                resolved = resolve_route(selection)
+            except ValueError as exc:
+                route_error = str(exc)
+                continue
+            if not any(item["proxy_url"] == resolved["proxy_url"] for item in routes):
+                routes.append(resolved)
+        if not routes:
+            fail(route_error or "no usable update download route")
             return
         if self.dry_run:
             fail("dry-run orchestrator does not apply updates")
@@ -627,7 +655,11 @@ class Orchestrator:
             network_path = runner.parent / "network.json"
             # Proxy credentials stay in a root-only file and never appear in systemd's command
             # line, unit metadata, progress status or journal output.
-            atomic_json(network_path, {"proxy_url": proxy_url})
+            atomic_json(network_path, {"proxy_url": routes[0]["proxy_url"],
+                                      "route": routes[0]["route"],
+                                      "route_name": routes[0]["route_name"],
+                                      "routes": routes,
+                                      "asset_sizes": asset_sizes})
         except OSError as exc:
             fail(f"could not stage the updater: {exc}")
             return

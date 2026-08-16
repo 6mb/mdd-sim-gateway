@@ -236,11 +236,28 @@ const UPDATE_PHASES = {
   control_image: 'Importing the verified control image…',
   reloading: 'Rebuilding and restarting services…',
 }
+const UPDATE_PHASE_ORDER = ['requested', 'downloading', 'verifying', 'control_image', 'backup', 'applying', 'reloading', 'done']
+const normalizedUpdatePhase = phase => phase === 'launching' ? 'requested' : (phase || 'requested')
+const formatUpdateBytes = value => {
+  const bytes = Math.max(0, Number(value) || 0)
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+const formatUpdateDuration = (seconds, t) => {
+  const value = Math.max(0, Math.floor(Number(seconds) || 0))
+  const minutes = Math.floor(value / 60)
+  const rest = value % 60
+  return minutes ? t('{minutes} min {seconds} sec', { minutes, seconds: rest })
+    : t('{seconds} sec', { seconds: rest })
+}
 
 function UpdateModal({ update, current, t, onClose }) {
   const [mode, setMode] = useState('confirm') // confirm | working | restarting | failed
   const [phase, setPhase] = useState('requested')
   const [error, setError] = useState('')
+  const [progress, setProgress] = useState(null)
   // Polling starts only after POST /update/apply has reset the status file, otherwise the
   // first poll can read a stale success/failure left over from a previous update run.
   const [polling, setPolling] = useState(false)
@@ -253,7 +270,7 @@ function UpdateModal({ update, current, t, onClose }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose, canClose])
   useEffect(() => { // reopening while an update runs resumes the progress view
-    api.updateProgress().then(s => { if (s.state === 'running') { setPhase(s.phase || 'requested'); setMode('working'); setPolling(true) } }).catch(() => {})
+    api.updateProgress().then(s => { if (s.state === 'running') { setProgress(s); setPhase(normalizedUpdatePhase(s.phase)); setMode('working'); setPolling(true) } }).catch(() => {})
   }, [])
   useEffect(() => {
     if (mode !== 'working' || !polling) return
@@ -263,7 +280,8 @@ function UpdateModal({ update, current, t, onClose }) {
       try {
         const s = await api.updateProgress()
         if (stop) return
-        lastPhase = s.phase || lastPhase
+        setProgress(s)
+        lastPhase = normalizedUpdatePhase(s.phase || lastPhase)
         setPhase(lastPhase)
         if (s.state === 'failed') { setError(s.error || ''); setMode('failed'); return }
         if (s.state === 'stalled') { setError(t('The host orchestrator has not picked up the update request. Check the mdd-sim-gateway-orchestrator service on the host.')); setMode('failed'); return }
@@ -287,7 +305,7 @@ function UpdateModal({ update, current, t, onClose }) {
     return () => { stop = true; clearTimeout(timer) }
   }, [mode])
   const begin = async () => {
-    setError(''); setPhase('requested'); setPolling(false); setMode('working')
+    setError(''); setPhase('requested'); setProgress({ state: 'running', phase: 'requested', target: update.latest, started_at: Math.floor(Date.now() / 1000) }); setPolling(false); setMode('working')
     try {
       const result = await api.applyUpdate()
       if (result?.ok === false && result?.error_code !== 'update.error.in_progress') {
@@ -297,6 +315,19 @@ function UpdateModal({ update, current, t, onClose }) {
     } catch (err) { setError(err.message); setMode('failed') }
   }
   const mute = { fontSize: 12, color: 'var(--text-mute)' }
+  const visiblePhases = UPDATE_PHASE_ORDER.filter(key => key !== 'control_image' || progress?.install_mode === 'docker')
+  const activePhase = normalizedUpdatePhase(phase)
+  const activeIndex = Math.max(0, visiblePhases.indexOf(activePhase))
+  const downloaded = Number(progress?.downloaded_bytes) || 0
+  const total = Number(progress?.total_bytes) || 0
+  const percent = total > 0 ? Math.min(100, Math.round(downloaded * 100 / total)) : 0
+  const elapsed = progress?.started_at ? Math.max(0, Math.floor(Date.now() / 1000) - Number(progress.started_at)) : Number(progress?.elapsed_seconds) || 0
+  const routeLabel = progress?.route === 'library'
+    ? `${t('Proxy library')}${progress?.route_name ? ` · ${progress.route_name}` : ''}`
+    : t('Direct connection')
+  const routeDetail = progress?.route_total > 1
+    ? `${routeLabel} · ${t('Route {current}/{total}', { current: progress.route_attempt || 1, total: progress.route_total })}`
+    : routeLabel
   return (
     <div className="u-modal-backdrop" onClick={canClose ? onClose : undefined}>
       <div className="card u-update-modal" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title" onClick={(e) => e.stopPropagation()}>
@@ -319,10 +350,29 @@ function UpdateModal({ update, current, t, onClose }) {
           <p style={{ fontSize: 13, margin: '0 0 6px' }}>
             {mode === 'restarting' ? t('The gateway is restarting — the page will reload automatically. Sign in again afterwards.') : t(UPDATE_PHASES[phase] || UPDATE_PHASES.requested)}
           </p>
-          <p style={{ ...mute, margin: 0 }}>{t('Keep the gateway powered on. This can take a few minutes.')}</p>
+          <div className="u-update-facts">
+            <div><span>{t('Installation mode')}</span><b>{progress?.install_mode === 'docker' ? t('Docker container') : progress?.install_mode === 'local' ? t('Local service') : '—'}</b></div>
+            <div><span>{t('Download route')}</span><b title={progress?.route ? routeDetail : ''}>{progress?.route ? routeDetail : '—'}</b></div>
+            <div><span>{t('Elapsed time')}</span><b>{formatUpdateDuration(elapsed, t)}</b></div>
+          </div>
+          <ol className="u-update-steps">
+            {visiblePhases.map((key, index) => <li key={key} className={index < activeIndex || activePhase === 'done' ? 'done' : index === activeIndex ? 'active' : ''}><i />{t(UPDATE_PHASES[key] || (key === 'done' ? 'Update complete' : key))}</li>)}
+          </ol>
+          {progress?.artifact && <div className="u-update-transfer">
+            <div><span>{t('Current file')}</span><b>{progress.artifact}</b></div>
+            {downloaded > 0 && <><div className="u-update-progress"><i style={{ width: total > 0 ? `${percent}%` : '18%' }} /></div><small>{formatUpdateBytes(downloaded)}{total > 0 ? ` / ${formatUpdateBytes(total)} · ${percent}%` : ''}{progress?.bytes_per_second > 0 ? ` · ${formatUpdateBytes(progress.bytes_per_second)}/s` : ''}</small></>}
+          </div>}
+          {progress?.detail && <div className="u-update-detail"><span>{t('Host activity')}</span><code>{progress.detail}</code></div>}
+          <p style={{ ...mute, margin: '10px 0 0' }}>{t('Keep the gateway powered on. This can take a few minutes.')}</p>
         </>}
         {mode === 'failed' && <>
           <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 10 }}>{t('Update failed')}</div>
+          <div className="u-update-failure-meta">
+            <span>{t('Failed stage')}: <b>{t(UPDATE_PHASES[phase] || phase)}</b></span>
+            {progress?.artifact && <span>{t('Current file')}: <b>{progress.artifact}</b></span>}
+            {progress?.route && <span>{t('Download route')}: <b>{routeDetail}</b></span>}
+            <span>{t('Elapsed time')}: <b>{formatUpdateDuration(elapsed, t)}</b></span>
+          </div>
           {error && <div style={{ maxHeight: '30vh', overflowY: 'auto', whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.5, border: '1px solid var(--border, #8883)', borderRadius: 8, padding: '8px 10px', marginBottom: 12, wordBreak: 'break-all' }}>{error}</div>}
           <div className="u-modal-actions">
             <button className="btn btn-ghost" onClick={onClose}>{t('Cancel')}</button>

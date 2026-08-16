@@ -175,6 +175,15 @@ def check(force: bool = False) -> dict:
             response.raise_for_status()
             payload = response.json()
             latest = str(payload.get("tag_name") or "").removeprefix("v")
+            assets = {}
+            for asset in payload.get("assets") or []:
+                name = str((asset or {}).get("name") or "")
+                try:
+                    size = int((asset or {}).get("size") or 0)
+                except (TypeError, ValueError):
+                    size = 0
+                if name and 0 < size < 20 * 1024 * 1024 * 1024:
+                    assets[name] = size
             result.update({
                 "ok": bool(latest),
                 "latest": latest,
@@ -183,6 +192,7 @@ def check(force: bool = False) -> dict:
                 "published_at": str(payload.get("published_at") or ""),
                 "notes": str(payload.get("body") or "")[:4000],
                 "network": selection,
+                "asset_sizes": assets,
                 "stars": _stargazers(session, headers, repository_name),
             })
             last_error = None
@@ -269,11 +279,19 @@ def request_apply() -> dict:
     request_path, status_path = _apply_paths()
     now = int(time.time())
     network = info.get("network") or _network_selection()
+    configured = _network_selection()
+    if configured["proxy_mode"] == "auto":
+        candidates = _network_candidates()
+        networks = [network] + [item for item in candidates if item != network]
+    else:
+        networks = [network]
     # Reset the visible status first so a stale success/failure from a previous run cannot be
     # mistaken for this run's outcome while the orchestrator picks the request up.
     _write_private_json(status_path, {"state": "running", "phase": "requested",
                                       "target": info["latest"], "updated_at": now})
     _write_private_json(request_path, {"version": info["latest"], "repository": repository(),
                                        "requested_at": now,
-                                       "network": network})
+                                       "network": network,
+                                       "networks": networks,
+                                       "asset_sizes": info.get("asset_sizes") or {}})
     return {"ok": True, "version": info["latest"]}

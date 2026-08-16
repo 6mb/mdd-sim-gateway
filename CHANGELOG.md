@@ -8,6 +8,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 - Release cross-builds compile the architecture-independent WebUI on the runner's native
   platform, avoiding an indefinitely slow `npm ci` under ARM64 QEMU on GitHub-hosted runners.
+- The update dialog now exposes every host-side stage, install mode, selected download route,
+  current Release asset, byte progress, speed, elapsed time, live reload activity and the exact
+  failed stage instead of presenting a generic spinner. The detached updater publishes a
+  heartbeat throughout downloads and service reloads.
+- Auto update networking now falls through its remaining proxy-library routes when an asset
+  download fails or the current route remains too slow, then reuses the route that succeeded
+  for the checksum and Docker control-image assets.
 
 ## [1.3.11] - 2026-08-16
 
