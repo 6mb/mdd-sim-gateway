@@ -10,7 +10,9 @@
 # under /app so run.py (`from app import ...`) resolves.
 
 # ---------- stage 1: build the WebUI ----------
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS webui
+# The output is architecture-independent static content. Keep this stage on the native build
+# platform so an amd64 GitHub runner does not run npm under ARM64 QEMU during release builds.
+FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS webui
 WORKDIR /webui
 # Install deps against the lockfile first (better layer caching), then build.
 COPY webui/package.json webui/package-lock.json ./

@@ -4,6 +4,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Release cross-builds compile the architecture-independent WebUI on the runner's native
+  platform, avoiding an indefinitely slow `npm ci` under ARM64 QEMU on GitHub-hosted runners.
+
 ## [1.3.11] - 2026-08-16
 
 ### Changed

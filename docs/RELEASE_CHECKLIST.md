@@ -33,3 +33,5 @@
 - 先创建私有仓库完成内部验收；最终确认后再决定是否公开。
 - 推送已签名的 `vX.Y.Z` 标签；Release 工作流会生成源码包、ARM64 控制镜像与
   同时覆盖两者的 `SHA256SUMS`。
+- ARM64 交叉构建时，WebUI 阶段必须保持在 Docker `BUILDPLATFORM` 原生架构；前端产物是
+  与架构无关的静态文件，不得在 GitHub x86 Runner 的 ARM64 QEMU 中执行 `npm ci`。
