@@ -189,6 +189,34 @@ def _modem_reader_binding(reader_name: str | None) -> dict:
     }
 
 
+def _live_modem_binding_for_instance(inst: dict) -> dict:
+    """Return the live VPCD reader group whose bridge metadata matches this line's ICCID.
+
+    Metadata files for old USB paths may remain after a replug, so a match is accepted only
+    when that hardware id still has readers in the current PC/SC enumeration. This makes the
+    bridge-published ICCID authoritative over stale saved reader names without probing APDUs
+    that may race the running engine.
+    """
+    wanted = str(inst.get("iccid") or "").strip()
+    if not wanted:
+        return {}
+    for path in sorted(glob.glob(os.path.join(cfg.DATA_DIR, "modems", "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                identity = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            continue
+        if str(identity.get("iccid") or "").strip() != wanted:
+            continue
+        hardware_id = str(identity.get("hardware_id") or "").strip()
+        if not hardware_id:
+            continue
+        binding = _modem_reader_binding(f"VoWiFi Modem {hardware_id} 00 00")
+        if binding:
+            return binding
+    return {}
+
+
 def _bootstrap_saved_modem_cards() -> list[str]:
     """Recover known modem-backed lines before the APDU card monitor starts.
 
@@ -536,6 +564,17 @@ def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
                         "before starting this one."),
         })
     try:
+        # A modem-backed line must be rebound from the bridge's current ICCID metadata on
+        # EVERY start, including health-policy rebuilds. Merely finding the old generated
+        # reader name is not proof that it still carries this line's SIM: after two identical
+        # serial-less modems are moved/re-enumerated, that live name may now belong to the
+        # other card. Reusing it sends the carrier's AKA challenge to the wrong USIM
+        # (typically SW=9862) and creates an endless reg_rejected rebuild loop.
+        binding = _live_modem_binding_for_instance(inst)
+        if binding and any(inst.get(key) != value for key, value in binding.items()):
+            log.warning("instance %s: correcting modem reader binding before %s start",
+                        inst.get("id"), reason)
+            inst = cfg.upsert_instance({"id": str(inst["id"]), **binding})
         # A line follows its SIM; its device identity follows the physical modem/reader
         # currently holding that SIM. Refresh the rendered snapshot on every start.
         inst = _apply_current_hardware_imei(inst)
@@ -2498,6 +2537,18 @@ def _card_identity_mismatch(inst: dict) -> dict | None:
     want = (inst.get("iccid") or "").strip()
     if not want:
         return None
+    # A generated modem reader name can remain live while ownership has changed to the other
+    # physical card. Check the bridge's authoritative identity before treating that name as a
+    # successful match.
+    modem_identity = _modem_identity_for_reader(
+        inst.get("swu_reader") or inst.get("pin_reader") or inst.get("ami_reader"))
+    modem_iccid = str((modem_identity or {}).get("iccid") or "").strip()
+    if modem_iccid and modem_iccid != want:
+        return {
+            "reader": (inst.get("swu_reader") or inst.get("pin_reader")
+                       or inst.get("ami_reader")),
+            "iccid": modem_iccid,
+        }
     if _reader_index_for_instance(inst) is not None:
         return None      # this line's SIM/profile is present somewhere — all good
     # Prefer the stable USB port binding when present; fall back to stored index.

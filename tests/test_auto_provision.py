@@ -206,6 +206,79 @@ class ImsIdentityLearningTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ExistingModemCardTests(unittest.IsolatedAsyncioTestCase):
+    @patch.object(main, "_modem_reader_binding")
+    @patch.object(main.glob, "glob")
+    def test_live_modem_binding_follows_saved_iccid_not_stale_reader_name(
+            self, paths, reader_binding):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        wanted = "8944110000000000000"
+        with tempfile.TemporaryDirectory() as tmp:
+            wrong = Path(tmp) / "wrong.json"
+            right = Path(tmp) / "right.json"
+            wrong.write_text(json.dumps({
+                "hardware_id": "modem-a", "iccid": "wrong-card",
+            }))
+            right.write_text(json.dumps({
+                "hardware_id": "modem-b", "iccid": wanted,
+            }))
+            paths.return_value = [str(wrong), str(right)]
+            expected = {
+                "pin_reader": "modem-b slot 0", "swu_reader": "modem-b slot 1",
+                "ami_reader": "modem-b slot 2", "reader_index": 4,
+            }
+            reader_binding.side_effect = lambda name: (
+                expected if "modem-b" in name else {})
+
+            result = main._live_modem_binding_for_instance({"iccid": wanted})
+
+        self.assertEqual(result, expected)
+        reader_binding.assert_called_once_with("VoWiFi Modem modem-b 00 00")
+
+    @patch.object(main.engine, "start", return_value="container-id")
+    @patch.object(main, "_apply_current_hardware_imei", side_effect=lambda inst: inst)
+    @patch.object(main, "_live_modem_binding_for_instance")
+    @patch.object(main.cfg, "upsert_instance")
+    @patch.object(main.cfg, "line_allowed", return_value=True)
+    def test_every_engine_start_repairs_stale_modem_binding(
+            self, _allowed, upsert, live_binding, _imei, start):
+        stale = {
+            "id": "2", "iccid": "8944110000000000000",
+            "pin_reader": "wrong slot 0", "swu_reader": "wrong slot 1",
+            "ami_reader": "wrong slot 2", "reader_index": 1,
+        }
+        binding = {
+            "pin_reader": "right slot 0", "swu_reader": "right slot 1",
+            "ami_reader": "right slot 2", "reader_index": 4,
+        }
+        corrected = {**stale, **binding}
+        live_binding.return_value = binding
+        upsert.return_value = corrected
+
+        result = main._start_engine_checked(stale, {}, reason="auto-recover:test")
+
+        self.assertEqual(result, "container-id")
+        upsert.assert_called_once_with({"id": "2", **binding})
+        start.assert_called_once_with(
+            corrected, {}, dev_mounts=False, reason="auto-recover:test")
+
+    @patch.object(main, "_modem_identity_for_reader", return_value={
+        "hardware_id": "wrong-modem", "iccid": "wrong-card",
+    })
+    def test_live_modem_reader_name_does_not_hide_wrong_card(self, _identity):
+        inst = {
+            "id": "2", "iccid": "8944110000000000000",
+            "pin_reader": "wrong slot 0", "swu_reader": "wrong slot 1",
+            "ami_reader": "wrong slot 2", "reader_index": 1,
+        }
+
+        mismatch = main._card_identity_mismatch(inst)
+
+        self.assertEqual(mismatch["reader"], "wrong slot 1")
+        self.assertEqual(mismatch["iccid"], "wrong-card")
+
     def test_startup_bootstrap_migrates_and_seeds_known_present_modem(self):
         old = {
             "id": "2", "iccid": "8944110000000000000", "imsi": "234330123456789",
