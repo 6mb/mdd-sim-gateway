@@ -71,22 +71,37 @@ class ModemBackendTests(unittest.TestCase):
         ])
 
     def test_partial_logical_channel_allocation_is_released_with_clear_error(self):
-        class Card:
-            def __init__(self):
-                self.values = iter((1, 1))
-                self.closed = []
-
-            def open_channel(self):
-                return next(self.values)
-
-            def close_channel(self, channel):
-                self.closed.append(channel)
-
-        card = Card()
+        card = self.FakeCard((1, 1, 1))
         with self.assertRaisesRegex(ModemError,
                                     "SIM logical channel allocation failed \\(1/3 allocated\\)"):
             allocate_logical_channels(card, 3)
         self.assertEqual(card.closed, [1])
+        # Only a channel that stays duplicated across settle+retry is a real allocation failure.
+        self.assertEqual(card.settled, 2)
+
+    def test_a_repeated_channel_number_is_retried_before_the_bridge_gives_up(self):
+        """A late AT reply read as the answer to the next command repeats the previous
+        channel. Failing on the first sighting took both lines down over a transport
+        artefact; settling the port and asking again recovers the same SIM."""
+        card = self.FakeCard((1, 1, 2, 3))
+        self.assertEqual(allocate_logical_channels(card, 3), [1, 2, 3])
+        self.assertEqual(card.settled, 1)
+        self.assertEqual(card.closed, [])
+
+    class FakeCard:
+        def __init__(self, values):
+            self.values = iter(values)
+            self.closed = []
+            self.settled = 0
+
+        def open_channel(self):
+            return next(self.values)
+
+        def close_channel(self, channel):
+            self.closed.append(channel)
+
+        def settle(self):
+            self.settled += 1
 
     def test_modemmanager_command_backend(self):
         card = ModemManagerCard.__new__(ModemManagerCard)

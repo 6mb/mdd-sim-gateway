@@ -38,6 +38,13 @@ LOGICAL_CHANNEL_ROLES = ("pin", "swu", "ims")
 # outage is logged, so a genuinely broken slot is still visible without the repetition.
 SLOT_RETRY_SECONDS = 1.0
 SLOT_RETRY_CEILING_SECONDS = 60.0
+# MANAGE CHANNEL OPEN answering with a channel this bridge already holds is not proof that the
+# UICC is out of channels. On virtualized USB passthrough a late reply can be read as the answer
+# to the next command, so the previous OPEN's channel number comes back verbatim. Settle the port
+# and ask again before declaring the SIM unusable — the alternative is a bridge that exits and
+# takes both lines down over a transport artefact.
+CHANNEL_OPEN_ATTEMPTS = 3
+CHANNEL_SETTLE_SECONDS = 0.5
 
 
 class ModemError(RuntimeError):
@@ -66,6 +73,14 @@ def allocate_logical_channels(card, count):
     try:
         for _slot in range(int(count)):
             channel = card.open_channel()
+            for attempt in range(2, CHANNEL_OPEN_ATTEMPTS + 1):
+                if channel not in channels:
+                    break
+                print("[bridge] MANAGE CHANNEL OPEN returned channel %d again; settling the "
+                      "AT port and retrying (attempt %d/%d)" %
+                      (channel, attempt, CHANNEL_OPEN_ATTEMPTS), flush=True)
+                card.settle()
+                channel = card.open_channel()
             if channel in channels:
                 raise ModemError("duplicate logical channel allocated: %d" % channel)
             channels.append(channel)
@@ -125,6 +140,16 @@ class ModemCard:
         while time.monotonic() < deadline:
             if not self.ser.read(4096):
                 break
+
+    def settle(self):
+        """Discard whatever the modem is still sending, so the next reply is the next reply.
+
+        Subclasses that do not own a serial port inherit the pause without the read.
+        """
+        time.sleep(CHANNEL_SETTLE_SECONDS)
+        if getattr(self, "ser", None) is not None:
+            with self.lock:
+                self._drain()
 
     def _at(self, command):
         with self.lock:
