@@ -426,6 +426,9 @@ def main():
     identity = card.identity()
     static_metadata = {
         "version": 1,
+        # Lets the orchestrator prove that a ready metadata document came from the
+        # replacement bridge, rather than accepting the previous process's last write.
+        "bridge_pid": os.getpid(),
         "modem": os.path.realpath(args.modem),
         "base_port": args.base_port,
         "slots": args.slots,

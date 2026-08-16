@@ -31,6 +31,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - The sidebar Star count is no longer erased by the one-minute system-status refresh. Its
   GitHub metadata lookup now has an independent cached retry path instead of waiting up to
   six hours for the next release check after a transient network failure.
+- Switching a saved eSIM profile in a cellular modem now stops that modem's old lines,
+  rebuilds only its VPCD bridge, waits for a new ready logical-channel generation, verifies
+  every exposed virtual reader against the target profile and starts only the matching line.
+  Failed LPA operations restore the exact previous running snapshot; post-switch recovery
+  failures stay stopped instead of authenticating an old line against the new card identity.
 - Release cross-builds compile the architecture-independent WebUI on the runner's native
   platform, avoiding an indefinitely slow `npm ci` under ARM64 QEMU on GitHub-hosted runners.
 - The update dialog now exposes every host-side stage, install mode, selected download route,

@@ -438,6 +438,8 @@ class Orchestrator:
         self.hw_state_path = self.root / "hardware-state.json"
         self.device_desired_path = self.root / "devices-desired.json"
         self.device_status_path = self.root / "devices-status.json"
+        self.bridge_restart_request_dir = self.root / "bridge-restart-requests"
+        self.bridge_restart_status_dir = self.root / "bridge-restart-status"
         self.generated = self.root / "sing-box.json"
         self.xray_generated = self.root / "xray.json"
         self.cache = self.root / "subscription.yaml"
@@ -537,6 +539,116 @@ class Orchestrator:
         self._serial_mode = False
         # device id -> the exact command its bridge runs, for the support bundle.
         self._bridge_commands: dict[str, list] = {}
+        # request id -> restart handshake. Separate request/status files let independent
+        # modems switch profiles concurrently without overwriting a singleton document.
+        self._bridge_restarts: dict[str, dict] = {}
+        for path in self.bridge_restart_status_dir.glob("*.json"):
+            value = read_json(path)
+            request_id = str(value.get("request_id") or "")
+            if request_id and value.get("state") not in {"channels_ready", "failed"}:
+                self._bridge_restarts[request_id] = value
+
+    def _bridge_restart_status(self, request: dict, state: str, **extra) -> dict:
+        value = {**request, **extra, "state": state, "updated_at": time.time()}
+        request_id = str(value["request_id"])
+        atomic_json(self.bridge_restart_status_dir / f"{request_id}.json", value)
+        self._bridge_restarts[request_id] = value
+        return value
+
+    def process_bridge_restart_requests(self):
+        """Consume scoped requests and stop only the selected modem bridge.
+
+        Completion is deliberately deferred until ``finish_bridge_restart_requests`` sees
+        metadata from the newly spawned PID with ready logical channels and the requested
+        ICCID. Merely terminating the old process or seeing a persistent pcscd reader name is
+        not proof that card access recovered.
+        """
+        self.bridge_restart_request_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for path in sorted(self.bridge_restart_request_dir.glob("*.json")):
+            request = read_json(path)
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            request_id = str(request.get("request_id") or "")
+            device_id = str(request.get("device_id") or "")
+            expected_iccid_sha256 = str(request.get("expected_iccid_sha256") or "")
+            if (not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", request_id)
+                    or request_id != path.stem
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", device_id)
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected_iccid_sha256)):
+                if request_id and re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", request_id):
+                    self._bridge_restart_status(
+                        {"request_id": request_id, "device_id": device_id}, "failed",
+                        error="invalid bridge restart request")
+                continue
+            try:
+                requested_at = float(request.get("requested_at") or time.time())
+            except (TypeError, ValueError):
+                requested_at = time.time()
+            request = {
+                "request_id": request_id,
+                "device_id": device_id,
+                "expected_iccid_sha256": expected_iccid_sha256,
+                "requested_at": requested_at,
+                "started_at": time.time(),
+            }
+            self._bridge_restart_status(request, "stopping")
+            self.root.mkdir(parents=True, exist_ok=True)
+            (self.root / "pcsc-maintenance").write_text(
+                str(int(time.time())), encoding="ascii")
+            proc = self.bridges.pop(device_id, None)
+            self.bridge_ports.pop(device_id, None)
+            self._bridge_started.pop(device_id, None)
+            self._bridge_failures.pop(device_id, None)
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(8)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            self._bridge_restart_status(request, "stopped")
+            self.log(f"stopped VPCD bridge for eUICC profile refresh: {device_id}")
+
+    def finish_bridge_restart_requests(self, present_ids: set[str]):
+        """Advance stopped requests only when the replacement bridge is authoritative."""
+        now = time.time()
+        for request_id, request in list(self._bridge_restarts.items()):
+            state = str(request.get("state") or "")
+            if state in {"channels_ready", "failed"}:
+                self._bridge_restarts.pop(request_id, None)
+                continue
+            device_id = str(request.get("device_id") or "")
+            if device_id not in present_ids:
+                self._bridge_restart_status(
+                    request, "failed", error="modem disappeared during bridge rebuild")
+                continue
+            if now - float(request.get("started_at") or now) > 45:
+                self._bridge_restart_status(
+                    request, "failed", error="timed out rebuilding the VPCD bridge")
+                continue
+            proc = self.bridges.get(device_id)
+            if not proc or proc.poll() is not None:
+                continue
+            if state != "spawned":
+                request = self._bridge_restart_status(
+                    request, "spawned", bridge_pid=int(proc.pid))
+            identity = read_json(self.data / "modems" / f"{device_id}.json")
+            if int(identity.get("bridge_pid") or 0) != int(proc.pid):
+                continue
+            if identity.get("channel_status") != "ready":
+                continue
+            if int(identity.get("channel_allocated") or 0) < 1:
+                continue
+            expected = str(request.get("expected_iccid_sha256") or "")
+            actual = str(identity.get("iccid") or "")
+            if expected and hashlib.sha256(actual.encode()).hexdigest() != expected:
+                continue
+            self._bridge_restart_status(
+                request, "channels_ready", bridge_pid=int(proc.pid),
+                channel_allocated=int(identity.get("channel_allocated") or 0))
+            self.log(f"VPCD bridge ready after eUICC profile refresh: {device_id}")
 
     @staticmethod
     def service_active(name: str) -> bool:
@@ -2474,6 +2586,7 @@ class Orchestrator:
         self.root.mkdir(parents=True, exist_ok=True)
         while not self.stop:
             self.process_update_request()
+            self.process_bridge_restart_requests()
             self.retire_obsolete_services()
             self.reconcile_timezone()
             desired = read_json(self.desired_path)
@@ -2551,6 +2664,7 @@ class Orchestrator:
             # for stable enumeration, but never receive a bridge process or usable SIM channel.
             assignments = self.reconcile_hardware(
                 desired, active_desired, through_modemmanager=cellular_required)
+            self.finish_bridge_restart_requests(present_ids)
             self.publish_device_status(desired_devices, assignments)
             self.publish_host_diagnostics(discovered, assignments, mm_active,
                                           cellular_required, vowifi_required)
@@ -2566,7 +2680,8 @@ class Orchestrator:
         """Cheap change detector for the documents an operator action writes."""
         stamps = []
         for path in (self.desired_path, self.device_desired_path,
-                     self.data / "config.yaml", self.reselect_path):
+                     self.data / "config.yaml", self.reselect_path,
+                     self.bridge_restart_request_dir):
             try:
                 stamps.append(path.stat().st_mtime)
             except OSError:
