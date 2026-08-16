@@ -173,9 +173,11 @@ export default function App() {
   useEffect(()=>{ api.authStatus().then(s=>{ setCsrf(s.csrf); setAuthState(s) }).catch(()=>setAuthState({configured:true,authenticated:false})) },[])
   useEffect(()=>{ if(authState?.authenticated) refresh() },[authState?.authenticated]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(()=>{ if(!authState?.authenticated)return;
-    const load=()=>api.systemStatus().then(setSystemMeta).catch(()=>{})
+    // Status refreshes must retain release/repository metadata loaded by separate requests.
+    const load=()=>api.systemStatus().then(status=>setSystemMeta(s=>({...s,...status}))).catch(()=>{})
     load(); const timer=setInterval(load,60*1000); return()=>clearInterval(timer) },[authState?.authenticated])
   useEffect(()=>{if(!authState?.authenticated)return;const check=()=>api.checkUpdate().then(update=>setSystemMeta(s=>({...s,update}))).catch(()=>{});check();const timer=setInterval(check,6*60*60*1000);return()=>clearInterval(timer)},[authState?.authenticated])
+  useEffect(()=>{if(!authState?.authenticated)return;const load=()=>api.repositoryStars().then(repo=>{if(repo.stars!==null&&repo.stars!==undefined)setSystemMeta(s=>({...s,update:{...(s.update||{}),stars:repo.stars}}))}).catch(()=>{});load();const timer=setInterval(load,5*60*1000);return()=>clearInterval(timer)},[authState?.authenticated])
   // The self-update restarts the control plane, which drops the session mid-update — surface
   // the final outcome on the next sign-in instead.
   useEffect(()=>{if(!authState?.authenticated)return;api.updateProgress().then(s=>{

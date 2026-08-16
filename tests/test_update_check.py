@@ -24,6 +24,7 @@ class UpdateCheckTests(unittest.TestCase):
     def setUp(self):
         update_check._cache = None
         update_check._stars_cache = None
+        update_check._stars_checked_at = 0
         direct = patch.object(update_check, "_network_selection", return_value={
             "proxy_mode": "direct", "proxy_profile_id": ""})
         direct.start()
@@ -113,6 +114,28 @@ class UpdateCheckTests(unittest.TestCase):
             result = update_check.check(True)
         self.assertTrue(result["ok"])
         self.assertEqual(result["network"], candidates[1])
+
+    def test_repository_stars_retries_independently_and_caches_success(self):
+        direct = MagicMock()
+        direct.get.side_effect = requests.ConnectionError("blocked")
+        proxied = MagicMock()
+        proxied.get.return_value = _Response({"stargazers_count": 178})
+        candidates = [
+            {"proxy_mode": "direct", "proxy_profile_id": ""},
+            {"proxy_mode": "library", "proxy_profile_id": "primary"},
+        ]
+        with patch.object(update_check, "_network_candidates", return_value=candidates), \
+                patch.object(update_check, "_session", side_effect=[direct, proxied]):
+            result = update_check.repository_stars()
+        self.assertEqual(result["stars"], 178)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["cached"])
+
+        with patch.object(update_check, "_session") as session:
+            cached = update_check.repository_stars()
+        self.assertEqual(cached["stars"], 178)
+        self.assertTrue(cached["cached"])
+        session.assert_not_called()
 
 
 class UpdateProxyMigrationTests(unittest.TestCase):

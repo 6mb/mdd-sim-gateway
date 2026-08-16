@@ -20,6 +20,8 @@ from .version import VERSION
 DEFAULT_REPOSITORY = "MddIdd/mdd-sim-gateway"
 _cache: tuple[float, dict] | None = None
 _stars_cache: int | None = None
+_stars_checked_at = 0.0
+_STARS_CACHE_SECONDS = 15 * 60
 
 
 class UpdateNetworkError(RuntimeError):
@@ -121,6 +123,14 @@ def repository() -> str:
     return os.environ.get("MDD_UPDATE_REPOSITORY", DEFAULT_REPOSITORY).strip()
 
 
+def _github_headers() -> dict:
+    return {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"mdd-sim-gateway/{VERSION}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
 def _version_tuple(value: str) -> tuple[int, ...]:
     core = str(value).strip().removeprefix("v").split("-", 1)[0]
     try:
@@ -136,7 +146,7 @@ def _stargazers(session, headers: dict, repository_name: str) -> int | None:
     that endpoint answers every page load and must not wait on GitHub. Failure is silent —
     a decorative count must never turn a working update check into a visible error.
     """
-    global _stars_cache
+    global _stars_cache, _stars_checked_at
     try:
         response = session.get(f"https://api.github.com/repos/{repository_name}",
                                headers=headers, timeout=8)
@@ -146,7 +156,35 @@ def _stargazers(session, headers: dict, repository_name: str) -> int | None:
         return _stars_cache
     if count >= 0:
         _stars_cache = count
+        _stars_checked_at = time.time()
     return _stars_cache
+
+
+def repository_stars(force: bool = False) -> dict:
+    """Read repository stars independently of the six-hour release poll.
+
+    The UI can retry this inexpensive metadata lookup after a transient outage without also
+    fetching release metadata. The last good value remains available during later failures.
+    """
+    now = time.time()
+    if (not force and _stars_cache is not None
+            and now - _stars_checked_at < _STARS_CACHE_SECONDS):
+        return {"ok": True, "stars": _stars_cache,
+                "checked_at": int(_stars_checked_at), "cached": True}
+    try:
+        candidates = _network_candidates()
+    except UpdateNetworkError:
+        candidates = []
+    for selection in candidates:
+        try:
+            value = _stargazers(_session(selection), _github_headers(), repository())
+            if value is not None and _stars_checked_at >= now:
+                return {"ok": True, "stars": value,
+                        "checked_at": int(_stars_checked_at), "cached": False}
+        except (requests.RequestException, UpdateNetworkError, OSError, ValueError, TypeError):
+            continue
+    return {"ok": False, "stars": _stars_cache,
+            "checked_at": int(_stars_checked_at or 0), "cached": _stars_cache is not None}
 
 
 def check(force: bool = False) -> dict:
@@ -156,11 +194,7 @@ def check(force: bool = False) -> dict:
         return dict(_cache[1])
     repository_name = repository()
     url = f"https://api.github.com/repos/{repository_name}/releases/latest"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": f"mdd-sim-gateway/{VERSION}",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+    headers = _github_headers()
     result = {"ok": False, "current": VERSION, "repository": repository_name,
               "update_available": False, "checked_at": int(now)}
     last_error: Exception | None = None

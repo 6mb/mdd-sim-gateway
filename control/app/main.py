@@ -3506,6 +3506,12 @@ async def api_system_update_check(force: bool = False):
     return await asyncio.to_thread(update_check.check, force)
 
 
+@app.get("/api/system/repository/stars")
+async def api_system_repository_stars(force: bool = False):
+    """Repository metadata is retried independently of the slower release poll."""
+    return await asyncio.to_thread(update_check.repository_stars, force)
+
+
 @app.post("/api/system/update/apply")
 async def api_system_update_apply():
     """One-click update: publish a request for the host orchestrator, which runs the detached

@@ -6,6 +6,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- The sidebar Star count is no longer erased by the one-minute system-status refresh. Its
+  GitHub metadata lookup now has an independent cached retry path instead of waiting up to
+  six hours for the next release check after a transient network failure.
 - Release cross-builds compile the architecture-independent WebUI on the runner's native
   platform, avoiding an indefinitely slow `npm ci` under ARM64 QEMU on GitHub-hosted runners.
 - The update dialog now exposes every host-side stage, install mode, selected download route,

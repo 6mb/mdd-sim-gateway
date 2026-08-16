@@ -320,6 +320,7 @@ class StarCountTests(unittest.TestCase):
 
     def setUp(self):
         update_check._stars_cache = None
+        update_check._stars_checked_at = 0
 
     def test_a_failed_star_lookup_leaves_the_release_check_intact(self):
         session = SimpleNamespace(get=lambda *a, **k: (_ for _ in ()).throw(
