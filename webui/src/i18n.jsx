@@ -375,7 +375,11 @@ const zh = {
   'No disconnection was recorded in this window.': '此时间范围内没有断线记录。',
   'Connectivity history starts once this device has a configured SIM line.': '此设备配置 SIM 线路后才会开始记录连接历史。',
   '{count} d': '{count} 天', '{count} h': '{count} 小时', '{count} min': '{count} 分钟', '{count} s': '{count} 秒',
-  End: '结束', 'Recent calls': '最近通话', 'Clear all': '清空全部', 'No calls yet.': '暂无通话记录。', 'Delete this call': '删除此通话记录', 'auto (MCC-MNC)': '自动（MCC-MNC）', 'auto from IMEI + random SVN': '由 IMEI 自动生成并使用随机 SVN', 'VoWiFi access point; the default is ims.': 'VoWiFi 接入点，默认值为 ims。', 'How the APN is sent to the ePDG. Most carriers expect the bare APN; a few stricter ones require the full APN-FQDN.': '决定如何向 ePDG 发送 APN。大多数运营商需要裸 APN，少数严格网络需要完整 APN-FQDN。', 'IMS PDN address family help': 'IMS PDN 地址族建议保持自动；系统会匹配已知运营商或自动探测。仅在明确知道运营商要求时手动指定。',
+  End: '结束', 'Recent calls': '最近通话', 'Clear all': '清空全部', 'No calls yet.': '暂无通话记录。', 'Delete this call': '删除此通话记录',
+  Incoming: '来电', Outgoing: '去电', Answered: '已接通', Missed: '未接', Declined: '已拒接',
+  'No answer': '无人接听', Cancelled: '已取消', Ringing: '振铃中', Dialing: '拨号中',
+  Idle: '待机', Connecting: '连接中', Registered: '已注册', Unregistered: '未注册',
+  'Registration failed': '注册失败', 'auto (MCC-MNC)': '自动（MCC-MNC）', 'auto from IMEI + random SVN': '由 IMEI 自动生成并使用随机 SVN', 'VoWiFi access point; the default is ims.': 'VoWiFi 接入点，默认值为 ims。', 'How the APN is sent to the ePDG. Most carriers expect the bare APN; a few stricter ones require the full APN-FQDN.': '决定如何向 ePDG 发送 APN。大多数运营商需要裸 APN，少数严格网络需要完整 APN-FQDN。', 'IMS PDN address family help': 'IMS PDN 地址族建议保持自动；系统会匹配已知运营商或自动探测。仅在明确知道运营商要求时手动指定。',
 }
 
 const en = {
