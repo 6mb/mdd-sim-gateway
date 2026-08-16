@@ -64,6 +64,20 @@ sudo systemctl restart docker
    `hostbus`/`hostport` 按宿主机 `lsusb -t` 里模块实际所在的总线和端口填写。注意：`--args`
    定义的 USB 设备不会显示在 PVE 网页硬件列表中；回退用 `qm set <vmid> --delete args`。
 
+   两个模块更换到其他物理 USB 接口后，可在 **PVE 宿主机**用仓库脚本重新发现并绑定：
+
+   ```bash
+   # 只预览，不修改
+   bash tools/pve-bind-ec25-modems.sh 104
+
+   # 确认后应用；若 VM 原本运行，会正常关机、更新绑定并重新启动
+   bash tools/pve-bind-ec25-modems.sh --apply 104
+   ```
+
+   脚本只在恰好发现两块 `2c7c:0125` 时工作，并拒绝覆盖未知的 QEMU `args` 或已有
+   `usbN` 配置。它依据 sysfs 的 `busnum + devpath` 绑定，不使用每次插拔都会变化的
+   `Device` 编号。脚本需要在换口后手动执行；不会因 USB 瞬断自动关闭生产 VM。
+
 3. 可选：调高宿主机 usbfs 缓冲上限（无害保险）：内核参数 `usbcore.usbfs_memory_mb=1000`。
 
 验证：客户机 `lsusb -t` 中两个模块应挂在**两个不同的 xhci** 下、各 5 个接口；`mmcli -L` 应列出两个 Modem 对象。
