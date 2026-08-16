@@ -54,6 +54,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   failures stay stopped instead of authenticating an old line against the new card identity.
 - Proxy node names render in the UI font instead of the emoji-flag font, and the call log's
   remaining English strings are translated.
+- Support bundles now carry the per-line diagnostic records instead of blanking them. A
+  record embeds its tunnel log tail, and one routine engine message inside that tail matched
+  the log redactor's key-material rules — which blanked the whole record and the two records
+  after it, emptying the one file written to survive a rebuild loop. Records are now redacted
+  as structure, so only the offending log lines go and the registration, SIP and host evidence
+  beside them survives.
+- Support bundles now state each line's status, classified reason and retry-budget position.
+  Tunnel logs that all end at `CONNECTED` cannot explain why a line kept being rebuilt; the
+  reason code and how long the line has been failing can.
 - Release cross-builds compile the architecture-independent WebUI on the runner's native
   platform, avoiding an indefinitely slow `npm ci` under ARM64 QEMU on GitHub-hosted runners.
 - The update dialog now exposes every host-side stage, install mode, selected download route,

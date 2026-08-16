@@ -3980,6 +3980,40 @@ async def api_system_maintenance(body: dict):
     raise HTTPException(400, "unknown maintenance action")
 
 
+def _line_diagnostics(inst: dict) -> dict:
+    """One line's identity plus the last sampled verdict on it.
+
+    ``reason_code`` is what the health policy acted on, and the retry budget says how close
+    that line is to being torn down and rebuilt — the pair that distinguishes a carrier
+    rejecting the attach from a tunnel that comes up fine and never registers.
+    """
+    iid = str(inst.get("id"))
+    entry = {"id": inst.get("id"), "name": inst.get("name")}
+    status = hub.status_cache.get(iid) or {}
+    if not status:
+        entry["note"] = "no status sampled yet for this line"
+        return entry
+    detail = status.get("detail") or {}
+    health = (hub.health or {}).get(iid) or {}
+    now = time.monotonic()
+    entry.update({
+        "state": status.get("state"),
+        "reason_code": status.get("reason_code"),
+        "reason": status.get("reason"),
+        "retry": status.get("retry") or {},
+        "registration": detail.get("registration"),
+        "active_channels": detail.get("active_channels"),
+        "frozen_code": health.get("frozen_code"),
+        # Elapsed rather than absolute: these are monotonic clock readings, meaningless to a
+        # reader, but their distance from now is exactly the retry-budget story.
+        "failing_for_seconds": (round(now - health["fail_start"], 1)
+                                if health.get("fail_start") else None),
+        "ok_for_seconds": (round(now - hub.ok_since[iid], 1)
+                           if iid in hub.ok_since else None),
+    })
+    return entry
+
+
 @app.get("/api/diagnostics/support-bundle")
 async def api_support_bundle():
     settings = cfg.get_settings()
@@ -3989,8 +4023,11 @@ async def api_support_bundle():
                  "readers": [{"name": item.get("name"), "present": item.get("present"),
                               "hardware_kind": item.get("hardware_kind")}
                              for item in hub.cards_list()],
-                 "instances": [{"id": item.get("id"), "name": item.get("name")}
-                               for item in cfg.list_instances()]}
+                 # Why each line is in the state it is in. A bundle full of tunnel logs that
+                 # all end at "CONNECTED" says nothing about why the line kept being rebuilt;
+                 # the classified reason and the retry budget are what name the loop.
+                 # Passive: the background sampler's last result, never a fresh probe.
+                 "instances": [_line_diagnostics(item) for item in cfg.list_instances()]}
     content = await asyncio.to_thread(
         operations.support_bundle, documents,
         (settings.get("maintenance") or {}).get("support_bundle_log_lines", 500))
