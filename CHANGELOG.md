@@ -4,8 +4,27 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.12] - 2026-08-16
+
+### Added
+
+- Added a guarded PVE helper that rebinds exactly two `2c7c:0125` modems by stable physical
+  USB topology after a port change. It refuses ambiguous hardware, unrelated target-VM
+  settings, and devices configured in or still held by another VM before changing anything.
+
 ### Fixed
 
+- VoWiFi-only serial mode no longer probes or controls modem radio ports after it has claimed
+  the SIM AT port, preventing ModemManager-style contention and empty `ATE0` replies on
+  virtualized USB passthrough.
+- Saved lines now follow their SIM by ICCID/IMEI when a modem is replugged onto a different USB
+  path. Provisioning can recover from persisted modem metadata when live APDU access is not yet
+  available, while preserving each line's PIN, SWu and AMI virtual-reader slots.
+- Engine PIN and IMS authentication workers now honor the exact per-modem virtual PC/SC reader
+  names supplied by the control plane instead of falling back to a global reader index.
+- Each modem now loads an isolated VPCD driver copy. This prevents the driver's process-global
+  slot table from making two identical modems overwrite one another, which previously left both
+  lines reporting `NO_CARD` even though all bridge sockets were connected.
 - The sidebar Star count is no longer erased by the one-minute system-status refresh. Its
   GitHub metadata lookup now has an independent cached retry path instead of waiting up to
   six hours for the next release check after a transient network failure.
