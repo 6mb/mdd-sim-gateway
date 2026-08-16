@@ -92,6 +92,19 @@ class AutoProvisionTests(unittest.TestCase):
     def test_unknown_carrier_does_not_invent_sip_identity(self):
         self.assertEqual(config.carrier_sip_defaults("001", "01", "test-card"), {})
 
+    def test_modem_group_prefers_present_slot_with_known_sim_identity(self):
+        siblings = [
+            {"index": 0, "name": "slot 0", "present": False, "iccid": None},
+            {"index": 1, "name": "slot 1", "present": True,
+             "iccid": "8944110000000000000"},
+            {"index": 2, "name": "slot 2", "present": True, "iccid": None},
+        ]
+
+        selected = main._modem_card_representative(siblings)
+
+        self.assertEqual(selected["name"], "slot 1")
+        self.assertEqual(selected["iccid"], "8944110000000000000")
+
     @patch.object(main.sim, "list_readers")
     @patch.object(main, "_modem_identity_for_reader")
     def test_replugged_modem_rebuilds_all_saved_reader_bindings(self, identity, readers):

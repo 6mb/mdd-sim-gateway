@@ -237,6 +237,14 @@ def _bootstrap_saved_modem_cards() -> list[str]:
     return sorted(recovered)
 
 
+def _modem_card_representative(siblings: list[dict]) -> dict:
+    """Pick the slot that carries the best current SIM identity for a modem group."""
+    return (next((item for item in siblings
+                  if item.get("present") and item.get("iccid")), None)
+            or next((item for item in siblings if item.get("present")), None)
+            or siblings[0])
+
+
 def _with_detected_imei(cards: list[dict]) -> list[dict]:
     """Annotate native readers and collapse a modem's internal VPCD slots into one device."""
     enriched = []
@@ -284,7 +292,11 @@ def _with_detected_imei(cards: list[dict]) -> list[dict]:
             siblings.sort(key=lambda c: (c.get("index") is None, c.get("index") or 0))
             if len(siblings) > 1:
                 consumed.update(c.get("name") for c in siblings[1:])
-                card_info = {**siblings[0], **card_info}
+                # Slot 0 is reserved for pin_keeper and may be idle/empty until an engine
+                # starts, while the SWu/IMS slots already expose the SIM identity.  Treating
+                # the first slot as the whole modem made a known card disappear from the
+                # aggregated view and prevented the guarded hotplug auto-start from finding it.
+                card_info = dict(_modem_card_representative(siblings))
                 card_info["hardware_kind"] = "modem"
                 card_info["hardware_id"] = identity.get("hardware_id") or identity.get("modem")
                 card_info["display_name"] = (assignment_names.get(hwid)
