@@ -150,6 +150,45 @@ def _modem_identity_for_reader(reader_name: str | None) -> dict | None:
     return {"hardware_id": hardware_id, "slots": 1}
 
 
+def _modem_reader_binding(reader_name: str | None) -> dict:
+    """Resolve the current PIN/SWu/IMS reader names for a modem VPCD group.
+
+    Reader names embed the host orchestrator's hardware id.  That id can change when a
+    serial-less modem is moved to another USB port, while a saved SIM line still carries the
+    names generated for its previous id.  Resolve all sibling names from the live PC/SC reader
+    list so an ICCID match can migrate the complete three-reader binding atomically.
+    """
+    identity = _modem_identity_for_reader(reader_name)
+    hardware_id = str((identity or {}).get("hardware_id") or "")
+    if not hardware_id:
+        return {}
+    try:
+        count = max(1, int((identity or {}).get("slots") or 1))
+        names = sim.list_readers()
+    except Exception:  # noqa - transient PC/SC enumeration failure; retry on the next scan
+        return {}
+    siblings = [
+        {"index": index, "name": name}
+        for index, name in enumerate(names)
+        if device_state.vpcd_modem_hardware_id(name) == hardware_id
+    ]
+    if not siblings:
+        return {}
+    virtual = siblings[:count]
+
+    def slot(position: int) -> dict:
+        return virtual[min(position, len(virtual) - 1)]
+
+    return {
+        "pin_reader": slot(0)["name"],
+        "swu_reader": slot(1)["name"],
+        "ami_reader": slot(2)["name"],
+        "reader_index": int(slot(1)["index"]),
+        "reader_port": "",
+        "imei_source_device_id": hardware_id,
+    }
+
+
 def _with_detected_imei(cards: list[dict]) -> list[dict]:
     """Annotate native readers and collapse a modem's internal VPCD slots into one device."""
     enriched = []
@@ -543,15 +582,11 @@ async def _on_card_insert(name, idx):
             modem_identity = _modem_identity_for_reader(name)
             update = {"id": str(inst["id"]), **_carrier_identity_update(info)}
             if modem_identity:
-                logical = modem_identity.get("logical_channels") or []
-                swu_slot = next((int(item.get("slot")) for item in logical
-                                 if item.get("role") == "swu"), 1)
-                try:
-                    current_slot = int(str(name).rsplit(" ", 1)[-1])
-                except ValueError:
-                    current_slot = -1
-                if current_slot == swu_slot:
-                    update.update(reader_index=idx, reader_port="")
+                # Refresh every field, not only reader_index.  A replugged serial-less modem
+                # receives a new hardware id, so all three generated reader names change.  The
+                # old names otherwise survive forever and the engine cannot open its PIN/SWu/IMS
+                # channels even though this ICCID was positively matched on the new group.
+                update.update(_modem_reader_binding(name))
             else:
                 update.update(reader_index=idx,
                               reader_port=str(info.get("reader_port") or ""))

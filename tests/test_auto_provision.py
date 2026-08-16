@@ -91,6 +91,31 @@ class AutoProvisionTests(unittest.TestCase):
     def test_unknown_carrier_does_not_invent_sip_identity(self):
         self.assertEqual(config.carrier_sip_defaults("001", "01", "test-card"), {})
 
+    @patch.object(main.sim, "list_readers")
+    @patch.object(main, "_modem_identity_for_reader")
+    def test_replugged_modem_rebuilds_all_saved_reader_bindings(self, identity, readers):
+        identity.return_value = {"hardware_id": "2c7c-0125-4-1", "slots": 3}
+        readers.return_value = [
+            "VoWiFi Modem 2c7c-0125-2-1 00 00",
+            "VoWiFi Modem 2c7c-0125-2-1 00 01",
+            "VoWiFi Modem 2c7c-0125-2-1 00 02",
+            "VoWiFi Modem 2c7c-0125-4-1 00 00",
+            "VoWiFi Modem 2c7c-0125-4-1 00 01",
+            "VoWiFi Modem 2c7c-0125-4-1 00 02",
+        ]
+
+        binding = main._modem_reader_binding(
+            "VoWiFi Modem 2c7c-0125-4-1 00 01")
+
+        self.assertEqual(binding, {
+            "pin_reader": "VoWiFi Modem 2c7c-0125-4-1 00 00",
+            "swu_reader": "VoWiFi Modem 2c7c-0125-4-1 00 01",
+            "ami_reader": "VoWiFi Modem 2c7c-0125-4-1 00 02",
+            "reader_index": 4,
+            "reader_port": "",
+            "imei_source_device_id": "2c7c-0125-4-1",
+        })
+
     def test_engine_render_uses_carrier_profile_but_keeps_explicit_overrides(self):
         base = {
             "id": "3", "index": 0, "imsi": "234100000000000",
