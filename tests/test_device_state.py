@@ -797,6 +797,7 @@ modem.3gpp.registration-state : unknown
             device = document["devices"]["a"]
             self.assertFalse(device["actual"]["cellular_supported"])
             self.assertEqual(device["actual"]["vowifi_backend"], "direct-serial")
+            self.assertFalse(device["transitioning"])
             self.assertEqual(document["shared"]["modem_backend"], "serial")
             self.assertEqual(document["shared"]["cellular_backend"],
                              "disabled-by-configuration")

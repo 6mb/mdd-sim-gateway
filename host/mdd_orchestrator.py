@@ -714,7 +714,8 @@ class Orchestrator:
                 present and (target_data_active != observed_data_active or
                              (backend_active and radio_enabled is not None and
                               bool(wanted.get("flight_mode")) == radio_enabled) or
-                             (bool(desired_devices) and not backend_active))))
+                             (not self._serial_mode and bool(desired_devices)
+                              and not backend_active))))
             devices[device_id] = {
                 "id": device_id,
                 "name": assignment.get("name") or "USB modem",
