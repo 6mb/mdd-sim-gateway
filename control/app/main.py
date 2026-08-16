@@ -527,6 +527,35 @@ async def _on_card_insert(name, idx):
         info["reader_port"] = await asyncio.to_thread(usbreader.port_for_index, idx)
     except Exception as e:  # noqa
         log.debug("reader_port resolve failed for idx %s: %r", idx, e)
+    # The serial bridge publishes the modem's current ICCID before it exposes the VPCD
+    # readers.  Reuse that authoritative identity for an already-provisioned line instead of
+    # issuing a discovery APDU.  Some virtualised EC25/QDC507 stacks can leave an idle PC/SC
+    # probe blocked indefinitely; waiting for it here prevents the first monitor scan, reader
+    # binding migration and automatic engine start.  Unknown/new SIMs still take the normal
+    # APDU path below so their IMSI, carrier and PIN state can be provisioned.
+    modem_identity = _modem_identity_for_reader(name)
+    metadata_iccid = str((modem_identity or {}).get("iccid") or "")
+    metadata_inst = _match_instance_by_iccid(metadata_iccid)
+    if metadata_inst is not None:
+        info.update(
+            iccid=metadata_iccid,
+            imsi=metadata_inst.get("imsi"),
+            matched=metadata_inst["id"],
+            smsc=metadata_inst.get("smsc"),
+            mcc=metadata_inst.get("mcc"),
+            mnc=metadata_inst.get("mnc"),
+            mnc_len=metadata_inst.get("mnc_len"),
+            carrier_identity=metadata_inst.get("carrier_identity") or {},
+        )
+        update = {"id": str(metadata_inst["id"]), **_modem_reader_binding(name)}
+        if any(metadata_inst.get(key) != value
+               for key, value in update.items() if key != "id"):
+            metadata_inst = await asyncio.to_thread(cfg.upsert_instance, update)
+        hub.cards[name] = info
+        log.info("card inserted reader=%s (%s) identity=metadata matched=%s",
+                 idx, name, info["matched"])
+        asyncio.create_task(_auto_start_hotplugged_line(str(info["matched"])))
+        return
     # A running engine may already hold this card (manager restart, or pcscd flapped
     # while the engine kept running) — probing it could clash with the engine's card
     # access. Always map the reader to the running instance whose pin_keeper reports

@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -189,6 +190,42 @@ class ImsIdentityLearningTests(unittest.IsolatedAsyncioTestCase):
                                         "msisdn_source": "ims"})
         drop_ami.assert_awaited_once_with("2")
         restart.assert_called_once_with(corrected, {}, False)
+
+
+class ExistingModemCardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_metadata_match_migrates_reader_group_without_discovery_apdu(self):
+        old = {
+            "id": "2", "iccid": "8944110000000000000", "imsi": "234330123456789",
+            "mcc": "234", "mnc": "33", "smsc": "+447700900000",
+            "pin_reader": "VoWiFi Modem old 00 00",
+            "swu_reader": "VoWiFi Modem old 00 01",
+            "ami_reader": "VoWiFi Modem old 00 02", "reader_index": 1,
+        }
+        binding = {
+            "pin_reader": "VoWiFi Modem new 00 00",
+            "swu_reader": "VoWiFi Modem new 00 01",
+            "ami_reader": "VoWiFi Modem new 00 02", "reader_index": 5,
+            "reader_port": "", "imei_source_device_id": "new",
+        }
+        main.hub.cards.clear()
+        self.addCleanup(main.hub.cards.clear)
+        with patch.object(main.usbreader, "port_for_index", return_value=None), \
+                patch.object(main, "_modem_identity_for_reader", return_value={
+                    "hardware_id": "new", "iccid": old["iccid"], "slots": 3}), \
+                patch.object(main, "_match_instance_by_iccid", return_value=old), \
+                patch.object(main, "_modem_reader_binding", return_value=binding), \
+                patch.object(main.cfg, "upsert_instance",
+                             return_value={**old, **binding}) as upsert, \
+                patch.object(main.sim, "read_card") as read_card, \
+                patch.object(main, "_auto_start_hotplugged_line",
+                             new=AsyncMock()) as auto_start:
+            await main._on_card_insert("VoWiFi Modem new 00 01", 5)
+            await asyncio.sleep(0)
+
+        read_card.assert_not_called()
+        upsert.assert_called_once_with({"id": "2", **binding})
+        auto_start.assert_awaited_once_with("2")
+        self.assertEqual(main.hub.cards["VoWiFi Modem new 00 01"]["matched"], "2")
 
 
 class EsimProfileRefreshTests(unittest.IsolatedAsyncioTestCase):
