@@ -4,7 +4,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
-## [1.3.12] - 2026-08-16
+## [1.3.12] - 2026-08-17
 
 ### Added
 
@@ -19,7 +19,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   virtualized USB passthrough.
 - Saved lines now follow their SIM by ICCID/IMEI when a modem is replugged onto a different USB
   path. Provisioning can recover from persisted modem metadata when live APDU access is not yet
-  available, while preserving each line's PIN, SWu and AMI virtual-reader slots.
+  available, while preserving each line's PIN, SWu and AMI virtual-reader slots. Every manual
+  start and health-policy rebuild revalidates the complete virtual-reader group against the
+  bridge's current ICCID metadata before creating the engine, so a stale live reader name cannot
+  send one carrier's IMS-AKA challenge to the other modem's SIM (`SW=9862`).
 - Engine PIN and IMS authentication workers now honor the exact per-modem virtual PC/SC reader
   names supplied by the control plane instead of falling back to a global reader index.
 - Each modem now loads an isolated VPCD driver copy. This prevents the driver's process-global
