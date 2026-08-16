@@ -17,7 +17,9 @@ class ManageChannelTests(unittest.TestCase):
     with a bare `euicc_init`, exactly as lpac's PC/SC driver reports that failure."""
 
     OPEN = bytes.fromhex("0070000001")      # lpac's APDU_OPENLOGICCHANNEL
-    CLOSE = bytes.fromhex("00708001" + "00")
+    @staticmethod
+    def close(channel):
+        return bytes((0x00, 0x70, 0x80, channel, 0x00))
 
     def test_open_reports_the_channel_this_slot_already_holds(self):
         rewritten, response = ModemCard.on_channel(self.OPEN, 2)
@@ -25,7 +27,7 @@ class ManageChannelTests(unittest.TestCase):
         self.assertEqual(response, bytes.fromhex("029000"))  # lpac requires 3 bytes, SW 9x
 
     def test_close_is_acknowledged_without_releasing_the_slot(self):
-        rewritten, response = ModemCard.on_channel(self.CLOSE, 2)
+        rewritten, response = ModemCard.on_channel(self.close(2), 2)
         self.assertIsNone(rewritten)
         self.assertEqual(response, bytes.fromhex("9000"))
 
@@ -37,7 +39,7 @@ class ManageChannelTests(unittest.TestCase):
         selected = []
         card.select_mf = lambda channel: selected.append(channel)
 
-        self.assertEqual(card.transmit(self.CLOSE, 2), bytes.fromhex("9000"))
+        self.assertEqual(card.transmit(self.close(2), 2), bytes.fromhex("9000"))
         self.assertEqual(selected, [2])
 
     def test_opening_a_channel_does_not_disturb_the_selection(self):
@@ -59,6 +61,27 @@ class ManageChannelTests(unittest.TestCase):
 
 
 class ModemBackendTests(unittest.TestCase):
+    def test_preallocated_slot_emulates_manage_channel_open_and_its_exact_close(self):
+        card = ModemCard.__new__(ModemCard)
+        with patch.object(card, "csim") as csim, \
+                patch.object(card, "select_mf") as select_mf:
+            self.assertEqual(
+                card.transmit(bytes.fromhex("0070000001"), 2),
+                bytes.fromhex("029000"))
+            self.assertEqual(
+                card.transmit(bytes.fromhex("0070800200"), 2),
+                bytes.fromhex("9000"))
+        csim.assert_not_called()
+        select_mf.assert_called_once_with(2)
+
+    def test_preallocated_slot_rejects_wrong_or_malformed_manage_channel_commands(self):
+        card = ModemCard.__new__(ModemCard)
+        with patch.object(card, "csim") as csim:
+            for apdu in ("0070010001", "0070800100", "0070000000", "0070"):
+                self.assertEqual(card.transmit(bytes.fromhex(apdu), 2),
+                                 bytes.fromhex("6A86"))
+        csim.assert_not_called()
+
     def test_logical_channel_metadata_exposes_capacity_roles_and_ids(self):
         value = logical_channel_metadata([1, 2, 3])
         self.assertEqual(value["channel_capacity"], 3)

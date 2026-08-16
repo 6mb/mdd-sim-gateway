@@ -767,6 +767,28 @@ modem.3gpp.registration-state : unknown
             settled = device_state._read(str(app.device_status_path), {})["devices"]["a"]
             self.assertTrue(settled["actual"]["vowifi_bridge_active"])
 
+    def test_repeated_modemmanager_phone_failure_degrades_to_direct_serial(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=True)
+            app.root.mkdir(parents=True)
+            app._bridge_stderr_path("a").write_text(
+                "ModemError: SIM logical channel allocation failed (0/3 allocated): "
+                "GDBus.Error:org.freedesktop.ModemManager1.Error.MobileEquipment."
+                "PhoneFailure: Phone failure\n")
+            proc = SimpleNamespace(returncode=1)
+
+            for _ in range(3):
+                app._record_bridge_exit("a", proc, time.time() - 1)
+
+            self.assertIn("a", app._degraded)
+            self.assertIn("direct serial", app._degraded["a"])
+            plan = Orchestrator.capability_plan({
+                "a": {"cellular_enabled": False, "flight_mode": True,
+                      "vowifi_enabled": True},
+            })
+            self.assertFalse(app.cellular_backend_needed(plan, {"a"}, {}))
+
     def test_modemmanager_stands_down_once_it_has_refused_every_modem(self):
         """Without a modem object ModemManager provides nothing, but its probes share the
         AT ports with the direct bridges and corrupt SIM channel allocation. Field log: a
@@ -827,6 +849,38 @@ modem.3gpp.registration-state : unknown
             self.assertEqual(document["shared"]["modem_backend"], "serial")
             self.assertEqual(document["shared"]["cellular_backend"],
                              "disabled-by-configuration")
+
+    def test_flight_mode_only_uses_direct_serial_without_modemmanager(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=True)
+            flight_only = Orchestrator.capability_plan({
+                "a": {"cellular_enabled": False, "flight_mode": True,
+                      "vowifi_enabled": True},
+            })
+            self.assertFalse(app.cellular_backend_needed(flight_only, {"a"}, {}))
+
+            with_cellular = Orchestrator.capability_plan({
+                "a": {"cellular_enabled": True, "flight_mode": True,
+                      "vowifi_enabled": True},
+            })
+            self.assertTrue(app.cellular_backend_needed(with_cellular, {"a"}, {}))
+
+    def test_flight_mode_direct_bridge_is_a_settled_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=True)
+            app.root.mkdir(parents=True)
+            app.bridges["a"] = SimpleNamespace(poll=lambda: None, pid=9)
+            app._bridge_started["a"] = time.time() - 10
+            desired = {"a": {"cellular_enabled": False, "flight_mode": True,
+                              "vowifi_enabled": True}}
+            assignments = {"a": {"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}}
+
+            with patch.object(app, "service_active", return_value=False):
+                app.publish_device_status(desired, assignments)
+
+            device = device_state._read(str(app.device_status_path), {})["devices"]["a"]
+            self.assertFalse(device["transitioning"])
+            self.assertEqual(device["actual"]["vowifi_backend"], "direct-serial")
 
     def test_serial_mode_never_touches_the_modem_radio_port(self):
         """VoWiFi-only mode gives the direct bridge exclusive ownership of the AT port.

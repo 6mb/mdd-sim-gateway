@@ -241,16 +241,16 @@ class ModemCard:
         if apdu[0] == 0xFF:
             return None, bytes.fromhex("6D00")
         if apdu[1] == 0x70:
-            # MANAGE CHANNEL. This slot already owns one UICC logical channel, opened with
-            # AT+CCHO when the bridge started, and the modem cannot nest another one inside
-            # it. Answer locally instead of refusing: an LPA opens a channel before it can
-            # select the ISD-R, so a flat rejection made every eSIM read on a module fail
-            # in euicc_init. OPEN reports the channel this slot is already on (the APDU
-            # rewrite below forces it anyway) and CLOSE is acknowledged without releasing
-            # it, because the slot outlives the caller that asked.
-            if apdu[2] == 0x00:
+            # MANAGE CHANNEL. Each VPCD slot already owns one physical UICC logical channel,
+            # opened when the bridge starts. PC/SC eUICC clients such as lpac still perform
+            # the standard handshake, but forwarding it would allocate a different channel
+            # or close the bridge-owned one behind its back. Emulate only the exact OPEN and
+            # CLOSE forms lpac uses: OPEN reports the channel this slot already holds, while
+            # CLOSE succeeds without releasing it. Reject every malformed/unsupported variant
+            # with Incorrect parameters (6A86) so no ambiguous command reaches the modem.
+            if apdu == bytes.fromhex("0070000001"):
                 return None, bytes((channel, 0x90, 0x00))
-            if apdu[2] == 0x80:
+            if apdu == bytes((0x00, 0x70, 0x80, channel, 0x00)):
                 return None, bytes.fromhex("9000")
             return None, bytes.fromhex("6A86")
         # 0xA0 is the legacy GSM class and has no logical-channel encoding.
@@ -260,13 +260,13 @@ class ModemCard:
         return rewritten, None
 
     @staticmethod
-    def closes_logical_channel(apdu) -> bool:
-        return len(apdu) >= 3 and apdu[1] == 0x70 and apdu[2] == 0x80
+    def closes_logical_channel(apdu, channel) -> bool:
+        return apdu == bytes((0x00, 0x70, 0x80, channel, 0x00))
 
     def transmit(self, apdu, channel):
         rewritten, local_response = self.on_channel(apdu, channel)
         if local_response is not None:
-            if self.closes_logical_channel(apdu):
+            if self.closes_logical_channel(apdu, channel):
                 # An LPA leaves the ISD-R selected here when it closes its channel, but the
                 # slot is shared: pin_keeper and the engine come back to the same real UICC
                 # channel expecting the plain USIM view, and their ADF.USIM select fails
