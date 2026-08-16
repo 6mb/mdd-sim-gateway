@@ -14,6 +14,18 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- eSIM operations now work on a cellular module's own SIM. The SIM bridge answers MANAGE
+  CHANNEL locally instead of refusing it, so an LPA can open its channel and reach the ISD-R
+  — a flat rejection previously failed every module eSIM read in `euicc_init`. When the LPA
+  closes that channel the bridge restores the plain USIM view, because the slot is shared with
+  the PIN keeper and the engine, which select ADF.USIM on the same real UICC channel.
+- A repeated MANAGE CHANNEL OPEN answer no longer takes the SIM down. It was treated as proof
+  that the UICC had no channels left, so the bridge exited within seconds of every start and
+  stopped both lines; a late AT reply read as the answer to the next command produces the same
+  symptom with a healthy SIM. The port is settled and the channel requested again, and only a
+  duplicate that survives the retries is reported as an allocation failure.
+- A disabled line no longer serves the last observation taken while it ran, which left a device
+  reading "no SIM card" after VoWiFi was switched off until the next poll overwrote it.
 - VoWiFi-only serial mode no longer probes or controls modem radio ports after it has claimed
   the SIM AT port, preventing ModemManager-style contention and empty `ATE0` replies on
   virtualized USB passthrough.
@@ -36,6 +48,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   every exposed virtual reader against the target profile and starts only the matching line.
   Failed LPA operations restore the exact previous running snapshot; post-switch recovery
   failures stay stopped instead of authenticating an old line against the new card identity.
+- Proxy node names render in the UI font instead of the emoji-flag font, and the call log's
+  remaining English strings are translated.
 - Release cross-builds compile the architecture-independent WebUI on the runner's native
   platform, avoiding an indefinitely slow `npm ci` under ARM64 QEMU on GitHub-hosted runners.
 - The update dialog now exposes every host-side stage, install mode, selected download route,
