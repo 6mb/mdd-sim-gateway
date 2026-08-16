@@ -189,6 +189,54 @@ def _modem_reader_binding(reader_name: str | None) -> dict:
     }
 
 
+def _bootstrap_saved_modem_cards() -> list[str]:
+    """Recover known modem-backed lines before the APDU card monitor starts.
+
+    The bridge metadata is written only after the modem answers its identity commands and
+    contains the current ICCID.  Combining that with passive PC/SC presence is sufficient to
+    restore a saved line's generated reader names after its USB hardware id changes.  Seeding
+    the monitor cache here also prevents its first scan from issuing a redundant discovery APDU
+    for a known SIM -- important on virtualised serial modems where that probe can block.
+    """
+    try:
+        states = card.reader_states()
+    except Exception:  # noqa - startup remains available and the normal monitor retries
+        return []
+    if not states:
+        return []
+    recovered: set[str] = set()
+    for state in states:
+        if not state.get("present"):
+            continue
+        name = str(state.get("name") or "")
+        identity = _modem_identity_for_reader(name)
+        iccid = str((identity or {}).get("iccid") or "")
+        inst = _match_instance_by_iccid(iccid)
+        if not identity or not iccid or inst is None:
+            continue
+        binding = _modem_reader_binding(name)
+        update = {"id": str(inst["id"]), **binding}
+        if binding and any(inst.get(key) != value
+                           for key, value in binding.items()):
+            inst = cfg.upsert_instance(update)
+        hub.cards[name] = {
+            **state,
+            "iccid": iccid,
+            "imsi": inst.get("imsi"),
+            "matched": inst["id"],
+            "smsc": inst.get("smsc"),
+            "mcc": inst.get("mcc"),
+            "mnc": inst.get("mnc"),
+            "mnc_len": inst.get("mnc_len"),
+            "carrier_identity": inst.get("carrier_identity") or {},
+            "pin_enabled": None,
+            "pin_tries": None,
+            "reader_port": None,
+        }
+        recovered.add(str(inst["id"]))
+    return sorted(recovered)
+
+
 def _with_detected_imei(cards: list[dict]) -> list[dict]:
     """Annotate native readers and collapse a modem's internal VPCD slots into one device."""
     enriched = []
@@ -1909,6 +1957,10 @@ async def lifespan(app: FastAPI):
     if migrated["calls"] or migrated["messages"]:
         log.info("merged legacy history: %d call(s), %d message(s)",
                  migrated["calls"], migrated["messages"])
+    # Restore known serial-modem lines from passive bridge metadata before card_monitor can
+    # block on a discovery APDU.  Each recovered line is then handed to the same guarded
+    # hotplug auto-start path used for a physical insertion.
+    recovered_modem_lines = await asyncio.to_thread(_bootstrap_saved_modem_cards)
     # Re-publish after every manager restart so the host orchestrator can reconstruct routes and
     # modem services from persistent config without waiting for a settings edit/line restart.
     egress.publish()
@@ -1918,6 +1970,8 @@ async def lifespan(app: FastAPI):
     sms_poller = asyncio.create_task(cellular_sms_poller())
     host_poller = asyncio.create_task(host_health_poller())
     allowance_poller = asyncio.create_task(allowance_reminder_poller())
+    for iid in recovered_modem_lines:
+        asyncio.create_task(_auto_start_hotplugged_line(iid))
     yield
     poller.cancel()
     monitor.cancel()

@@ -193,6 +193,39 @@ class ImsIdentityLearningTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ExistingModemCardTests(unittest.IsolatedAsyncioTestCase):
+    def test_startup_bootstrap_migrates_and_seeds_known_present_modem(self):
+        old = {
+            "id": "2", "iccid": "8944110000000000000", "imsi": "234330123456789",
+            "mcc": "234", "mnc": "33", "smsc": "+447700900000",
+            "pin_reader": "old pin", "swu_reader": "old swu", "ami_reader": "old ims",
+            "reader_index": 1,
+        }
+        binding = {
+            "pin_reader": "new pin", "swu_reader": "new swu", "ami_reader": "new ims",
+            "reader_index": 5, "reader_port": "", "imei_source_device_id": "new",
+        }
+        states = [
+            {"index": 4, "name": "VoWiFi Modem new 00 00", "present": False},
+            {"index": 5, "name": "VoWiFi Modem new 00 01", "present": True},
+        ]
+        main.hub.cards.clear()
+        self.addCleanup(main.hub.cards.clear)
+        with patch.object(main.card, "reader_states", return_value=states), \
+                patch.object(main, "_modem_identity_for_reader", return_value={
+                    "hardware_id": "new", "iccid": old["iccid"], "slots": 3}), \
+                patch.object(main, "_match_instance_by_iccid", return_value=old), \
+                patch.object(main, "_modem_reader_binding", return_value=binding), \
+                patch.object(main.cfg, "upsert_instance",
+                             return_value={**old, **binding}) as upsert:
+            recovered = main._bootstrap_saved_modem_cards()
+
+        self.assertEqual(recovered, ["2"])
+        upsert.assert_called_once_with({"id": "2", **binding})
+        self.assertNotIn("VoWiFi Modem new 00 00", main.hub.cards)
+        seeded = main.hub.cards["VoWiFi Modem new 00 01"]
+        self.assertEqual(seeded["matched"], "2")
+        self.assertEqual(seeded["iccid"], old["iccid"])
+
     async def test_metadata_match_migrates_reader_group_without_discovery_apdu(self):
         old = {
             "id": "2", "iccid": "8944110000000000000", "imsi": "234330123456789",
