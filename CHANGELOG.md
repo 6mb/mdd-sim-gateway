@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.13] - 2026-08-17
+
 ### Added
 
 - Maintenance can restart the gateway, in three scopes ordered by what they interrupt: the
