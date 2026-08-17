@@ -851,6 +851,20 @@ class Orchestrator:
             publish("failed", error_code="restart.error.launch",
                     error=(result.stderr or result.stdout or "").strip()[:400])
 
+    def settle_service_restart(self):
+        """Close out a restart that could not report its own completion.
+
+        ``services`` restarts this process and ``host`` takes the machine down, so neither can
+        publish a result — this process running again *is* the result. Without this the
+        document stays "running" forever, which is the very thing this release removes from
+        the update path.
+        """
+        status_path = self.root / "service-restart-status.json"
+        status = read_json(status_path)
+        if status.get("state") == "running" and status.get("scope") in {"services", "host"}:
+            atomic_json(status_path, {**status, "state": "success",
+                                      "updated_at": int(time.time())})
+
     def reap_abandoned_update(self):
         """Retire a progress document whose updater no longer exists.
 
@@ -2692,6 +2706,9 @@ class Orchestrator:
 
     def loop(self):
         self.root.mkdir(parents=True, exist_ok=True)
+        # Runs once, before the first pass: a restart that took this process with it can only
+        # be completed by the process that comes back.
+        self.settle_service_restart()
         while not self.stop:
             self.process_update_request()
             self.reap_abandoned_update()

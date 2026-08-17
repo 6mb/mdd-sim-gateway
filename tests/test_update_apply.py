@@ -418,6 +418,26 @@ class OrchestratorUpdateTests(unittest.TestCase):
         self.assertEqual(commands, [["systemctl", "reboot"]])
         self.assertEqual(status["state"], "running")
 
+    def test_a_restart_that_took_this_process_with_it_is_completed_on_the_way_back(self):
+        """Observed on the ARM64 host: after `systemctl reboot` the document still said
+        "running", because the process that would have finished it was the one being killed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "orchestrator"
+            root.mkdir()
+            status_path = root / "service-restart-status.json"
+            app = mdd_orchestrator.Orchestrator(data, Path(__file__).resolve().parent.parent)
+            for scope in ("host", "services"):
+                status_path.write_text(json.dumps({"state": "running", "scope": scope}),
+                                       encoding="utf-8")
+                app.settle_service_restart()
+                self.assertEqual(json.loads(status_path.read_text())["state"], "success")
+            # A control-plane restart reports its own result, so a "running" one is still live.
+            status_path.write_text(json.dumps({"state": "running", "scope": "control"}),
+                                   encoding="utf-8")
+            app.settle_service_restart()
+            self.assertEqual(json.loads(status_path.read_text())["state"], "running")
+
     def test_an_unknown_restart_scope_runs_nothing(self):
         commands, status, _ = self._restart("reformat")
         self.assertEqual(commands, [])

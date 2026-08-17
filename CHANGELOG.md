@@ -17,7 +17,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   the request and the root orchestrator performs it, detaching into a transient systemd unit
   whatever would otherwise kill the process running it. A request nothing picks up within a
   minute is reported as such instead of leaving the page waiting for a restart that will never
-  come.
+  come, and the two scopes that take the orchestrator with them — which therefore cannot report
+  their own completion — are closed out by the orchestrator when it comes back, so no restart
+  leaves a document stuck on "running" either.
 
 ### Fixed
 
