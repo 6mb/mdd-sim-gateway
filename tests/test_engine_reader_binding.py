@@ -101,7 +101,7 @@ class EngineReaderBindingTests(unittest.TestCase):
         with patch.object(self.pin_keeper, "readers", return_value=[first, target]), \
                 patch.object(self.pin_keeper, "index_for_port", return_value=None), \
                 patch.dict(self.pin_keeper.os.environ, {"USIM_READER_PORT": ""}):
-            reader, connection = self.pin_keeper.find_reader(str(target))
+            reader, connection, _iccid = self.pin_keeper.find_reader(str(target))
         self.assertIs(reader, target)
         self.assertTrue(connection.connected)
 
@@ -119,7 +119,7 @@ class EngineReaderBindingTests(unittest.TestCase):
         available = _Reader("VoWiFi Modem first 00 00")
         with patch.object(self.pin_keeper, "readers", return_value=[available]), \
                 patch.dict(self.pin_keeper.os.environ, {"USIM_READER_PORT": ""}):
-            reader, connection = self.pin_keeper.find_reader("missing reader")
+            reader, connection, _iccid = self.pin_keeper.find_reader("missing reader")
         self.assertIsNone(reader)
         self.assertIsNone(connection)
 
@@ -155,9 +155,25 @@ class ForeignCardRefusalTests(unittest.TestCase):
         self.assertEqual(caught.exception.expected, self.OURS)
         self.assertEqual(caught.exception.actual, self.THEIRS)
 
+    def test_the_search_reports_the_card_it_read_so_nobody_asks_the_card_twice(self):
+        """ensure_pin records which CARD answered, and takes that from here.
+
+        Reading EF.ICCID again in the caller would repeat an exchange this search already
+        performed, and would do it outside the PC/SC transaction the rest of ensure_pin's card
+        I/O is wrapped in. A path that did not read reports None, so a name that drifted is
+        still judged by the name when no card identified itself."""
+        ours = _Reader("VoWiFi Modem second 00 00", iccid=self.OURS)
+        self.assertEqual(self._find(str(ours), [ours], self.OURS)[2], self.OURS)
+        self.assertEqual(self._find("0", [ours], self.OURS)[2], self.OURS)
+        self.assertEqual(self._find("iccid:" + self.OURS, [ours], "")[2], self.OURS)
+        # Nothing was read: no configured ICCID, and an unreadable card.
+        self.assertIsNone(self._find(str(ours), [ours], "")[2])
+        mute = _Reader("VoWiFi Modem second 00 00", iccid=None)
+        self.assertIsNone(self._find(str(mute), [mute], self.OURS)[2])
+
     def test_named_reader_holding_our_own_sim_is_accepted(self):
         target = _Reader("VoWiFi Modem second 00 00", iccid=self.OURS)
-        reader, connection = self._find(str(target), [target], self.OURS)
+        reader, connection, _iccid = self._find(str(target), [target], self.OURS)
         self.assertIs(reader, target)
         self.assertTrue(connection.connected)
 
@@ -165,12 +181,12 @@ class ForeignCardRefusalTests(unittest.TestCase):
         # A card that will not answer EF.ICCID is a card fault. Convicting on it would strand
         # a line whose binding is perfectly correct, so the read has to succeed to accuse.
         target = _Reader("VoWiFi Modem second 00 00", iccid=None)
-        reader, connection = self._find(str(target), [target], self.OURS)
+        reader, connection, _iccid = self._find(str(target), [target], self.OURS)
         self.assertIs(reader, target)
 
     def test_no_configured_iccid_leaves_the_binding_untouched(self):
         target = _Reader("VoWiFi Modem second 00 00", iccid=self.THEIRS)
-        reader, _ = self._find(str(target), [target], "")
+        reader, _conn, _iccid = self._find(str(target), [target], "")
         self.assertIs(reader, target)
 
     def test_index_binding_is_checked_too(self):
