@@ -4,6 +4,32 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- A line no longer authenticates against another line's SIM. A reader binding names a slot —
+  by PC/SC name, USB port or index — and says nothing about which SIM sits in it; when a line
+  opened its sibling's card the only symptom was `SW=9862` from the carrier's AKA challenge,
+  byte for byte what an ePDG returns when it genuinely rejects a subscriber. The freeze was
+  therefore charged to the exit node and the line rebuilt every few minutes while the actual
+  fault went unmentioned. EF.ICCID needs no PIN, so the card identifies itself before anything
+  else touches it: the PIN keeper, the AMI USIM worker and the SWu/IKE worker each refuse a
+  card that is provably not the line's and name both ICCIDs. Only an ICCID actually read
+  convicts a reader — an unreadable EF.ICCID is a transient card fault, not evidence of a swap.
+  The control plane classifies this as a local card fault before the exit policy sees it, so a
+  binding mix-up can no longer cost a healthy exit node its place.
+- A drifted PC/SC reader name is no longer treated as a fault by itself. The USB-port binding
+  exists precisely so a line keeps opening the reader that physically holds its SIM after
+  pcscd renames or re-enumerates it, so "opened name != stored name" is a normal state — and
+  one the ICCID check already settles. Reporting it held the line forever and silently
+  disabled exit failover for it, so a line whose real problem was its exit could never move
+  off a bad node while the UI blamed the binding. The name is now consulted only when the card
+  will not identify itself, which is the case it was added for.
+- `SW=9862` is described by what the host can actually see. A mix-up is physically impossible
+  with a single SIM present, where 9862 is the carrier rejecting that SIM's key material —
+  provisioning or subscription, not hardware. Holding is still correct either way, and an
+  unreadable card cache falls back to the cautious plural reading instead of asserting a
+  single-SIM host that may not be one.
+
 ## [1.3.12] - 2026-08-17
 
 ### Added
