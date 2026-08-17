@@ -1573,6 +1573,44 @@ def _peer_line_registered(iid: str, country: str) -> bool:
     return False
 
 
+def _local_card_fault(iid: str, inst: dict) -> str:
+    """Why this line's own reader binding, not its exit, explains the freeze — or "".
+
+    No exit node can make a line open the wrong SIM, yet that failure arrives looking exactly
+    like one the exit caused: the tunnel comes up, IMS registration is rejected, and the freeze
+    lands on the failover path. Attributed to the exit it walks the whole candidate pool and
+    tears down sibling lines' working tunnels, while the real fault — a reader binding pointing
+    at another line's card — sits untouched and unmentioned for as long as anyone is willing to
+    watch containers rebuild. Checked before classify() so the exit is never blamed for it.
+    """
+    pin = engine.read_run_json(iid, "pin_status.json") or {}
+    swu = engine.read_run_json(iid, "swu_status.json") or {}
+    usim = engine.read_run_json(iid, "usim_status.json") or {}
+    # pin_keeper, ami_usim and swu_ike each check the card they were handed, so any of the three
+    # can be the one that caught it.
+    if "WRONG_CARD" in (pin.get("state"), usim.get("state"), swu.get("state")):
+        detail = str(pin.get("detail") or usim.get("detail") or "").strip()
+        if not detail and swu.get("iccid"):
+            detail = f"the tunnel reader holds ICCID {swu['iccid']}"
+        return detail or "the bound reader holds another line's SIM"
+    # An engine that opened a reader other than the one the line is bound to is mis-bound even
+    # when the card in it never identified itself. Only full PC/SC names are comparable: legacy
+    # numeric indexes and imsi:/iccid: specs name a search, not a slot.
+    bound = str(inst.get("pin_reader") or "").strip()
+    opened = str(pin.get("reader") or "").strip()
+    comparable = bound and not bound.isdigit() and not bound.startswith(("imsi:", "iccid:"))
+    if comparable and opened and opened != bound:
+        return f"the engine opened {opened!r} but this line is bound to {bound!r}"
+    # SW=9862 is "incorrect MAC": the card computed a different response to the carrier's AKA
+    # challenge than the network expected. On a correctly bound line that means a provisioning
+    # problem; with two SIMs on one host it overwhelmingly means the challenge reached the
+    # other card.
+    if "9862" in str(usim.get("detail") or ""):
+        return ("USIM AUTHENTICATE returned SW=9862 (incorrect MAC) — the reader is most "
+                "likely holding another line's SIM")
+    return ""
+
+
 def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> str:
     """Attribute one line freeze and act on it: hold, move the exit, back off, or stop.
 
@@ -1581,6 +1619,11 @@ def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> st
     captured separately and must not be on this decision's critical path.
     """
     iid = str(iid)
+    local = _local_card_fault(iid, inst)
+    if local:
+        log.warning("line %s froze (%s): %s — a local binding fault, not evidence against "
+                    "this line's exit", iid, st.get("reason_code"), local)
+        return failover.HOLD
     country = egress.line_country(inst)
     exits = (egress.status().get("exits") or {}).get(country) or {}
     node = str(exits.get("node") or "")
