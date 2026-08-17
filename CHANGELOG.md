@@ -4,6 +4,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Maintenance can restart the gateway, in three scopes ordered by what they interrupt: the
+  control plane alone (the page drops for a few seconds; SIM bridges, engine containers and
+  calls in progress are untouched), all gateway services (the control plane and the
+  orchestrator together, which rebuilds every SIM bridge and re-registers the lines), and the
+  host itself. Each states what it will cost before it runs. The control plane can carry out
+  none of them — it is unprivileged and is itself restarted in every scope — so it publishes
+  the request and the root orchestrator performs it, detaching into a transient systemd unit
+  whatever would otherwise kill the process running it. A request nothing picks up within a
+  minute is reported as such instead of leaving the page waiting for a restart that will never
+  come.
+
 ### Fixed
 
 - A line no longer authenticates against another line's SIM. A reader binding names a slot —
@@ -29,6 +42,24 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   provisioning or subscription, not hardware. Holding is still correct either way, and an
   unreadable card cache falls back to the cautious plural reading instead of asserting a
   single-SIM host that may not be one.
+- An interrupted update no longer leaves the update dialog spinning forever. An updater killed
+  mid-flight — the host rebooted or lost power, its transient unit was stopped, the process was
+  OOM-killed — cannot record its own death, so the progress document it was publishing to
+  stayed "running" and the dialog resumed into that dead progress view on every visit, counting
+  up for days, with no way out but deleting the file over SSH. The orchestrator now retires a
+  run whose updater unit no longer exists, keeping the stage and asset it died on; the control
+  plane stops treating a document nothing has refreshed as proof of a live update, so the
+  dialog offers the update again instead of resuming it; and a run that goes quiet while the
+  dialog is open can be dismissed from the dialog itself.
+- A download in progress now says how far along it is. The progress bar was only drawn once a
+  byte had arrived and the updater published no byte counts until its first heartbeat, so a
+  transfer that was stuck — curl working through its connect retries — presented as a file
+  name and a climbing clock, indistinguishable from one running normally. The bar is drawn
+  from the first poll, at zero bytes included, alongside the transferred and total size, the
+  rate and an estimate of the time left. The rate is measured over the recent window instead
+  of averaged since the start, so a slow beginning no longer depresses the estimate for the
+  rest of the transfer, and a Release whose size the update check never returned gets an
+  indeterminate bar rather than a countdown that would be a guess.
 
 ## [1.3.12] - 2026-08-17
 

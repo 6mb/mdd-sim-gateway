@@ -4011,6 +4011,13 @@ def api_system_update_progress():
     return update_check.apply_status()
 
 
+@app.post("/api/system/update/cancel")
+async def api_system_update_cancel():
+    """Clear a progress document left behind by an updater that never finished, so the dialog
+    can offer the update again instead of resuming into a dead progress view."""
+    return await asyncio.to_thread(update_check.cancel_apply)
+
+
 @app.post("/api/system/backups")
 async def api_system_backup():
     settings = cfg.get_settings()
@@ -4046,7 +4053,21 @@ async def api_system_maintenance(body: dict):
             except Exception as exc:
                 failed[iid] = str(getattr(exc, "detail", exc))
         return {"ok": not failed, "action": action, "restarted": restarted, "failed": failed}
+    # Restarting services is the one maintenance action this process cannot perform itself:
+    # it is unprivileged, and in every scope it is itself one of the things being restarted.
+    scope = {"restart_control": "control", "restart_services": "services",
+             "restart_host": "host"}.get(action)
+    if scope:
+        result = await asyncio.to_thread(operations.request_service_restart, scope)
+        return {**result, "action": action}
     raise HTTPException(400, "unknown maintenance action")
+
+
+@app.get("/api/system/maintenance/restart-progress")
+def api_system_restart_progress():
+    """Whether the orchestrator has taken the restart request; the restart itself is observed
+    by the API going away and coming back."""
+    return operations.service_restart_status()
 
 
 def _line_diagnostics(inst: dict) -> dict:
