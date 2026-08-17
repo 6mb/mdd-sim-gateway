@@ -76,10 +76,13 @@ def log(msg):
     print(f"[pin_keeper] {msg}", flush=True)
 
 
-def write_status(state, tries_left=None, reader=None, detail=None):
+def write_status(state, tries_left=None, reader=None, detail=None, iccid=None):
+    # `iccid` is what the card in `reader` actually said it was. The manager needs it to tell a
+    # reader name that merely drifted (USB-port binding legitimately opens a renamed slot) from
+    # one that is pointing at the wrong card — the two are indistinguishable from the name alone.
     os.makedirs(RUNDIR, exist_ok=True)
     data = {"state": state, "tries_left": tries_left, "reader": reader,
-            "detail": detail, "ts": int(time.time())}
+            "iccid": iccid, "detail": detail, "ts": int(time.time())}
     tmp = STATUS_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f)
@@ -437,7 +440,7 @@ def ensure_pin(reader_spec, pin):
     except WrongCard as wrong:
         # Naming both ICCIDs here is the whole point: SW=9862 alone sends people hunting the
         # carrier, while "this slot holds someone else's SIM" points straight at the binding.
-        write_status("WRONG_CARD", reader=wrong.reader,
+        write_status("WRONG_CARD", reader=wrong.reader, iccid=wrong.actual,
                      detail=f"reader holds ICCID {wrong.actual}, this line is {wrong.expected}")
         log(f"refusing to use {wrong.reader}: {wrong}")
         return None
@@ -445,43 +448,55 @@ def ensure_pin(reader_spec, pin):
         write_status("NO_CARD", reader=str(reader_spec))
         return None
     rname = str(r)
+    # Record WHICH card answered, not just which slot was opened. A USB-port binding
+    # deliberately opens the reader that physically holds the SIM even when its generated
+    # name has changed, so a name that differs from the stored one is normal there. Only the
+    # ICCID separates that from a slot pointing at another line's card.
+    try:
+        card_iccid = read_iccid(conn)
+    except Exception:  # noqa - an unreadable EF.ICCID leaves the name as the only evidence
+        card_iccid = None
+
+    def status(state, **kw):
+        write_status(state, iccid=card_iccid, **kw)
+
     try:
         with _Tx(conn):
             if not select_adf_usim(conn):
-                write_status("NO_CARD", reader=rname, detail="ADF.USIM select failed")
+                status("NO_CARD", reader=rname, detail="ADF.USIM select failed")
                 conn.disconnect()
                 return None
 
             tries = pin_tries_left(conn)
             if not pin or pin.lower() in ("none", "disabled", ""):
-                write_status("PIN_DISABLED", tries_left=tries, reader=rname)
+                status("PIN_DISABLED", tries_left=tries, reader=rname)
                 return conn
             if tries is None:
                 # already verified in this card session (9000) -> nothing to do
-                write_status("VERIFIED", tries_left=None, reader=rname)
+                status("VERIFIED", tries_left=None, reader=rname)
                 return conn
             if tries == 0:
-                write_status("PIN_BLOCKED", tries_left=0, reader=rname)
+                status("PIN_BLOCKED", tries_left=0, reader=rname)
                 return conn
             if tries < MIN_TRIES:
-                write_status("PIN_BLOCKED", tries_left=tries, reader=rname,
+                status("PIN_BLOCKED", tries_left=tries, reader=rname,
                              detail=f"refusing verify with only {tries} tries left (PUK risk)")
                 return conn
 
             s1, s2 = verify_pin(conn, pin)
             if (s1, s2) == (0x90, 0x00):
-                write_status("VERIFIED", tries_left=3, reader=rname)
+                status("VERIFIED", tries_left=3, reader=rname)
                 return conn
             if s1 == 0x63:
-                write_status("WRONG_PIN", tries_left=s2 & 0x0F, reader=rname)
+                status("WRONG_PIN", tries_left=s2 & 0x0F, reader=rname)
                 return conn
             if (s1, s2) == (0x69, 0x83):
-                write_status("PIN_BLOCKED", tries_left=0, reader=rname)
+                status("PIN_BLOCKED", tries_left=0, reader=rname)
                 return conn
-            write_status("ERROR", reader=rname, detail=f"verify sw={s1:02x}{s2:02x}")
+            status("ERROR", reader=rname, detail=f"verify sw={s1:02x}{s2:02x}")
             return conn
     except Exception as e:  # noqa
-        write_status("ERROR", reader=rname, detail=repr(e))
+        status("ERROR", reader=rname, detail=repr(e))
         try:
             conn.disconnect()
         except Exception:

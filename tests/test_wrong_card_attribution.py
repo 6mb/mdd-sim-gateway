@@ -19,11 +19,12 @@ OTHER = "VoWiFi Modem 2c7c-0125-1-1 00 00"
 
 
 class LocalCardFaultTests(unittest.TestCase):
-    def _fault(self, pin=None, swu=None, usim=None, inst=None):
+    def _fault(self, pin=None, swu=None, usim=None, inst=None, cards=2):
         files = {"pin_status.json": pin or {}, "swu_status.json": swu or {},
                  "usim_status.json": usim or {}}
         with patch.object(main.engine, "read_run_json",
-                          side_effect=lambda iid, name: files.get(name)):
+                          side_effect=lambda iid, name: files.get(name)), \
+                patch.object(main, "_distinct_cards_present", return_value=cards):
             return main._local_card_fault("1", inst or {})
 
     def test_a_healthy_line_reports_no_local_fault(self):
@@ -67,12 +68,65 @@ class LocalCardFaultTests(unittest.TestCase):
                                 inst={"pin_reader": spec}),
                     "")
 
-    def test_sw_9862_is_read_as_a_mis_bound_reader(self):
-        fault = self._fault(usim={"state": "AUTH_FAIL", "detail": "sw=9862"})
+    def test_a_card_that_proved_it_is_ours_settles_the_question_the_name_cannot(self):
+        # The USB-port binding deliberately opens the reader that physically holds this SIM
+        # even after pcscd renamed it, so "name differs" is a normal state there. Calling it a
+        # fault would hold the line forever AND quietly disable exit failover for a line whose
+        # real problem is its exit — a far more expensive mistake than the one being prevented.
+        self.assertEqual(
+            self._fault(pin={"state": "PIN_DISABLED", "reader": OTHER, "iccid": OURS},
+                        inst={"pin_reader": BOUND, "iccid": OURS}),
+            "")
+
+    def test_the_name_still_speaks_when_the_card_would_not(self):
+        # An unreadable EF.ICCID is exactly the case the name comparison was added for.
+        for recorded in (None, ""):
+            with self.subTest(iccid=recorded):
+                fault = self._fault(
+                    pin={"state": "PIN_DISABLED", "reader": OTHER, "iccid": recorded},
+                    inst={"pin_reader": BOUND, "iccid": OURS})
+                self.assertIn(OTHER, fault)
+
+    def test_a_card_that_is_not_ours_is_still_caught_by_name(self):
+        fault = self._fault(pin={"state": "PIN_DISABLED", "reader": OTHER, "iccid": THEIRS},
+                            inst={"pin_reader": BOUND, "iccid": OURS})
+        self.assertIn(OTHER, fault)
+
+    def test_sw_9862_with_several_sims_present_points_at_the_reader(self):
+        fault = self._fault(usim={"state": "AUTH_FAIL", "detail": "sw=9862"}, cards=2)
         self.assertIn("9862", fault)
+        self.assertIn("another line's SIM", fault)
+
+    def test_sw_9862_on_a_single_sim_host_points_at_the_carrier(self):
+        # A mix-up is physically impossible with one SIM. Holding is still right — 9862 is not
+        # the exit's fault — but naming hardware would send the operator the wrong way.
+        fault = self._fault(usim={"state": "AUTH_FAIL", "detail": "sw=9862"}, cards=1)
+        self.assertIn("9862", fault)
+        self.assertNotIn("another line's SIM", fault)
+        self.assertIn("provisioning", fault)
 
     def test_other_authentication_failures_are_left_to_the_exit_policy(self):
         self.assertEqual(self._fault(usim={"state": "AUTH_FAIL", "detail": "sw=6982"}), "")
+
+
+class CardCountTests(unittest.TestCase):
+    def test_distinct_sims_are_counted_not_readers(self):
+        # One modem exposes three VPCD readers onto the same UICC; that is one SIM, not three.
+        with patch.object(main.hub, "cards", {
+                "VoWiFi Modem A 00 00": {"iccid": OURS},
+                "VoWiFi Modem A 00 01": {"iccid": OURS},
+                "VoWiFi Modem A 00 02": {"iccid": OURS}}):
+            self.assertEqual(main._distinct_cards_present(), 1)
+
+    def test_two_modems_count_as_two(self):
+        with patch.object(main.hub, "cards", {
+                "VoWiFi Modem A 00 00": {"iccid": OURS},
+                "VoWiFi Modem B 00 00": {"iccid": THEIRS}}):
+            self.assertEqual(main._distinct_cards_present(), 2)
+
+    def test_an_empty_or_unreadable_cache_does_not_claim_a_single_sim_host(self):
+        with patch.object(main.hub, "cards", {}):
+            self.assertGreater(main._distinct_cards_present(), 1)
 
 
 class ExitAttributionTests(unittest.TestCase):

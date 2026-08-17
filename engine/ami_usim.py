@@ -398,7 +398,7 @@ def read_res_ck_ik(reader_spec, rand, autn):
     # would surface as an SW=9862 "carrier rejected us" into a binding fault anyone can act on.
     intruder = foreign_iccid(conn)
     if intruder:
-        write_status(state="WRONG_CARD",
+        write_status(state="WRONG_CARD", iccid=intruder,
                      detail=f"reader holds ICCID {intruder}, this line is "
                             f"{os.environ.get('USIM_ICCID', '').strip()}")
         try:

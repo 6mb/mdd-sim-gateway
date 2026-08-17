@@ -1,5 +1,8 @@
 import importlib.util
+import json
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -208,6 +211,21 @@ class ForeignCardRefusalTests(unittest.TestCase):
         self.assertEqual(written.get("state"), "WRONG_CARD")
         self.assertIn(self.THEIRS, written.get("detail", ""))
         self.assertIn(self.OURS, written.get("detail", ""))
+
+    def test_pin_status_records_which_card_answered(self):
+        # The manager needs the ICCID to tell a reader name that merely drifted (USB-port
+        # binding opening a renamed slot) from one pointing at the wrong card. Without this
+        # field it can only compare names, and a correctly bound line gets held forever.
+        with tempfile.TemporaryDirectory() as run_dir:
+            with patch.object(self.pin_keeper, "RUNDIR", run_dir), \
+                    patch.object(self.pin_keeper, "STATUS_PATH",
+                                 os.path.join(run_dir, "pin_status.json")):
+                self.pin_keeper.write_status("PIN_DISABLED", tries_left=3,
+                                             reader="VoWiFi Modem x 00 00", iccid=self.OURS)
+                written = json.loads(
+                    Path(run_dir, "pin_status.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["iccid"], self.OURS)
+        self.assertEqual(written["state"], "PIN_DISABLED")
 
     def test_ami_usim_spots_the_foreign_card_on_the_ims_path(self):
         connection = _Connection("Reader A", iccid=self.THEIRS)

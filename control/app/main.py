@@ -1573,6 +1573,19 @@ def _peer_line_registered(iid: str, country: str) -> bool:
     return False
 
 
+def _distinct_cards_present() -> int:
+    """How many different SIMs this host can currently see.
+
+    Decides only how a SW=9862 is worded, so an unreadable cache falls back to the cautious
+    plural reading rather than asserting a single-SIM host that may not be one.
+    """
+    try:
+        return len({str(entry.get("iccid") or "")
+                    for entry in hub.cards.values() if entry.get("iccid")}) or 2
+    except Exception:  # noqa - the card cache is a hint here, never the decision itself
+        return 2
+
+
 def _local_card_fault(iid: str, inst: dict) -> str:
     """Why this line's own reader binding, not its exit, explains the freeze — or "".
 
@@ -1593,21 +1606,34 @@ def _local_card_fault(iid: str, inst: dict) -> str:
         if not detail and swu.get("iccid"):
             detail = f"the tunnel reader holds ICCID {swu['iccid']}"
         return detail or "the bound reader holds another line's SIM"
-    # An engine that opened a reader other than the one the line is bound to is mis-bound even
-    # when the card in it never identified itself. Only full PC/SC names are comparable: legacy
-    # numeric indexes and imsi:/iccid: specs name a search, not a slot.
+    # A reader NAME that differs from the stored one is not by itself a fault. The USB-port
+    # binding exists precisely so a line keeps opening the reader that physically holds its SIM
+    # after pcscd renames or re-enumerates it. When the card in that reader identified itself as
+    # this line's, the name is settled evidence of nothing and must not be second-guessed:
+    # treating it as a fault would hold the line forever and, worse, silently disable exit
+    # failover for a line whose real problem is its exit. The name only speaks when the card
+    # would not — which is exactly the case the check was added for.
+    card_iccid = str(pin.get("iccid") or "").strip()
+    line_iccid = str(inst.get("iccid") or "").strip()
+    card_confirmed = bool(card_iccid and line_iccid and card_iccid == line_iccid)
+    # Only full PC/SC names are comparable: legacy numeric indexes and imsi:/iccid: specs name
+    # a search, not a slot.
     bound = str(inst.get("pin_reader") or "").strip()
     opened = str(pin.get("reader") or "").strip()
     comparable = bound and not bound.isdigit() and not bound.startswith(("imsi:", "iccid:"))
-    if comparable and opened and opened != bound:
+    if not card_confirmed and comparable and opened and opened != bound:
         return f"the engine opened {opened!r} but this line is bound to {bound!r}"
     # SW=9862 is "incorrect MAC": the card computed a different response to the carrier's AKA
-    # challenge than the network expected. On a correctly bound line that means a provisioning
-    # problem; with two SIMs on one host it overwhelmingly means the challenge reached the
-    # other card.
+    # challenge than the network expected. Which cause that points at depends on how many SIMs
+    # the host can even see — a mix-up is physically impossible with one, and naming it anyway
+    # sends the operator to the hardware when the answer is on the carrier's side.
     if "9862" in str(usim.get("detail") or ""):
-        return ("USIM AUTHENTICATE returned SW=9862 (incorrect MAC) — the reader is most "
-                "likely holding another line's SIM")
+        if _distinct_cards_present() > 1:
+            return ("USIM AUTHENTICATE returned SW=9862 (incorrect MAC) — with more than one "
+                    "SIM on this host, the reader is most likely holding another line's SIM")
+        return ("USIM AUTHENTICATE returned SW=9862 (incorrect MAC) — the carrier rejected "
+                "this SIM's key material; on a single-SIM host that points at provisioning "
+                "or subscription, not at a reader mix-up")
     return ""
 
 
