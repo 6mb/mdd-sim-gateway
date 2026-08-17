@@ -4,6 +4,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Added a read-only USB passthrough diagnostic for gateways running inside a Proxmox VM. The
+  support bundle answers the card-path questions from inside the gateway, but a VM cannot see
+  the layer above it: when passthrough breaks the guest only observes that the modem is gone,
+  while the reason lives in the host's USB and QEMU state. The script runs on either side —
+  host mode queries `qm status`, the passthrough-relevant config lines, host USB topology and a
+  scripted read-only `info usbhost` / `info usb` monitor snapshot; guest mode covers device
+  nodes, bound drivers, service state, kernel events and the live bridge and VPCD listeners —
+  so the two reports can be compared. It refuses host mode without an explicit VM id, because a
+  report about the wrong VM is worse than no report, and masks IMSI/ICCID/IMEI-shaped digit runs
+  by default since the report is meant to be shared.
+
 ## [1.3.13] - 2026-08-17
 
 ### Added
