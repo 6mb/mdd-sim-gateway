@@ -1749,7 +1749,26 @@ def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> st
                                     stable_for=stable_for)
         except Exception as exc:  # noqa
             log.warning("exit reselect request failed for line %s: %s", iid, exc)
-    elif action in (failover.GIVE_UP, failover.REPORT) or (
+    elif verdict == failover.BLAMES_EXIT and not peer_registered and country:
+        # The exit is at fault and we are NOT moving off it — either the strike count is still
+        # short, the pool is exhausted, or the node is pinned. Holding is right, but it leaves
+        # one recoverable failure unattended: a sing-box session whose outbound died is kept
+        # alive by this line's own IKE retransmits (each one refreshes the idle timer), so the
+        # rebuild loop feeds packets to a connection that can never answer and the line never
+        # recovers on its own. Ask the host to close that country's sessions so the next
+        # attempt dials afresh.
+        #
+        # Safe by construction against the failover principles: it changes no node, respects a
+        # pin, and the peer check above means no sibling line is registered over this exit, so
+        # nothing that currently works is torn down.
+        try:
+            egress.report_stalled_exit(country, node, f"health-freeze:{st['reason_code']}", iid)
+        except Exception as exc:  # noqa
+            log.debug("stalled-exit report failed for line %s: %r", iid, exc)
+    # Independent of the branch above, not an alternative to it: closing dead sessions and
+    # telling the operator the line is stuck are different jobs, and a backed-off line needs
+    # both. (Chaining this onto the same if/elif silently swallowed the notification.)
+    if action in (failover.GIVE_UP, failover.REPORT) or (
             action == failover.BACK_OFF and not was_backing_off):
         text = failover.summarise(ledger, action, country, pinned)
         log.warning("line %s: %s", iid, text)
