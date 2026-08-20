@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.3.14] - 2026-08-20
+
 ### Added
 
 - A text longer than one SMS now arrives as one message instead of several. The SMSC splits
