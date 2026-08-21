@@ -31,7 +31,9 @@ jobs:
       - name: No real subscriber identifiers in the tree
         # RELEASE_CHECKLIST.md has always required this scan, but as a manual step it was
         # skipped for fifteen consecutive releases. Enforced here so it cannot be.
-        run: tools/check-subscriber-identifiers.sh
+        # Invoked through sh: tools/ scripts are tracked without the executable bit,
+        # matching the other scripts in that directory.
+        run: sh tools/check-subscriber-identifiers.sh
 
   webui:
     runs-on: ubuntu-latest

@@ -20,7 +20,7 @@ jobs:
           test "v$(tr -d '\n' < VERSION)" = "${GITHUB_REF_NAME}"
           git diff --exit-code
       - name: No real subscriber identifiers in the release
-        run: tools/check-subscriber-identifiers.sh
+        run: sh tools/check-subscriber-identifiers.sh
       - name: Test release source
         run: |
           sudo apt-get update
