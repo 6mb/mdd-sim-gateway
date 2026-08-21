@@ -65,6 +65,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   deliberately the weaker sibling of switching nodes: it changes no node, respects a pin, and
   is gated on the same check, so an exit carrying a registered sibling line is never touched.
 
+- A service code beginning with `#` produced no call-log entry at all. The dialplan reports a
+  call through a shell, where an unquoted `#` at the start of a word opens a comment: dialling
+  `#225#` therefore discarded the number and every argument after it, and the record was never
+  created — not stuck in a wrong state, simply absent. `*#21#` was unaffected, its `#` falling
+  mid-word, which is why the failure looked arbitrary. The argument is now quoted.
+
 - A very short call could stay on "dialing" in the call log forever. The dialplan reports a
   call's start and its outcome from separate backgrounded processes, so nothing orders the two:
   when a call ends in under a second, the outcome can reach the manager before the record it is
