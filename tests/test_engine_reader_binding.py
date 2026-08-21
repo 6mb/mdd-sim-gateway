@@ -172,8 +172,8 @@ class ForeignCardRefusalTests(unittest.TestCase):
     subscriber, so the fault gets attributed upstream and the line rebuilds forever.
     """
 
-    OURS = "8901260444723809824"
-    THEIRS = "8944303773524072104"
+    OURS = "8900000000000000022"
+    THEIRS = "8900000000000000031"
 
     @classmethod
     def setUpClass(cls):
@@ -248,7 +248,7 @@ class ForeignCardRefusalTests(unittest.TestCase):
         # Falling back to "the first card-bearing reader" is the same silent mis-bind by
         # another route: every card said who it was, and none of them was ours.
         one = _Reader("Reader A", iccid=self.THEIRS)
-        two = _Reader("Reader B", iccid="8944303773524072999")
+        two = _Reader("Reader B", iccid="8900000000000000040")
         with self.assertRaises(self.pin_keeper.WrongCard):
             self._find("imsi:310260123456789", [one, two], self.OURS)
 

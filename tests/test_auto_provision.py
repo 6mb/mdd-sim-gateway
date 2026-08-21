@@ -395,7 +395,7 @@ class ExistingModemCardTests(unittest.IsolatedAsyncioTestCase):
 class EsimProfileRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_active_profile_creates_line_and_schedules_auto_start(self):
         card = SimpleNamespace(
-            iccid="89441000400130120985", imsi="234100000000001",
+            iccid="89000000000000000067", imsi="234100000000001",
             mcc="234", mnc="10", pin_enabled=False, pin_tries=3,
             smsc="+447785016005",
         )
