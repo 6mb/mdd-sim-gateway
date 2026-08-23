@@ -644,6 +644,16 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
               if (!ussdTimedOut) {
                 return <div style={{ fontSize: 14, color: 'var(--text-mute)' }}>{t('Waiting for the carrier\u2019s reply\u2026')}</div>
               }
+              // Nothing was recorded for this call at all. The dialplan logs a call the
+              // moment it matches, so no record means the code never matched — it was
+              // rejected by our own Asterisk, not by the network, and an engine image older
+              // than service-code support does exactly that. Blaming the carrier here sends
+              // the user to their operator over a stale image on their own machine.
+              if (!rawVerdict) {
+                return <div style={{ fontSize: 13.5, color: '#f59e0b', maxWidth: 300, margin: '0 auto' }}>
+                  {t('The gateway did not send this code. Its engine image may be older than service-code support — reload the installation to update it.')}
+                </div>
+              }
               return <div style={{ fontSize: 14, color: 'var(--text-mute)' }}>{endLabel(call.endCause, true)}</div>
             })()}
             {dismissIn !== null && (

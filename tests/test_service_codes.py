@@ -72,6 +72,18 @@ class BrowserDiallerServiceCodeTests(unittest.TestCase):
         # The cellular path dials a voice call; a service code needs AT+CUSD instead.
         self.assertIn("if (isServiceCode(target)) {", self.view)
 
+    def test_a_locally_rejected_code_is_not_blamed_on_the_carrier(self):
+        # The dialplan records a call the moment its pattern matches, so an absent record
+        # means the code never matched — our own Asterisk answered 404, the request never
+        # reached the network. An engine image predating service-code support does exactly
+        # that, and reporting it as "the carrier does not recognise this code" sends the user
+        # to their operator over a stale image on their own machine.
+        self.assertIn("if (!rawVerdict) {", self.view)
+        self.assertIn("The gateway did not send this code.", self.view)
+        # It must be checked before the SIP-cause fallback, which is what used to answer here.
+        self.assertLess(self.view.index("if (!rawVerdict) {"),
+                        self.view.index("return <div style={{ fontSize: 14, color: 'var(--text-mute)' }}>{endLabel(call.endCause, true)}"))
+
     def test_sip_uri_escapes_hash_because_jssip_rejects_it(self):
         self.assertIn(r"const user = String(number).replace(/#/g, '%23')", self.phone)
         self.assertIn("this.ua.call(`sip:${user}@${domain}`", self.phone)

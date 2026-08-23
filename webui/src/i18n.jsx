@@ -170,6 +170,8 @@ const zh = {
   'Carrier accepted the code. Waiting for its reply…': '运营商已接受该代码，正在等待回复…',
   'Waiting for the carrier’s reply…': '正在等待运营商回复…',
   'Carrier replied': '运营商已回复',
+  'The gateway did not send this code. Its engine image may be older than service-code support — reload the installation to update it.':
+    '网关未能送出该代码。引擎镜像可能早于服务码支持——请重新加载安装以更新引擎。',
   'Carrier accepted the code. This kind of code returns no text.':
     '运营商已接受该代码。此类代码不返回文本内容。',
   Back: '返回',
