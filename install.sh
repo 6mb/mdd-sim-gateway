@@ -586,6 +586,11 @@ engine_image_label() {
 # registry at all. Forcing still overrides everything.
 ensure_engine_image() {
   force="${1:-}"
+  # Whether this call replaced the image. A running container keeps the image it started
+  # from, so an upgrade that rebuilds the image but leaves the containers alone silently
+  # ships nothing: the lines go on serving the old dialplan. The caller uses this to decide
+  # whether the containers have to be re-created, instead of asking the operator to know.
+  ENGINE_IMAGE_CHANGED=0
   runtime_fp=$(engine_fingerprint runtime)
   base_fp=$(engine_fingerprint base)
   have_image=0
@@ -601,13 +606,17 @@ ensure_engine_image() {
     if [ -n "$image_base" ] && [ "$image_base" = "$base_fp" ]; then
       # Only runtime-owned files moved: refresh them onto the image already installed.
       info "engine scripts changed — refreshing them onto the existing image (no rebuild)"
-      engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp" && return
+      if engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp"; then
+        ENGINE_IMAGE_CHANGED=1; return
+      fi
       warn "overlay refresh failed; falling back to a full engine rebuild"
     elif [ -z "$image_base" ]; then
       # Built before fingerprints existed: adopt it as the base and stamp it, rather than
       # forcing every existing install through a rebuild it may not be able to complete.
       info "engine image predates fingerprinting — refreshing scripts onto it and stamping it"
-      engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp" && return
+      if engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp"; then
+        ENGINE_IMAGE_CHANGED=1; return
+      fi
       warn "overlay refresh failed; falling back to a full engine rebuild"
     else
       info "engine base inputs changed (Dockerfile/patches/pcsc) — full rebuild required"
@@ -620,6 +629,7 @@ ensure_engine_image() {
     info "building offline engine overlay from trusted local image $MDD_ENGINE_BASE_IMAGE"
     engine_overlay_build "$MDD_ENGINE_BASE_IMAGE" "$runtime_fp" "$base_fp" || \
       die "offline engine overlay build failed"
+    ENGINE_IMAGE_CHANGED=1
   else
     info "building engine image ($ENGINE_IMAGE) from source — long; compiles Asterisk+pcsc-lite+Python SWu tunnel deps and bakes engine/patches/*…"
     # shellcheck disable=SC2086
@@ -629,6 +639,7 @@ ensure_engine_image() {
     # Keep the full build as the base every future overlay starts from, so repeated updates
     # stack one layer on a known-good image instead of a layer per update.
     docker tag "$ENGINE_IMAGE" "$ENGINE_BASE_TAG" >/dev/null 2>&1 || true
+    ENGINE_IMAGE_CHANGED=1
   fi
   info "engine image built"
 }
@@ -1075,6 +1086,7 @@ cmd_reload() {
   ensure_singbox
   ensure_xray
   ensure_cellular_tools
+  ENGINE_IMAGE_CHANGED=0
   if [ "$PRESERVE_ENGINES" = 1 ]; then
     docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 || \
       die "--no-engines requires the existing engine image $ENGINE_IMAGE"
@@ -1095,7 +1107,13 @@ cmd_reload() {
     run_control_local
   fi
   run_orchestrator
-  if [ "$RECREATE_ENGINES" = 1 ]; then
+  # A container keeps the image it was started from, so re-creating them is not optional once
+  # the image has changed — skipping it leaves every line running the previous engine while
+  # the control plane reports the new version. That mismatch is invisible from the UI and was
+  # reported as a broken feature rather than a stale image, so decide it from what actually
+  # happened instead of from a flag the operator has to know to pass. --no-engines still wins:
+  # someone who asks to keep the running engines gets to keep them.
+  if [ "$RECREATE_ENGINES" = 1 ] || [ "$ENGINE_IMAGE_CHANGED" = 1 ]; then
     warn "engines will be re-created by the control plane on next start/provision (image updated)"
     for n in $(engine_names); do docker rm -f "$n" >/dev/null 2>&1 || true; done
   fi
