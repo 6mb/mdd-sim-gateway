@@ -84,6 +84,17 @@ class BrowserDiallerServiceCodeTests(unittest.TestCase):
         self.assertLess(self.view.index("if (!rawVerdict) {"),
                         self.view.index("return <div style={{ fontSize: 14, color: 'var(--text-mute)' }}>{endLabel(call.endCause, true)}"))
 
+    def test_blocked_webrtc_is_reported_instead_of_timing_out(self):
+        # A privacy extension replaces RTCPeerConnection with a non-constructor rather than
+        # removing it, so JsSIP stalls inside connect() with no error: no SDP, no INVITE, and
+        # the call screen runs its full course before blaming the carrier for a request that
+        # never left the browser. Detect it up front and say so.
+        self.assertIn("const WEBRTC_AVAILABLE = typeof RTCPeerConnection === 'function'", self.view)
+        self.assertIn("callTransport === 'vowifi' && !WEBRTC_AVAILABLE", self.view)
+        # Refused before dialling, not after: the check must precede the JsSIP call.
+        self.assertLess(self.view.index("!WEBRTC_AVAILABLE"),
+                        self.view.index("phone.current.call(target)"))
+
     def test_sip_uri_escapes_hash_because_jssip_rejects_it(self):
         self.assertIn(r"const user = String(number).replace(/#/g, '%23')", self.phone)
         self.assertIn("this.ua.call(`sip:${user}@${domain}`", self.phone)

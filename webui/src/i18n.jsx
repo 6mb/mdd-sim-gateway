@@ -170,6 +170,8 @@ const zh = {
   'Carrier accepted the code. Waiting for its reply…': '运营商已接受该代码，正在等待回复…',
   'Waiting for the carrier’s reply…': '正在等待运营商回复…',
   'Carrier replied': '运营商已回复',
+  'This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.':
+    '此浏览器已禁用 WebRTC，无法拨打电话。通常是隐私或广告拦截扩展所致——请为本站点放行 WebRTC，或改用无痕窗口打开。',
   'The gateway did not send this code. Its engine image may be older than service-code support — reload the installation to update it.':
     '网关未能送出该代码。引擎镜像可能早于服务码支持——请重新加载安装以更新引擎。',
   'Carrier accepted the code. This kind of code returns no text.':

@@ -42,6 +42,13 @@ const SETTLED_CODE_STATUS = new Set([
   'code accepted', 'code unsupported', 'code rejected', 'code failed',
 ])
 
+// A privacy extension that blocks WebRTC does not remove RTCPeerConnection — it replaces it
+// with something that is not a constructor. JsSIP then stalls inside connect() without ever
+// emitting an error: no SDP is generated, no INVITE is sent, and the call screen runs its full
+// course on a request that never left the browser. Diagnosed from a user whose gateway looked
+// broken for two days; the engine, dialplan and carrier were never involved.
+const WEBRTC_AVAILABLE = typeof RTCPeerConnection === 'function'
+
 // SIP registration states reported by the JsSIP wrapper.
 const REG_LABEL = {
   idle: 'Idle', connecting: 'Connecting', registered: 'Registered',
@@ -385,6 +392,10 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       setNum('')
       return
     }
+    if (callTransport === 'vowifi' && !WEBRTC_AVAILABLE) {
+      toast(t('This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.'))
+      return
+    }
     if (callTransport === 'cellular') {
       // The cellular backend places a voice call. A service code is supplementary-service
       // signalling, which needs AT+CUSD instead, so fail loudly rather than dialling nonsense.
@@ -531,6 +542,14 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
           </div>
         </div>
 
+        {/* Say it before a call is attempted, not after one silently fails: the failure mode
+            is a screen that runs its full course and then blames the carrier. */}
+        {callTransport === 'vowifi' && !WEBRTC_AVAILABLE && (
+          <div style={{ margin: '12px 0', padding: '10px 12px', borderRadius: 8, fontSize: 13,
+            lineHeight: 1.5, color: '#b45309', background: '#fffbeb', border: '1px solid #fcd34d' }}>
+            {t('This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.')}
+          </div>
+        )}
         {callTransport === 'vowifi' && !prov?.enabled && (
           <div style={{ color: '#f97316', fontSize: 13, margin: '12px 0' }}>
             {t('WebRTC is disabled for this SIM. Enable it in SIM Config (needs HTTPS/TLS) to use the browser phone.')}
