@@ -631,9 +631,19 @@ def _random_svn() -> str:
     return f"{random.randint(0, 99):02d}"
 
 
-def _find_running_by_reader(name: str):
+def _find_running_by_reader(
+    name: str,
+    reader_port: str | None = None,
+    *,
+    require_port_match: bool = False,
+):
     """The running instance whose pin_keeper reports using this reader NAME
-    (pin_status.json "reader") — per-reader correct with multiple SIMs."""
+    (pin_status.json "reader") — per-reader correct with multiple SIMs.
+
+    A native reader name is only a transient pcscd enumeration identity. During insertion
+    attribution callers that know the live USB port must also verify it against the line's
+    saved port; otherwise two identical serial-less readers can exchange names after reboot
+    and make a running engine lend the wrong ICCID to the newly observed card."""
     if not name:
         return None
     for i in cfg.list_instances():
@@ -641,6 +651,14 @@ def _find_running_by_reader(name: str):
             continue
         ps = engine.read_run_json(str(i["id"]), "pin_status.json") or {}
         if ps.get("reader") == name:
+            saved_port = str(i.get("reader_port") or "")
+            live_port = str(reader_port or "")
+            if require_port_match and saved_port and saved_port != live_port:
+                log.warning(
+                    "ignoring stale running-reader claim for instance %s: "
+                    "reader=%s saved_port=%s live_port=%s",
+                    i.get("id"), name, saved_port, live_port or "unresolved")
+                continue
             return i
     return None
 
@@ -692,7 +710,8 @@ async def _on_card_insert(name, idx):
     # using THIS reader name first, and only probe when no running engine claims it.
     # Also skip probing while an LPA (lpac) operation holds the reader exclusively —
     # profile enable/disable triggers eUICC REFRESH that looks like remove+insert.
-    inst = await asyncio.to_thread(_find_running_by_reader, name)
+    inst = await asyncio.to_thread(
+        _find_running_by_reader, name, info.get("reader_port"), require_port_match=True)
     if inst is not None:
         info.update(iccid=inst.get("iccid"), imsi=inst.get("imsi"), matched=inst["id"],
                     smsc=inst.get("smsc"), mcc=inst.get("mcc"), mnc=inst.get("mnc"),

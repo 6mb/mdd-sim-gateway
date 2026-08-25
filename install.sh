@@ -994,6 +994,9 @@ run_control() {
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v /run/pcscd:/run/pcscd \
     -v /run/dbus:/run/dbus:ro \
+    -v /usr/local/bin/sing-box:/usr/local/bin/sing-box:ro \
+    -v /usr/local/bin/xray:/usr/local/bin/xray:ro \
+    -v "${REPO_DIR}/host:/app/host:ro" \
     -v "${DATA_ABS}:/data" \
     -e MDD_DATA=/data \
     -e MDD_HOST_DATA="${DATA_ABS}" \
@@ -1003,6 +1006,8 @@ run_control() {
     -e MDD_MANAGER_URL="https://host.docker.internal:${MDD_PORT}" \
     -e MDD_ENGINE_IMAGE="${ENGINE_IMAGE}" \
     -e MDD_PCSCD_DIR=/run/pcscd \
+    -e MDD_SINGBOX_BIN=/usr/local/bin/sing-box \
+    -e MDD_XRAY_BIN=/usr/local/bin/xray \
     "$CONTROL_IMAGE"
 }
 

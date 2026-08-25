@@ -115,6 +115,20 @@ class RequestApplyTests(unittest.TestCase):
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_docker_control_recreation_preserves_node_test_runtime(self):
+        installer = (Path(__file__).resolve().parent.parent / "install.sh").read_text(
+            encoding="utf-8")
+        start = installer.index("run_control() {")
+        end = installer.index("\n}\n", start)
+        run_control = installer[start:end]
+
+        self.assertIn(
+            "-v /usr/local/bin/sing-box:/usr/local/bin/sing-box:ro", run_control)
+        self.assertIn("-v /usr/local/bin/xray:/usr/local/bin/xray:ro", run_control)
+        self.assertIn('-v "${REPO_DIR}/host:/app/host:ro"', run_control)
+        self.assertIn("-e MDD_SINGBOX_BIN=/usr/local/bin/sing-box", run_control)
+        self.assertIn("-e MDD_XRAY_BIN=/usr/local/bin/xray", run_control)
+
     def test_reload_reuses_satisfied_python_requirements_offline(self):
         installer = (Path(__file__).resolve().parent.parent / "install.sh").read_text(
             encoding="utf-8")
