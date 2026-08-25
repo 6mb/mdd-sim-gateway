@@ -59,6 +59,19 @@ class EngineImageRefreshTests(unittest.TestCase):
         self.assertIn('[ "$identity" = "$expected" ]', ensure[identity:activated])
         self.assertIn('"$ENGINE_IMAGE:previous"', ensure[identity:activated])
 
+    def test_full_build_passes_explicit_source_repository_overrides(self):
+        ensure = _body("ensure_engine_image")
+        self.assertIn('[ -n "${PJPROJECT_REPOSITORY:-}" ]', ensure)
+        self.assertIn(
+            'set -- "$@" --build-arg "PJPROJECT_REPOSITORY=$PJPROJECT_REPOSITORY"',
+            ensure,
+        )
+        self.assertIn('[ -n "${ASTERISK_REPOSITORY:-}" ]', ensure)
+        self.assertIn(
+            'set -- "$@" --build-arg "ASTERISK_REPOSITORY=$ASTERISK_REPOSITORY"',
+            ensure,
+        )
+
     def test_reusing_an_unchanged_image_leaves_the_lines_alone(self):
         # The flag starts at 0 and the reuse path returns before any assignment, so an
         # ordinary reload does not interrupt calls for nothing.

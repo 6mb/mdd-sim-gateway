@@ -37,6 +37,8 @@
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
 #   MDD_ENGINE_BASE_IMAGE optional trusted local engine image for an offline overlay migration
 #   MDD_ENGINE_DISTRIBUTION_IMAGE optional already-pulled, release-matched Engine image
+#   PJPROJECT_REPOSITORY optional reviewed pjproject Git repository override for a full build
+#   ASTERISK_REPOSITORY optional reviewed Asterisk Git repository override for a full build
 #   MDD_REUSE_WEBUI     set to 1 to reuse a prebuilt, reviewed webui/dist in an offline install
 #   MDD_REUSE_CONTROL_IMAGE set to 1 to reuse a checksummed Release control image (docker mode)
 #   PCSC_VERSION           pinned pcsc-lite version                   (default 2.3.3)
@@ -644,11 +646,20 @@ ensure_engine_image() {
     ENGINE_IMAGE_CHANGED=1
   else
     info "building engine image ($ENGINE_IMAGE) from source — long; compiles Asterisk+pcsc-lite+Python SWu tunnel deps and bakes engine/patches/*…"
-    # shellcheck disable=SC2086
-    docker build $NOCACHE_FLAG --build-arg "PCSC_VERSION=$PCSC_VERSION" \
+    # The reviewed GitHub mirrors remain the Dockerfile defaults. Some installation networks can
+    # reach the reviewed upstream sysmocom repositories but not GitHub, so preserve an explicit
+    # override instead of trapping a forced full build behind one hard-coded route. Build the
+    # argument vector incrementally so repository URLs remain one quoted argument.
+    set -- docker build
+    [ -n "$NOCACHE_FLAG" ] && set -- "$@" "$NOCACHE_FLAG"
+    set -- "$@" --build-arg "PCSC_VERSION=$PCSC_VERSION" \
       --build-arg "RUNTIME_FP=$runtime_fp" --build-arg "BASE_FP=$base_fp" \
-      --build-arg "MDD_VERSION=$(tr -d '\n' < "$REPO_DIR/VERSION")" \
-      -t "$ENGINE_IMAGE" "$REPO_DIR/engine"
+      --build-arg "MDD_VERSION=$(tr -d '\n' < "$REPO_DIR/VERSION")"
+    [ -n "${PJPROJECT_REPOSITORY:-}" ] && \
+      set -- "$@" --build-arg "PJPROJECT_REPOSITORY=$PJPROJECT_REPOSITORY"
+    [ -n "${ASTERISK_REPOSITORY:-}" ] && \
+      set -- "$@" --build-arg "ASTERISK_REPOSITORY=$ASTERISK_REPOSITORY"
+    "$@" -t "$ENGINE_IMAGE" "$REPO_DIR/engine"
     # Keep the full build as the base every future overlay starts from, so repeated updates
     # stack one layer on a known-good image instead of a layer per update.
     docker tag "$ENGINE_IMAGE" "$ENGINE_BASE_TAG" >/dev/null 2>&1 || true

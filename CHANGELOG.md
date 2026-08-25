@@ -6,6 +6,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- A forced Engine source build had no way to override the reviewed GitHub source mirrors, so an
+  installation network that could reach the pinned upstream sysmocom repositories but not GitHub
+  failed before compilation began. The installer now passes explicitly configured pjproject and
+  Asterisk repository overrides into the Docker build while retaining the reviewed mirrors as the
+  safe default.
+
 - Four backend status messages appeared in English on a Chinese interface, including the one
   shown when a reader holds another line's SIM — the sentence a user sees precisely when they
   need to understand a binding mistake. The connectivity timeline could not label that state
