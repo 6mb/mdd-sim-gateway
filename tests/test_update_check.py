@@ -62,13 +62,15 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertEqual(update_check.validate_network_settings({
             "proxy_mode": "country", "proxy_country": "us"})["proxy_mode"], "auto")
 
-    def test_complete_update_settings_default_to_notifications_and_no_auto_update(self):
+    def test_complete_update_settings_defaults_to_automatic_feature_releases(self):
         self.assertEqual(update_check.validate_update_settings(None), {
             "proxy_mode": "auto", "proxy_profile_id": "",
-            "notification_mode": "all", "auto_update": False,
+            "update_mode": "automatic", "version_scope": "feature",
         })
         with self.assertRaises(update_check.UpdateNetworkError):
-            update_check.validate_update_settings({"notification_mode": "sometimes"})
+            update_check.validate_update_settings({"update_mode": "sometimes"})
+        with self.assertRaises(update_check.UpdateNetworkError):
+            update_check.validate_update_settings({"version_scope": "sometimes"})
 
     def test_auto_update_requires_separate_matching_promotion(self):
         info = {"update_available": True, "latest": "1.5.0",
@@ -190,7 +192,7 @@ class UpdateAutomationTests(unittest.TestCase):
     def _settings(self, **updates):
         return {
             "updates": {"proxy_mode": "direct", "proxy_profile_id": "",
-                        "notification_mode": "all", "auto_update": False, **updates},
+                        "update_mode": "automatic", "version_scope": "feature", **updates},
             "telegram": {"enabled": True, "events": {"software_update": True}},
             "webhook": {"enabled": False}, "pushplus": {"enabled": False},
         }
@@ -200,7 +202,7 @@ class UpdateAutomationTests(unittest.TestCase):
                 patch.object(config, "DATA_DIR", temp), \
                 patch.object(update_check, "check", return_value=dict(self.INFO)), \
                 patch.object(config, "get_settings",
-                             return_value=self._settings(auto_update=True)), \
+                             return_value=self._settings()), \
                 patch.object(update_check, "auto_update_authorization",
                              return_value={"authorized": False, "reason": "not_promoted"}), \
                 patch.object(update_check, "request_apply") as apply, \
@@ -209,44 +211,45 @@ class UpdateAutomationTests(unittest.TestCase):
         self.assertFalse(result["auto_update_requested"])
         apply.assert_not_called()
 
-    def test_promoted_release_is_requested_and_notified_only_once(self):
+    def test_promoted_release_is_requested_silently_only_once(self):
         with tempfile.TemporaryDirectory() as temp, \
                 patch.object(config, "DATA_DIR", temp), \
                 patch.object(update_check, "check", return_value=dict(self.INFO)), \
                 patch.object(config, "get_settings",
-                             return_value=self._settings(auto_update=True)), \
+                             return_value=self._settings()), \
                 patch.object(update_check, "auto_update_authorization",
                              return_value={"authorized": True, "reason": "promoted"}), \
                 patch.object(update_check, "request_apply", return_value={"ok": True}) as apply, \
                 patch("control.app.notify_push.dispatch") as dispatch:
             first = update_check.automation_cycle()
             second = update_check.automation_cycle()
-        self.assertTrue(first["notified"])
+        self.assertFalse(first["notified"])
         self.assertTrue(first["auto_update_requested"])
         self.assertFalse(second["notified"])
         self.assertFalse(second["auto_update_requested"])
-        self.assertEqual(dispatch.call_count, 1)
+        dispatch.assert_not_called()
         self.assertEqual(apply.call_count, 1)
 
-    def test_feature_mode_suppresses_patch_notice(self):
+    def test_notify_feature_scope_suppresses_patch_notice(self):
         patch_info = {**self.INFO, "latest": update_check.VERSION.rsplit(".", 1)[0] + ".99"}
         with tempfile.TemporaryDirectory() as temp, \
                 patch.object(config, "DATA_DIR", temp), \
                 patch.object(update_check, "check", return_value=patch_info), \
                 patch.object(config, "get_settings",
-                             return_value=self._settings(notification_mode="feature")), \
+                             return_value=self._settings(update_mode="notify",
+                                                         version_scope="feature")), \
                 patch("control.app.notify_push.dispatch") as dispatch:
             result = update_check.automation_cycle()
         self.assertFalse(result["notified"])
         dispatch.assert_not_called()
 
-    def test_feature_mode_still_auto_installs_a_stable_patch(self):
+    def test_automatic_all_scope_installs_a_stable_patch_without_notice(self):
         patch_info = {**self.INFO, "latest": update_check.VERSION.rsplit(".", 1)[0] + ".99"}
         with tempfile.TemporaryDirectory() as temp, \
                 patch.object(config, "DATA_DIR", temp), \
                 patch.object(update_check, "check", return_value=patch_info), \
                 patch.object(config, "get_settings", return_value=self._settings(
-                    notification_mode="feature", auto_update=True)), \
+                    update_mode="automatic", version_scope="all")), \
                 patch.object(update_check, "auto_update_authorization",
                              return_value={"authorized": True, "reason": "promoted"}), \
                 patch.object(update_check, "request_apply", return_value={"ok": True}) as apply, \
@@ -256,6 +259,38 @@ class UpdateAutomationTests(unittest.TestCase):
         self.assertTrue(result["auto_update_requested"])
         dispatch.assert_not_called()
         apply.assert_called_once()
+
+    def test_automatic_feature_scope_ignores_a_patch_entirely(self):
+        patch_info = {**self.INFO, "latest": update_check.VERSION.rsplit(".", 1)[0] + ".99"}
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(config, "DATA_DIR", temp), \
+                patch.object(update_check, "check", return_value=patch_info), \
+                patch.object(config, "get_settings", return_value=self._settings()), \
+                patch.object(update_check, "auto_update_authorization") as authorization, \
+                patch.object(update_check, "request_apply") as apply, \
+                patch("control.app.notify_push.dispatch") as dispatch:
+            result = update_check.automation_cycle()
+        self.assertFalse(result["notified"])
+        self.assertFalse(result["auto_update_requested"])
+        dispatch.assert_not_called()
+        authorization.assert_not_called()
+        apply.assert_not_called()
+
+    def test_notify_all_scope_notifies_without_applying(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(config, "DATA_DIR", temp), \
+                patch.object(update_check, "check", return_value=dict(self.INFO)), \
+                patch.object(config, "get_settings", return_value=self._settings(
+                    update_mode="notify", version_scope="all")), \
+                patch.object(update_check, "auto_update_authorization") as authorization, \
+                patch.object(update_check, "request_apply") as apply, \
+                patch("control.app.notify_push.dispatch") as dispatch:
+            result = update_check.automation_cycle()
+        self.assertTrue(result["notified"])
+        self.assertFalse(result["auto_update_requested"])
+        dispatch.assert_called_once()
+        authorization.assert_not_called()
+        apply.assert_not_called()
 
 
 class UpdateProxyMigrationTests(unittest.TestCase):
@@ -277,7 +312,7 @@ class UpdateProxyMigrationTests(unittest.TestCase):
 updates: {proxy_mode: country, proxy_country: us}""")
         self.assertEqual(settings["updates"], {
             "proxy_mode": "auto", "proxy_profile_id": "",
-            "notification_mode": "all", "auto_update": False})
+            "update_mode": "automatic", "version_scope": "feature"})
         self.assertIn("primary", settings["proxy"]["profiles"])
 
     def test_old_socks_update_proxy_moves_into_the_library(self):
@@ -287,10 +322,17 @@ updates:
   proxy_url: 'socks5h://alice:secret@proxy.example:1081'""")
         self.assertEqual(settings["updates"], {
             "proxy_mode": "auto", "proxy_profile_id": "",
-            "notification_mode": "all", "auto_update": False})
+            "update_mode": "automatic", "version_scope": "feature"})
         profile = settings["proxy"]["profiles"]["legacy-update-proxy"]
         self.assertEqual((profile["server"], profile["port"], profile["username"]),
                          ("proxy.example", 1081, "alice"))
+
+    def test_previous_auto_update_opt_out_becomes_notify_all(self):
+        settings = self._load("""proxy: {}
+updates: {proxy_mode: auto, notification_mode: all, auto_update: false}""")
+        self.assertEqual(settings["updates"], {
+            "proxy_mode": "auto", "proxy_profile_id": "",
+            "update_mode": "notify", "version_scope": "all"})
 
 if __name__ == "__main__":
     unittest.main()

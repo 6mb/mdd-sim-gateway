@@ -58,13 +58,24 @@ def validate_update_settings(value: dict | None) -> dict:
     """Validate the complete update preference document saved from System Settings."""
     value = value or {}
     result = validate_network_settings(value)
-    notification_mode = str(value.get("notification_mode") or "all").strip().lower()
-    if notification_mode not in {"all", "feature"}:
-        raise UpdateNetworkError("update notification mode must be all or feature")
-    auto_update = value.get("auto_update", False)
-    if not isinstance(auto_update, bool):
-        raise UpdateNetworkError("automatic update setting must be boolean")
-    result.update(notification_mode=notification_mode, auto_update=auto_update)
+    update_mode = value.get("update_mode")
+    version_scope = value.get("version_scope")
+    if update_mode is None:
+        # Migrate the previous independent controls into one mutually-exclusive strategy.
+        legacy = value.get("auto_update")
+        if legacy is not None and not isinstance(legacy, bool):
+            raise UpdateNetworkError("automatic update setting must be boolean")
+        update_mode = "automatic" if legacy is not False else "notify"
+        if version_scope is None:
+            version_scope = (value.get("notification_mode") or "all") \
+                if update_mode == "notify" else "all" if legacy is True else "feature"
+    update_mode = str(update_mode).strip().lower()
+    version_scope = str(version_scope or ("feature" if update_mode == "automatic" else "all")).strip().lower()
+    if update_mode not in {"automatic", "notify"}:
+        raise UpdateNetworkError("update mode must be automatic or notify")
+    if version_scope not in {"all", "feature"}:
+        raise UpdateNetworkError("update version scope must be all or feature")
+    result.update(update_mode=update_mode, version_scope=version_scope)
     return result
 
 
@@ -383,7 +394,9 @@ def automation_cycle() -> dict:
     updates = validate_update_settings(settings.get("updates"))
     state = _read_automation_state()
     latest = str(info.get("latest") or "")
-    should_notify = updates["notification_mode"] == "all" or is_feature_update(VERSION, latest)
+    feature_update = is_feature_update(VERSION, latest)
+    should_notify = (updates["update_mode"] == "notify"
+                     and (updates["version_scope"] == "all" or feature_update))
     if (should_notify and state.get("notified_version") != latest
             and notify_push.has_enabled_channel(settings, notify_push.EV_SOFTWARE_UPDATE)):
         text = f"v{VERSION} → v{latest}\n{info.get('release_url') or ''}".strip()
@@ -392,7 +405,9 @@ def automation_cycle() -> dict:
         state["notified_at"] = int(time.time())
         _save_automation_state(state)
         result["notified"] = True
-    if not updates["auto_update"] or state.get("auto_requested_version") == latest:
+    should_auto_update = (updates["update_mode"] == "automatic"
+                          and (updates["version_scope"] == "all" or feature_update))
+    if not should_auto_update or state.get("auto_requested_version") == latest:
         return result
     authorization = auto_update_authorization(info)
     result["authorization"] = authorization

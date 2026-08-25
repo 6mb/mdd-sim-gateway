@@ -80,6 +80,23 @@ class OperationsTests(unittest.TestCase):
             self.assertNotIn("path", result)
             self.assertTrue(Path(temp, "backups", result["name"]).is_file())
 
+    def test_local_backup_can_be_deleted_by_its_listed_name(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp):
+            Path(temp, "config.yaml").write_text("settings: {}\ninstances: {}\n")
+            created = operations.create_local_backup("Test Gateway")
+            result = operations.delete_local_backup(created["name"])
+            self.assertTrue(result["ok"])
+            self.assertFalse(Path(temp, "backups", created["name"]).exists())
+
+    def test_local_backup_delete_rejects_paths_and_non_backups(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp):
+            outside = Path(temp, "keep.txt")
+            outside.write_text("keep")
+            for name in ("../keep.txt", "/tmp/keep.txt", "not-a-backup.txt"):
+                with self.assertRaises(ValueError):
+                    operations.delete_local_backup(name)
+            self.assertEqual(outside.read_text(), "keep")
+
     def test_support_bundle_contains_only_redacted_documents(self):
         settings_value = {
             "telegram": {"bot_token": "secret"},

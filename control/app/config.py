@@ -153,12 +153,11 @@ DEFAULTS = {
         "updates": {
             "proxy_mode": "auto",
             "proxy_profile_id": "",
-            # Push an update notice through the already-enabled notification channels.
-            # "all" includes patch releases; "feature" only announces a major/minor bump.
-            "notification_mode": "all",
-            # Publishing a Release is deliberately insufficient to trigger installation.
-            # The release must also be promoted in update-policy.json.
-            "auto_update": False,
+            # Automatic and notify-only are mutually exclusive. New installations track stable
+            # feature releases automatically; every automatic install still requires an exact
+            # promotion in update-policy.json.
+            "update_mode": "automatic",
+            "version_scope": "feature",
         },
         # Local lpac (eSIM LPA) integration. Binary is built by `./install.sh build-lpac` into
         # $MDD_DATA/lpac/ (STANDALONE layout). Empty lpac_bin → default path below.
@@ -390,14 +389,24 @@ def load() -> dict:
             update_profile_id = str(updates["proxy_profile_id"])
         normalized_update_mode = "library" if update_mode == "library" and update_profile_id \
             else (update_mode if update_mode in {"auto", "direct"} else "auto")
-        notification_mode = str(updates.get("notification_mode") or "all").lower()
-        if notification_mode not in {"all", "feature"}:
-            notification_mode = "all"
+        raw_updates = data.get("settings", {}).get("updates", {}) or {}
+        update_mode = str(raw_updates.get("update_mode") or "").lower()
+        version_scope = str(raw_updates.get("version_scope") or "").lower()
+        if update_mode not in {"automatic", "notify"}:
+            legacy_auto_update = raw_updates.get("auto_update")
+            update_mode = "automatic" if legacy_auto_update is True else \
+                "notify" if legacy_auto_update is False else "automatic"
+            if not version_scope:
+                version_scope = str(raw_updates.get("notification_mode") or "all") \
+                    if update_mode == "notify" else "all" if legacy_auto_update is True \
+                    else "feature"
+        if version_scope not in {"all", "feature"}:
+            version_scope = "feature" if update_mode == "automatic" else "all"
         out["settings"]["updates"] = {
             "proxy_mode": normalized_update_mode,
             "proxy_profile_id": update_profile_id if normalized_update_mode == "library" else "",
-            "notification_mode": notification_mode,
-            "auto_update": updates.get("auto_update") is True,
+            "update_mode": update_mode,
+            "version_scope": version_scope,
         }
         # Asterisk debug includes complete SIP messages and IMS identities.  Older manual
         # provisioning forms accidentally enabled it by default, so normalize every loaded

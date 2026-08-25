@@ -555,6 +555,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
   const tabs = [['general', t('General')], ['web', t('Web access')], ['voice', t('Calls & VoWiFi')], ['security', t('Security')], ['backup', t('Backup & updates')], ['maintenance', t('Maintenance')]]
   const save = async () => { try { const saved = await api.saveSettings(s); setS(saved); showToast(t('Saved')) } catch (e) { showToast(e.message) } }
   const action = async name => { try { const result = name === 'backup' ? await api.createBackup() : await api.maintenance(name); showToast(result.ok ? t('Operation completed') : t('Operation completed with errors')); loadStatus() } catch (e) { showToast(e.message) } }
+  const deleteBackup = async name => { if (!window.confirm(t('Delete this local backup? This cannot be undone.'))) return; try { await api.deleteBackup(name); showToast(t('Backup deleted')); loadStatus() } catch (e) { showToast(e.message) } }
   const restart = async scope => {
     if (!window.confirm(t(`restart.confirm.${scope}`))) return
     try {
@@ -586,7 +587,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
       <div className="u-settings-grid">
         <section className="card u-panel u-settings-card">
           <div className="u-settings-card-head"><div><h2>{t('Local backups')}</h2><p>{t('Backups stay encrypted by host permissions and are not downloaded through the browser.')}</p></div><button className="btn btn-primary" onClick={() => action('backup')}>{t('Create local backup')}</button></div>
-          <div className="u-settings-list">{(status?.backups || []).map(item => <div className="u-detail" key={item.name}><span>{item.name}</span><b>{formatBytes(item.size)} · {new Date(item.created_at * 1000).toLocaleString()}</b></div>)}</div>
+          <div className="u-settings-list">{(status?.backups || []).map(item => <div className="u-backup-item" key={item.name}><div><span>{item.name}</span><b>{formatBytes(item.size)} · {new Date(item.created_at * 1000).toLocaleString()}</b></div><button className="btn btn-danger-outline" onClick={() => deleteBackup(item.name)}>{t('Delete')}</button></div>)}</div>
         </section>
         <section className="card u-panel u-settings-card">
           <div className="u-settings-card-head"><div><h2>{t('Software updates')}</h2><p>{t('Check the latest release and review it before a manual update.')}</p></div><button className="btn btn-ghost" disabled={checking} onClick={checkUpdate}>{t(checking?'Checking…':'Check for updates')}</button></div>
@@ -596,16 +597,16 @@ export function SystemPage({ showToast, openUpdateDialog }) {
         </section>
       </div>
       <section className="card u-panel u-settings-card">
-        <div className="u-settings-card-head"><div><h2>{t('Update policy')}</h2><p>{t('Notifications announce releases; automatic updates install only versions marked stable.')}</p></div></div>
+        <div className="u-settings-card-head"><div><h2>{t('Update policy')}</h2><p>{t('Choose automatic installation or notify-only, then select which versions it applies to.')}</p></div></div>
         <p className="u-note">{t('Automatic tries a direct connection first, then the available proxy library entries. The route that passes the check is reused for the download.')}</p>
         <div className="u-form-grid">
           <div><label>{t('Connection')}</label><select value={s.updates?.proxy_mode || 'auto'} onChange={e => setS({ ...s, updates: { ...s.updates, proxy_mode: e.target.value, proxy_profile_id: e.target.value === 'library' ? (s.updates?.proxy_profile_id || '') : '' } })}><option value="auto">{t('Automatic — direct, then proxy library')}</option><option value="direct">{t('Direct only')}</option><option value="library">{t('Specified proxy')}</option></select></div>
           {s.updates?.proxy_mode === 'library' && <div><label>{t('Proxy')}</label><select value={s.updates?.proxy_profile_id || ''} onChange={e => setS({ ...s, updates: { ...s.updates, proxy_mode: 'library', proxy_profile_id: e.target.value } })}><option value="">{t('Select a proxy…')}</option>{Object.entries(s.proxy?.profiles || {}).map(([id, profile]) => <option key={id} value={id}>{profile.name || t('Unnamed proxy')}</option>)}</select></div>}
-          <div><label>{t('Update notifications')}</label><select value={s.updates?.notification_mode || 'all'} onChange={e => setS({ ...s, updates: { ...s.updates, notification_mode: e.target.value } })}><option value="all">{t('Notify for every new version')}</option><option value="feature">{t('Only notify for feature updates')}</option></select></div>
+          <div><label>{t('Update method')}</label><select value={s.updates?.update_mode || 'automatic'} onChange={e => { const updateMode = e.target.value; setS({ ...s, updates: { ...s.updates, update_mode: updateMode, version_scope: updateMode === 'automatic' ? 'feature' : 'all' } }) }}><option value="automatic">{t('Automatic update')}</option><option value="notify">{t('Notify before updating')}</option></select></div>
+          <div><label>{t('Version range')}</label><select value={s.updates?.version_scope || (s.updates?.update_mode === 'notify' ? 'all' : 'feature')} onChange={e => setS({ ...s, updates: { ...s.updates, version_scope: e.target.value } })}><option value="feature">{t('Main versions only')}</option><option value="all">{t('All versions')}</option></select></div>
         </div>
-        <p className="u-hint">{t('Feature-only notifications ignore a change to the final version number, such as 1.4.1 → 1.4.2.')}</p>
-        <div className="u-settings-toggle"><div><b>{t('Automatically update to stable versions')}</b><p>{t('Release notifications and automatic installation are independent. Patch releases can install silently when feature-only notifications are selected.')}</p></div><input type="checkbox" className="u-toggle" checked={!!s.updates?.auto_update} onChange={e => setS({ ...s, updates: { ...s.updates, auto_update: e.target.checked } })} /></div>
-        <p className="u-note">{t('A newly published release is never installed immediately. It must first pass the observation period, be marked stable, and reach its scheduled rollout time.')}</p>
+        <p className="u-hint">{t('Main versions ignore a change to the final version number, such as 1.4.1 → 1.4.2.')}</p>
+        {s.updates?.update_mode !== 'notify' ? <p className="u-note">{t('Matching releases are installed automatically only after they pass the observation period, are marked stable, and reach their scheduled rollout time. No new-version notice is sent.')}</p> : <p className="u-note">{t('Matching releases only send one notice. Installation starts only after you review and confirm it manually.')}</p>}
         {s.updates?.proxy_mode === 'library' && <p className="u-note">{t('SOCKS5 entries connect directly. Subscription and node entries reuse a ready country exit assigned to that proxy.')}</p>}
         <div className="u-settings-actions"><button className="btn btn-primary" onClick={save}>{t('Save update settings')}</button></div>
       </section>

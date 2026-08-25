@@ -4155,6 +4155,16 @@ async def api_system_backup():
         operations.create_local_backup, "mdd-sim-gateway")
 
 
+@app.delete("/api/system/backups/{name}")
+async def api_system_backup_delete(name: str):
+    try:
+        return await asyncio.to_thread(operations.delete_local_backup, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="backup not found") from exc
+
+
 @app.post("/api/system/maintenance")
 async def api_system_maintenance(body: dict):
     action = str(body.get("action") or "")

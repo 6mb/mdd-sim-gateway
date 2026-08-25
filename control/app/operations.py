@@ -193,6 +193,19 @@ def list_local_backups() -> list[dict]:
     return result[:50]
 
 
+def delete_local_backup(name: str) -> dict:
+    """Delete one named local backup without allowing paths outside the backup directory."""
+    name = str(name or "")
+    if (Path(name).name != name or not re.fullmatch(r"[A-Za-z0-9_.-]+\.tar\.gz", name)):
+        raise ValueError("invalid backup name")
+    root = (Path(cfg.DATA_DIR) / "backups").resolve()
+    target = root / name
+    if not target.is_file():
+        raise FileNotFoundError(name)
+    target.unlink()
+    return {"ok": True, "name": name}
+
+
 SERVICE_RESTART_SCOPES = ("control", "services", "host")
 # The orchestrator polls a few times a minute; a request still sitting here after this long
 # means nothing is consuming it, not that it is slow.

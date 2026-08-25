@@ -97,6 +97,7 @@ export const api = {
   updateProgress: () => j('GET', '/api/system/update/progress'),
   cancelUpdate: () => j('POST', '/api/system/update/cancel', {}),
   createBackup: () => j('POST', '/api/system/backups', {}),
+  deleteBackup: (name) => j('DELETE', `/api/system/backups/${encodeURIComponent(name)}`),
   maintenance: (action) => j('POST', '/api/system/maintenance', { action }),
   restartProgress: () => j('GET', '/api/system/maintenance/restart-progress'),
   supportBundleUrl: '/api/diagnostics/support-bundle',
