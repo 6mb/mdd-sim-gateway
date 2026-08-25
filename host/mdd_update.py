@@ -23,6 +23,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -41,6 +42,7 @@ BACKUP_EXCLUDE = {"data", ".git", ".venv", "node_modules", "__pycache__"}
 VERSION_RE = re.compile(r"\d+(?:\.\d+)*(?:-[0-9A-Za-z.]+)?")
 REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 ENGINE_REGISTRY_IMAGE = "ghcr.io/mddidd/mdd-sim-gateway-engine"
+ENGINE_HANDOFF_MANIFEST = Path("engine/release-image.SHA256SUMS")
 
 
 class UpdateError(RuntimeError):
@@ -128,10 +130,14 @@ def download(url: str, destination: Path, env: dict[str, str], proxy_url: str = 
              allow_fallback: bool = False):
     """Download through curl while publishing byte, speed and heartbeat details."""
     started = time.monotonic()
+    # The compressed Engine is the largest Release asset. Keep a finite ceiling, but do not
+    # apply the ten-minute source-package budget to a transfer that can legitimately be several
+    # hundred megabytes on a Raspberry Pi connection.
+    max_time = "1800" if phase == "engine_image" else "600"
     command = [
         "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
         "--tlsv1.2", "--retry", "0" if allow_fallback else "3", "--retry-all-errors",
-        "--connect-timeout", "20", "--max-time", "600", "--silent", "--show-error",
+        "--connect-timeout", "20", "--max-time", max_time, "--silent", "--show-error",
         "--user-agent", "mdd-sim-gateway-updater", "--output", str(destination), url,
     ]
     # A route that cannot sustain a useful asset-transfer rate should yield to the next Auto
@@ -169,6 +175,52 @@ def download(url: str, destination: Path, env: dict[str, str], proxy_url: str = 
         detail = _redact_proxy_error(stderr, proxy_url).strip().splitlines()
         tail = detail[-1] if detail else f"curl exited with {process.returncode}"
         raise UpdateError(f"release download failed: {tail}")
+
+
+def validated_download_routes(proxy_url: str = "", *, route: str = "direct",
+                              route_name: str = "", routes: list[dict] | None = None
+                              ) -> list[dict]:
+    """Validate and redact the route list before any release file is created."""
+    candidates = routes if isinstance(routes, list) and routes else [
+        {"proxy_url": proxy_url, "route": route, "route_name": route_name}]
+    clean = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        candidate_url = str(item.get("proxy_url") or "")
+        network_environment(candidate_url)
+        clean.append({"proxy_url": candidate_url,
+                      "route": "library" if candidate_url else "direct",
+                      "route_name": str(item.get("route_name") or "")[:120]})
+    if not clean:
+        raise UpdateError("no usable update download route")
+    return clean
+
+
+def fetch_release_asset(url: str, destination: Path, artifact: str,
+                        clean_routes: list[dict], active_route: int = 0, *,
+                        asset_sizes: dict | None = None, status: Status | None = None,
+                        phase: str = "downloading") -> int:
+    """Download one Release asset and return the successful route index."""
+    sizes = asset_sizes or {}
+    order = [active_route] + [i for i in range(len(clean_routes)) if i != active_route]
+    failures = []
+    for attempt, index in enumerate(order, 1):
+        candidate = clean_routes[index]
+        try:
+            destination.unlink(missing_ok=True)
+            download(url, destination,
+                     network_environment(candidate["proxy_url"]), candidate["proxy_url"],
+                     status=status, artifact=artifact,
+                     total_bytes=sizes.get(artifact, 0),
+                     route=candidate["route"], route_name=candidate["route_name"],
+                     phase=phase, route_attempt=attempt, route_total=len(order),
+                     allow_fallback=attempt < len(order))
+        except UpdateError as exc:
+            failures.append(str(exc))
+            continue
+        return index
+    raise UpdateError("all update download routes failed: " + "; ".join(failures)[-1500:])
 
 
 def _last_log_line(path: Path, proxy_url: str) -> str:
@@ -281,23 +333,24 @@ def engine_image_matches_inputs(image: str, runtime_fp: str, base_fp: str) -> bo
     return checked.returncode == 0 and checked.stdout.strip() == f"{runtime_fp}|{base_fp}"
 
 
-def pull_release_engine(version: str, runtime_fp: str, base_fp: str, status: Status,
-                        log_path: Path) -> str:
-    """Pull and identify the native ARM64 Engine without replacing the running image yet."""
+def load_release_engine(artifact: Path, version: str, runtime_fp: str, base_fp: str,
+                        status: Status | None, log_path: Path) -> str:
+    """Import and identify the verified ARM64 Engine without replacing the running image yet."""
     image = f"{ENGINE_REGISTRY_IMAGE}:v{version}"
     started = time.monotonic()
     with open(log_path, "w", encoding="utf-8") as log:
-        process = subprocess.Popen(["docker", "pull", image], stdout=log,
+        process = subprocess.Popen(["docker", "load", "--input", str(artifact)], stdout=log,
                                    stderr=subprocess.STDOUT, text=True)
         while process.poll() is None:
-            status.publish("running", "engine_image", artifact=image,
-                           engine_image_required=True,
-                           elapsed_seconds=max(0, int(time.monotonic() - started)),
-                           detail="pulling verified ARM64 Engine image")
+            if status:
+                status.publish("running", "engine_image", artifact=artifact.name,
+                               engine_image_required=True,
+                               elapsed_seconds=max(0, int(time.monotonic() - started)),
+                               detail="importing verified ARM64 Engine image")
             time.sleep(3)
     if process.returncode:
         raise UpdateError(
-            f"could not pull Release Engine image: {_last_log_line(log_path, '') or 'docker pull failed'}")
+            f"could not load Release Engine image: {_last_log_line(log_path, '') or 'docker load failed'}")
     checked = subprocess.run(
         ["docker", "image", "inspect", image, "--format",
          '{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.version"}}|'
@@ -384,6 +437,58 @@ def apply_tree(source_root: Path, repo: Path):
             shutil.copytree(entry, target, symlinks=True)
 
 
+def perform_engine_handoff(repo: Path, data: Path, version: str, repo_name: str,
+                           network_path: Path | None = None) -> str:
+    """Give pre-distribution updaters a one-release hook into the new Engine channel.
+
+    v1.4.1 downloads and verifies the new source archive before it invokes that archive's
+    ``install.sh reload --no-engines``. The generated manifest is therefore already covered by
+    the old updater's archive checksum. While its root-only network file still exists, this
+    helper reuses the same route list to fetch and import the Engine Release asset.
+    """
+    if not VERSION_RE.fullmatch(version):
+        raise UpdateError(f"invalid target version: {version!r}")
+    if not REPOSITORY_RE.fullmatch(repo_name):
+        raise UpdateError(f"invalid repository: {repo_name!r}")
+    manifest = repo / ENGINE_HANDOFF_MANIFEST
+    if not manifest.is_file():
+        raise UpdateError("release has no Engine handoff manifest")
+    engine_name = f"mdd-sim-gateway-engine-v{version}-arm64.tar.gz"
+    if not any(line.strip().split(None, 1)[-1].lstrip("*") == engine_name
+               for line in manifest.read_text(encoding="utf-8").splitlines()
+               if len(line.strip().split(None, 1)) == 2):
+        raise UpdateError("Engine handoff manifest does not name this release")
+    update_dir = data / "update"
+    update_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if shutil.disk_usage(update_dir).free < 2 * 1024 * 1024 * 1024:
+        raise UpdateError("not enough persistent disk space to import the Engine image")
+
+    network = read_network_config(network_path) if network_path else {}
+    fallback_proxy = str(network.get("proxy_url") or os.environ.get("HTTPS_PROXY")
+                         or os.environ.get("https_proxy") or "")
+    clean_routes = validated_download_routes(
+        fallback_proxy,
+        route=str(network.get("route") or ("library" if fallback_proxy else "direct")),
+        route_name=str(network.get("route_name") or ""),
+        routes=network.get("routes") if isinstance(network.get("routes"), list) else None)
+    asset_sizes = network.get("asset_sizes") if isinstance(
+        network.get("asset_sizes"), dict) else {}
+    staging = Path(tempfile.mkdtemp(prefix="engine-handoff.", dir=str(update_dir)))
+    try:
+        artifact = staging / engine_name
+        base = f"https://github.com/{repo_name}/releases/download/v{version}"
+        fetch_release_asset(f"{base}/{engine_name}", artifact, engine_name, clean_routes,
+                            asset_sizes=asset_sizes, phase="engine_image")
+        verify_release_file(artifact, manifest, "ARM64 Engine image")
+        fingerprints = release_engine_fingerprints(repo)
+        if not fingerprints:
+            raise UpdateError("release has no Engine identity metadata")
+        return load_release_engine(
+            artifact, version, *fingerprints, None, update_dir / "engine-image.log")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status,
             proxy_url: str = "", *, route: str = "direct", route_name: str = "",
             asset_sizes: dict | None = None, routes: list[dict] | None = None):
@@ -392,19 +497,8 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
     if not REPOSITORY_RE.fullmatch(repo_name):
         raise UpdateError(f"invalid repository: {repo_name!r}")
     (data / "update").mkdir(mode=0o700, parents=True, exist_ok=True)
-    routes = routes if isinstance(routes, list) and routes else [
-        {"proxy_url": proxy_url, "route": route, "route_name": route_name}]
-    clean_routes = []
-    for item in routes:
-        if not isinstance(item, dict):
-            continue
-        candidate_url = str(item.get("proxy_url") or "")
-        network_environment(candidate_url)  # validate before creating the staging directory
-        clean_routes.append({"proxy_url": candidate_url,
-                             "route": "library" if candidate_url else "direct",
-                             "route_name": str(item.get("route_name") or "")[:120]})
-    if not clean_routes:
-        raise UpdateError("no usable update download route")
+    clean_routes = validated_download_routes(
+        proxy_url, route=route, route_name=route_name, routes=routes)
     active_route = 0
     staging = Path(tempfile.mkdtemp(prefix="mdd-update.", dir=str(data / "update")))
     try:
@@ -412,6 +506,7 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         asset_sizes = asset_sizes or {}
         archive_name = f"mdd-sim-gateway-v{version}.tar.gz"
         control_name = f"mdd-sim-gateway-control-v{version}-arm64.tar.gz"
+        engine_name = f"mdd-sim-gateway-engine-v{version}-arm64.tar.gz"
         base = f"https://github.com/{repo_name}/releases/download/v{version}"
         url = f"{base}/{archive_name}"
         # Publish the transfer skeleton before curl starts so the dialog shows a sized bar from
@@ -425,31 +520,12 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         archive = staging / archive_name
         sums = staging / "SHA256SUMS"
 
-        def fetch(download_url: str, destination: Path, artifact: str,
-                  *, phase: str = "downloading"):
-            nonlocal active_route
-            order = [active_route] + [i for i in range(len(clean_routes)) if i != active_route]
-            failures = []
-            for attempt, index in enumerate(order, 1):
-                candidate = clean_routes[index]
-                try:
-                    destination.unlink(missing_ok=True)
-                    download(download_url, destination,
-                             network_environment(candidate["proxy_url"]), candidate["proxy_url"],
-                             status=status, artifact=artifact,
-                             total_bytes=asset_sizes.get(artifact, 0),
-                             route=candidate["route"], route_name=candidate["route_name"],
-                             phase=phase, route_attempt=attempt, route_total=len(order),
-                             allow_fallback=attempt < len(order))
-                except UpdateError as exc:
-                    failures.append(str(exc))
-                    continue
-                active_route = index
-                return
-            raise UpdateError("all update download routes failed: " + "; ".join(failures)[-1500:])
-
-        fetch(url, archive, archive_name)
-        fetch(f"{base}/SHA256SUMS", sums, "SHA256SUMS")
+        active_route = fetch_release_asset(
+            url, archive, archive_name, clean_routes, active_route,
+            asset_sizes=asset_sizes, status=status)
+        active_route = fetch_release_asset(
+            f"{base}/SHA256SUMS", sums, "SHA256SUMS", clean_routes, active_route,
+            asset_sizes=asset_sizes, status=status)
 
         status.publish("running", "verifying", artifact=archive_name, downloaded_bytes=0,
                        total_bytes=0, bytes_per_second=0, elapsed_seconds=0, detail="")
@@ -471,8 +547,24 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
                 "mdd-sim-gateway/engine", *engine_fingerprints):
             if shutil.disk_usage(data / "update").free < 2 * 1024 * 1024 * 1024:
                 raise UpdateError("not enough persistent disk space to import the Engine image")
-            distributed_engine = pull_release_engine(
-                version, *engine_fingerprints, status, data / "update" / "engine-pull.log")
+            status.publish("running", "engine_image", artifact=engine_name,
+                           engine_image_required=True, detail="",
+                           downloaded_bytes=0,
+                           total_bytes=int(asset_sizes.get(engine_name) or 0),
+                           bytes_per_second=0, elapsed_seconds=0)
+            engine_archive = staging / engine_name
+            active_route = fetch_release_asset(
+                f"{base}/{engine_name}", engine_archive, engine_name,
+                clean_routes, active_route, asset_sizes=asset_sizes, status=status,
+                phase="engine_image")
+            status.publish("running", "engine_image", artifact=engine_name,
+                           engine_image_required=True, detail="verifying ARM64 Engine image",
+                           downloaded_bytes=0, total_bytes=0,
+                           bytes_per_second=0, elapsed_seconds=0)
+            verify_release_file(engine_archive, sums, "ARM64 Engine image")
+            distributed_engine = load_release_engine(
+                engine_archive, version, *engine_fingerprints, status,
+                data / "update" / "engine-image.log")
 
         if mode == "docker":
             if shutil.disk_usage(data / "update").free < 1024 * 1024 * 1024:
@@ -482,8 +574,10 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
                            total_bytes=int(asset_sizes.get(control_name) or 0),
                            bytes_per_second=0, elapsed_seconds=0)
             control_archive = staging / control_name
-            fetch(f"{base}/{control_name}", control_archive, control_name,
-                  phase="control_image")
+            active_route = fetch_release_asset(
+                f"{base}/{control_name}", control_archive, control_name,
+                clean_routes, active_route, asset_sizes=asset_sizes, status=status,
+                phase="control_image")
             status.publish("running", "control_image", artifact=control_name,
                            downloaded_bytes=0, total_bytes=0, bytes_per_second=0,
                            elapsed_seconds=0, detail="")
@@ -535,11 +629,21 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--network-config", type=Path)
+    parser.add_argument("--engine-handoff", action="store_true")
     args = parser.parse_args()
     data = args.data.resolve()
+    network_path = args.network_config.resolve() if args.network_config else None
+    if args.engine_handoff:
+        try:
+            image = perform_engine_handoff(
+                args.repo.resolve(), data, args.version, args.repository, network_path)
+        except Exception as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1)
+        print(image)
+        return
     status = Status(data / "orchestrator" / "update-status.json", args.version)
     try:
-        network_path = args.network_config.resolve() if args.network_config else None
         network = read_network_config(network_path)
         perform(args.repo.resolve(), data, args.version, args.repository, status,
                 str(network.get("proxy_url") or ""),

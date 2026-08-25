@@ -35,7 +35,7 @@ RUN dnf -y --refresh --setopt=fastestmirror=True --setopt=max_parallel_downloads
     uriparser-devel libxslt-devel mysql-devel bluez-libs-devel radcli-devel freetds-devel \
     jack-audio-connection-kit-devel libcap-devel net-snmp-devel corosynclib-devel newt-devel \
     popt-devel libical-devel spandsp-devel openldap-devel codec2-devel fftw-devel libsndfile-devel \
-    unbound-devel wget subversion libresample-devel binutils-devel libsrtp-devel gsm-devel iproute \
+    unbound-devel wget curl subversion libresample-devel binutils-devel libsrtp-devel gsm-devel iproute \
     procps-ng net-tools python3-pysocks python3-requests python3-pyscard python3-jinja2 \
     python3-devel python3-pip \
     meson ninja-build perl-podlators systemd-devel \
@@ -97,7 +97,7 @@ RUN set -eu; \
     make menuselect/menuselect menuselect-tree menuselect.makeopts && \
     ./menuselect/menuselect --enable codec_opus --disable BUILD_NATIVE && \
     make -j$(nproc) && \
-    make install
+    make install DOWNLOAD='curl --http1.1 -fL -O -C - --retry 5 --retry-all-errors --connect-timeout 15 --max-time 900 --speed-time 30 --speed-limit 1024'
 
 RUN python3 -m pip install --no-cache-dir panoramisk==1.4
 

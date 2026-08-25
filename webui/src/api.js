@@ -57,8 +57,8 @@ function readerBody(readerOrIndex, extra = {}) {
 
 export const api = {
   authStatus: () => j('GET', '/api/auth/status'),
-  authSetup: (username, password) => j('POST', '/api/auth/setup', { username, password }),
-  authLogin: (username, password) => j('POST', '/api/auth/login', { username, password }),
+  authSetup: (username, password, remember) => j('POST', '/api/auth/setup', { username, password, remember }),
+  authLogin: (username, password, remember) => j('POST', '/api/auth/login', { username, password, remember }),
   authLogout: () => j('POST', '/api/auth/logout', {}),
   authPassword: (current_password, new_password) => j('POST', '/api/auth/password', { current_password, new_password }),
   // Unified physical-device control plane. Older deployments may return 404;

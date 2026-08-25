@@ -66,6 +66,7 @@ MDD_ADVERTISE_ADDR="${MDD_ADVERTISE_ADDR:-}"
 
 CONTROL_IMAGE="mdd-sim-gateway/control"
 ENGINE_IMAGE="mdd-sim-gateway/engine"
+ENGINE_HANDOFF_MANIFEST="$REPO_DIR/engine/release-image.SHA256SUMS"
 CONTROL_NAME="mdd-sim-gateway-control"
 ENGINE_PREFIX="mdd-sim-gateway-engine-"
 MDD_DOCKER_LABEL="io.mdd-sim-gateway.managed"
@@ -668,6 +669,40 @@ ensure_engine_image() {
   info "engine image built"
 }
 
+# v1.4.1's updater deliberately invokes the newly applied installer with --no-engines because
+# distributed Engine images did not exist yet. A release-only checksum manifest lets the new
+# installer recognise that one transition, reuse the old updater's still-live route list, and
+# import the matching Release asset instead of silently leaving the old Engine behind.
+engine_matches_checkout() {
+  docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 || return 1
+  runtime_fp=$(engine_fingerprint runtime)
+  base_fp=$(engine_fingerprint base)
+  [ "$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.runtime-fp)" = "$runtime_fp" ] && \
+    [ "$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.base-fp)" = "$base_fp" ]
+}
+
+handoff_release_engine() {
+  have python3 || die "python3 is required to import the Release Engine asset"
+  version=$(tr -d '\n' < "$REPO_DIR/VERSION")
+  repository=${MDD_UPDATE_REPOSITORY:-MddIdd/mdd-sim-gateway}
+  network_file="$MDD_DATA_DIR/update/network.json"
+  if [ -f "$network_file" ]; then
+    distributed=$(python3 "$REPO_DIR/host/mdd_update.py" \
+      --repo "$REPO_DIR" --data "$MDD_DATA_DIR" --version "$version" \
+      --repository "$repository" --network-config "$network_file" --engine-handoff) || \
+      die "could not import the Engine Release asset"
+  else
+    distributed=$(python3 "$REPO_DIR/host/mdd_update.py" \
+      --repo "$REPO_DIR" --data "$MDD_DATA_DIR" --version "$version" \
+      --repository "$repository" --engine-handoff) || \
+      die "could not import the Engine Release asset"
+  fi
+  [ -n "$distributed" ] || die "Engine Release handoff returned no image"
+  MDD_ENGINE_DISTRIBUTION_IMAGE=$distributed
+  export MDD_ENGINE_DISTRIBUTION_IMAGE
+  info "old updater handed off to verified Release Engine asset $distributed"
+}
+
 # Overlay the runtime-owned files onto $1 and retag the result as the engine image. Needs no
 # network, so it works on a host that cannot reach a registry. The previous image is kept as
 # :previous for rollback; the base it was built from stays tagged for the next overlay.
@@ -1089,6 +1124,7 @@ cmd_install() {
     run_control_local
   fi
   run_orchestrator
+  rm -f "$ENGINE_HANDOFF_MANIFEST"
   DATA_ABS=$(data_dir_abs)
   LAN_IP="${MDD_ADVERTISE_ADDR:-$(detect_lan_ip)}"
   printf '\n'
@@ -1129,6 +1165,14 @@ cmd_reload() {
   ensure_xray
   ensure_cellular_tools
   ENGINE_IMAGE_CHANGED=0
+  if [ "$PRESERVE_ENGINES" = 1 ] && [ -f "$ENGINE_HANDOFF_MANIFEST" ]; then
+    if engine_matches_checkout; then
+      info "installed engine already matches the release handoff — preserving it"
+    else
+      handoff_release_engine
+      PRESERVE_ENGINES=0
+    fi
+  fi
   if [ "$PRESERVE_ENGINES" = 1 ]; then
     docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 || \
       die "--no-engines requires the existing engine image $ENGINE_IMAGE"
@@ -1153,8 +1197,8 @@ cmd_reload() {
   # the image has changed — skipping it leaves every line running the previous engine while
   # the control plane reports the new version. That mismatch is invisible from the UI and was
   # reported as a broken feature rather than a stale image, so decide it from what actually
-  # happened instead of from a flag the operator has to know to pass. --no-engines still wins:
-  # someone who asks to keep the running engines gets to keep them.
+  # happened instead of from a flag the operator has to know to pass. --no-engines still wins
+  # for an operator; only the release-only v1.4.1 handoff marker overrides it above.
   if [ "$RECREATE_ENGINES" = 1 ] || [ "$ENGINE_IMAGE_CHANGED" = 1 ]; then
     removed=0
     for n in $(engine_names); do
@@ -1173,6 +1217,7 @@ cmd_reload() {
       fi
     fi
   fi
+  rm -f "$ENGINE_HANDOFF_MANIFEST"
   info "reload complete (data preserved)"
 }
 

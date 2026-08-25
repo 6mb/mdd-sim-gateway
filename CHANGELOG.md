@@ -2,27 +2,7 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
-## [Unreleased]
-
-### Fixed
-
-- A forced Engine source build had no way to override the reviewed GitHub source mirrors, so an
-  installation network that could reach the pinned upstream sysmocom repositories but not GitHub
-  failed before compilation began. The installer now passes explicitly configured pjproject and
-  Asterisk repository overrides into the Docker build while retaining the reviewed mirrors as the
-  safe default.
-
-- Four backend status messages appeared in English on a Chinese interface, including the one
-  shown when a reader holds another line's SIM — the sentence a user sees precisely when they
-  need to understand a binding mistake. The connectivity timeline could not label that state
-  at all and drew the raw code. Both tables are now checked against the backend by a test,
-  because a missing translation is invisible until someone reaches that exact state.
-
-### Changed
-
-- Push notifications lead with the product name. A notification arrives out of context — on a
-  lock screen, or in a Telegram list beside a dozen other bots — where "未接来电" alone does
-  not say which machine is talking.
+## [1.5.0] - 2026-08-26
 
 ### Added
 
@@ -63,16 +43,63 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Push notifications lead with the product name. A notification arrives out of context — on a
+  lock screen, or in a Telegram list beside a dozen other bots — where "未接来电" alone does
+  not say which machine is talking.
+
 - The Engine image now builds Asterisk, pjproject and pcsc-lite in a disposable build stage and
   copies only their runtime closure into the image sent to the gateway. The ARM64 image is about
   1.04 GB unpacked instead of 3.22 GB, while retaining the same 334 Asterisk module files; this
-  materially reduces release downloads and Raspberry Pi system-disk use without narrowing the
+  materially reduces release downloads and gateway system-disk use without narrowing the
   supported codec or module surface.
 
 - Releases now build the Engine natively on an ARM64 GitHub runner from reviewed mirrors of the
-  pinned sysmocom commits and publish a versioned image through GHCR. One-click update downloads
-  it only when the Engine inputs changed, verifies its architecture, version and source
-  fingerprints, preserves the previous image for rollback, then recreates only affected lines.
+  pinned sysmocom commits and publish the same versioned image through GHCR and as a checksummed
+  Release asset. One-click update downloads that asset through the same direct-to-proxy fallback
+  as the rest of an update only when Engine inputs changed, verifies its architecture, version
+  and source fingerprints, preserves the previous image for rollback, then recreates only
+  affected lines.
+
+### Fixed
+
+- [Issue #10](https://github.com/MddIdd/mdd-sim-gateway/issues/10): two identical USB readers
+  without serial numbers could assign different live SIMs to the same Instance after reader names
+  changed across a reboot. Live card identity now decides attribution before the saved reader index
+  is refreshed, preserving the one-to-one mapping between SIMs and lines.
+
+- [Issue #12](https://github.com/MddIdd/mdd-sim-gateway/issues/12): recreating the Docker control
+  container during a self-update dropped the sing-box, xray and host-tool mounts used by network
+  exit tests. The installer now restores those mounts and their environment variables every time
+  it recreates the container.
+
+- Signing in again several times a day. Sessions were held in memory only, which reads as a
+  deliberate choice for an appliance until you count the restarts: replacing an Engine image,
+  reloading and every self-update restart the control plane, and each one logged every browser
+  out. Sessions now survive a restart, and the sign-in screen offers to keep the browser signed
+  in for 30 days instead of the 12-hour default. Only a hash of each token is stored, so the
+  file cannot be replayed as a cookie by anyone who can read it, and changing the password
+  still revokes every session everywhere.
+
+- Reloading an updated Engine image no longer leaves every replaced WiFi Calling line stopped.
+  After removing containers that still use the previous image, the installer now restarts only
+  the control plane so its initial reader scan brings each present SIM line back automatically;
+  Engine containers that were not replaced keep running.
+
+- Engine release builds no longer depend on `wget` completing Asterisk's sound downloads without
+  a deadline. Those small upstream assets now use bounded retries, low-speed detection and resume,
+  preventing a transient slow connection from leaving the ARM64 release job hung indefinitely.
+
+- A forced Engine source build had no way to override the reviewed GitHub source mirrors, so an
+  installation network that could reach the pinned upstream sysmocom repositories but not GitHub
+  failed before compilation began. The installer now passes explicitly configured pjproject and
+  Asterisk repository overrides into the Docker build while retaining the reviewed mirrors as the
+  safe default.
+
+- Four backend status messages appeared in English on a Chinese interface, including the one
+  shown when a reader holds another line's SIM — the sentence a user sees precisely when they
+  need to understand a binding mistake. The connectivity timeline could not label that state
+  at all and drew the raw code. Both tables are now checked against the backend by a test,
+  because a missing translation is invisible until someone reaches that exact state.
 
 ### Removed
 
@@ -83,11 +110,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 ## [1.4.1] - 2026-08-22
 
 ### Fixed
-
-- Reloading an updated Engine image no longer leaves every replaced WiFi Calling line stopped.
-  After removing containers that still use the previous image, the installer now restarts only
-  the control plane so its initial reader scan brings each present SIM line back automatically;
-  Engine containers that were not replaced keep running.
 
 - Dialling a carrier service code announced the wrong outcome while its answer was still on
   its way. A code's verdict and its reply text reach the browser separately, and the screen

@@ -2317,12 +2317,14 @@ def api_auth_setup(body: dict, request: Request):
         auth.setup(str(body.get("password") or ""), str(body.get("username") or "admin"))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    remember = bool(body.get("remember"))
     result = auth.login(str(body.get("username") or "admin"), str(body.get("password") or ""),
-                        request.client.host if request.client else "")
+                        request.client.host if request.client else "", remember=remember)
     token, csrf = result
     response = JSONResponse({"ok": True, "authenticated": True, "csrf": csrf})
-    response.set_cookie(auth.SESSION_COOKIE, token, max_age=auth.SESSION_TTL, httponly=True,
-                        secure=True, samesite="strict", path="/")
+    response.set_cookie(auth.SESSION_COOKIE, token,
+                        max_age=auth.SESSION_TTL_REMEMBER if remember else auth.SESSION_TTL,
+                        httponly=True, secure=True, samesite="strict", path="/")
     return response
 
 
@@ -2335,13 +2337,18 @@ def api_auth_login(body: dict, request: Request):
     if retry:
         return JSONResponse({"detail": "too many attempts", "retry_after": retry},
                             status_code=429, headers={"Retry-After": str(retry)})
-    result = auth.login(str(body.get("username") or "admin"), str(body.get("password") or ""), peer)
+    remember = bool(body.get("remember"))
+    result = auth.login(str(body.get("username") or "admin"), str(body.get("password") or ""),
+                        peer, remember=remember)
     if not result:
         raise HTTPException(401, "invalid username or password")
     token, csrf = result
     response = JSONResponse({"ok": True, "authenticated": True, "csrf": csrf})
-    response.set_cookie(auth.SESSION_COOKIE, token, max_age=auth.SESSION_TTL, httponly=True,
-                        secure=True, samesite="strict", path="/")
+    # The cookie has to outlive the session it names, or the browser discards a credential the
+    # gateway would still have honoured.
+    response.set_cookie(auth.SESSION_COOKIE, token,
+                        max_age=auth.SESSION_TTL_REMEMBER if remember else auth.SESSION_TTL,
+                        httponly=True, secure=True, samesite="strict", path="/")
     return response
 
 

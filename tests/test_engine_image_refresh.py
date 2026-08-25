@@ -84,11 +84,21 @@ class EngineImageRefreshTests(unittest.TestCase):
         self.assertEqual(prefix.count("ENGINE_IMAGE_CHANGED=1"), 1)
         self.assertIn('if [ -n "${MDD_ENGINE_DISTRIBUTION_IMAGE:-}" ]', prefix)
 
-    def test_an_explicit_request_to_keep_the_engines_still_wins(self):
+    def test_no_engines_is_overridden_only_for_the_release_handoff(self):
         reload_body = _body("cmd_reload")
         self.assertIn('PRESERVE_ENGINES=1', reload_body)
-        preserve = reload_body.index('[ "$PRESERVE_ENGINES" = 1 ]')
+        handoff_gate = reload_body.index(
+            '[ "$PRESERVE_ENGINES" = 1 ] && [ -f "$ENGINE_HANDOFF_MANIFEST" ]')
+        handoff = reload_body.index("handoff_release_engine", handoff_gate)
+        preserve = reload_body.index('if [ "$PRESERVE_ENGINES" = 1 ]; then', handoff)
+        self.assertIn("PRESERVE_ENGINES=0", reload_body[handoff:preserve])
         self.assertLess(preserve, reload_body.index('[ "$ENGINE_IMAGE_CHANGED" = 1 ]'))
+
+    def test_release_handoff_reuses_the_old_updaters_private_route_file(self):
+        handoff = _body("handoff_release_engine")
+        self.assertIn('network_file="$MDD_DATA_DIR/update/network.json"', handoff)
+        self.assertIn('--network-config "$network_file" --engine-handoff', handoff)
+        self.assertIn("MDD_ENGINE_DISTRIBUTION_IMAGE=$distributed", handoff)
 
 
 if __name__ == "__main__":
