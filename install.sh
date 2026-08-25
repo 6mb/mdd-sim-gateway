@@ -1011,6 +1011,18 @@ run_control() {
     "$CONTROL_IMAGE"
 }
 
+# Re-scan present cards after old engine containers have been removed. Restart only the control
+# plane: restarting the orchestrator here would also rebuild pcscd while new engines start.
+restart_control_plane() {
+  if [ "$MODE" = local ]; then
+    have systemctl || return 1
+    systemctl restart mdd-sim-gateway-control || return 1
+  else
+    managed_control_exists || return 1
+    docker restart "$CONTROL_NAME" >/dev/null || return 1
+  fi
+}
+
 # ------------------------------------------------------------------ subcommands
 cmd_install() {
   need_root
@@ -1119,8 +1131,22 @@ cmd_reload() {
   # happened instead of from a flag the operator has to know to pass. --no-engines still wins:
   # someone who asks to keep the running engines gets to keep them.
   if [ "$RECREATE_ENGINES" = 1 ] || [ "$ENGINE_IMAGE_CHANGED" = 1 ]; then
-    warn "engines will be re-created by the control plane on next start/provision (image updated)"
-    for n in $(engine_names); do docker rm -f "$n" >/dev/null 2>&1 || true; done
+    removed=0
+    for n in $(engine_names); do
+      docker rm -f "$n" >/dev/null 2>&1 && removed=$((removed + 1)) || true
+    done
+    # A disappearing container is reported as STOPPED and does not enter health recovery. A
+    # control-plane restart starts with an empty card table, so its first reader scan treats each
+    # present SIM as an insertion and starts the missing engine. Engines not removed remain alone.
+    if [ "$removed" -gt 0 ]; then
+      info "removed $removed engine container(s) built on the previous image"
+      if restart_control_plane; then
+        info "control plane restarted — present SIM lines are starting their new engines"
+      else
+        warn "could not restart the control plane; removed engines remain down until it restarts"
+        warn "run: $0 restart"
+      fi
+    fi
   fi
   info "reload complete (data preserved)"
 }

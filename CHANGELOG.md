@@ -51,6 +51,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Reloading an updated Engine image no longer leaves every replaced WiFi Calling line stopped.
+  After removing containers that still use the previous image, the installer now restarts only
+  the control plane so its initial reader scan brings each present SIM line back automatically;
+  Engine containers that were not replaced keep running.
+
 - Dialling a carrier service code announced the wrong outcome while its answer was still on
   its way. A code's verdict and its reply text reach the browser separately, and the screen
   drew a conclusion from whichever arrived first — reporting that no reply was coming, or

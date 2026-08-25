@@ -29,6 +29,20 @@ class EngineImageRefreshTests(unittest.TestCase):
         condition = reload_body.rindex("if [", 0, removal)
         self.assertIn("ENGINE_IMAGE_CHANGED", reload_body[condition:removal])
 
+    def test_removed_containers_trigger_a_control_plane_rescan(self):
+        reload_body = _body("cmd_reload")
+        removal = reload_body.index("docker rm -f")
+        restart = reload_body.index("restart_control_plane", removal)
+        self.assertLess(removal, restart)
+        self.assertIn('removed=$((removed + 1))', reload_body[removal:restart])
+        self.assertIn('if [ "$removed" -gt 0 ]', reload_body[removal:restart])
+
+    def test_the_rescan_does_not_restart_the_orchestrator(self):
+        restart = _body("restart_control_plane")
+        self.assertIn("systemctl restart mdd-sim-gateway-control", restart)
+        self.assertIn('docker restart "$CONTROL_NAME"', restart)
+        self.assertNotIn("orchestrator", restart)
+
     def test_every_rebuild_path_reports_that_it_replaced_the_image(self):
         ensure = _body("ensure_engine_image")
         # Overlay refresh, the pre-fingerprint adoption path, the offline overlay and the
