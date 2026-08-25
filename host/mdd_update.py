@@ -49,6 +49,15 @@ class UpdateError(RuntimeError):
     pass
 
 
+def host_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in {"aarch64", "arm64"}:
+        return "arm64"
+    if machine in {"x86_64", "amd64"}:
+        return "amd64"
+    raise UpdateError(f"unsupported CPU architecture: {machine or 'unknown'}")
+
+
 def atomic_json(path: Path, value: dict):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -294,7 +303,7 @@ def load_control_image(artifact: Path, version: str):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if loaded.returncode:
         raise UpdateError(f"could not load Release control image: {loaded.stderr.strip()}")
-    expected_arch = "arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "amd64"
+    expected_arch = host_arch()
     checked = subprocess.run(
         ["docker", "image", "inspect", image, "--format",
          '{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.version"}}'],
@@ -543,8 +552,11 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
 
         distributed_engine = ""
         engine_fingerprints = release_engine_fingerprints(source_root)
-        if engine_fingerprints and not engine_image_matches_inputs(
-                "mdd-sim-gateway/engine", *engine_fingerprints):
+        engine_refresh_required = bool(
+            engine_fingerprints and not engine_image_matches_inputs(
+                "mdd-sim-gateway/engine", *engine_fingerprints))
+        release_images_supported = host_arch() == "arm64"
+        if engine_refresh_required and release_images_supported:
             if shutil.disk_usage(data / "update").free < 2 * 1024 * 1024 * 1024:
                 raise UpdateError("not enough persistent disk space to import the Engine image")
             status.publish("running", "engine_image", artifact=engine_name,
@@ -566,7 +578,7 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
                 engine_archive, version, *engine_fingerprints, status,
                 data / "update" / "engine-image.log")
 
-        if mode == "docker":
+        if mode == "docker" and release_images_supported:
             if shutil.disk_usage(data / "update").free < 1024 * 1024 * 1024:
                 raise UpdateError("not enough persistent disk space to import the control image")
             status.publish("running", "control_image", artifact=control_name, detail="",
@@ -601,12 +613,15 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         selected_proxy_url = clean_routes[active_route]["proxy_url"]
         env = network_environment(selected_proxy_url)
         env["MDD_REUSE_WEBUI"] = "1"
-        if mode == "docker":
+        if mode == "docker" and release_images_supported:
             env["MDD_REUSE_CONTROL_IMAGE"] = "1"
         if distributed_engine:
             env["MDD_ENGINE_DISTRIBUTION_IMAGE"] = distributed_engine
         reload_command = ["sh", str(repo / "install.sh"), "reload"]
-        if not distributed_engine:
+        # Release images are ARM64-only. On amd64, leave Engine preservation disabled when
+        # its inputs changed so install.sh refreshes or builds the native image locally;
+        # Docker-mode control is likewise rebuilt locally instead of loading an ARM64 asset.
+        if not distributed_engine and not engine_refresh_required:
             reload_command.append("--no-engines")
         result_code = reload_services(
             reload_command, repo, env,

@@ -811,11 +811,12 @@ setup_venv() {
   # vendored networking stack and lets a fully provisioned host reload offline. Only a genuinely
   # missing or changed dependency needs the package index. Do not upgrade pip on every reload;
   # replacing the installer itself creates needless network and compatibility risk.
-  if "$VENV_DIR/bin/pip" install --quiet --no-index \
+  if "$VENV_DIR/bin/python" -m pip install --quiet --no-index \
       -r "$REPO_DIR/control/requirements.txt" >/dev/null 2>&1; then
     info "control requirements already satisfied — reusing the installed packages"
   else
-    "$VENV_DIR/bin/pip" install --quiet wheel -r "$REPO_DIR/control/requirements.txt"
+    "$VENV_DIR/bin/python" -m pip install --quiet wheel \
+      -r "$REPO_DIR/control/requirements.txt"
   fi
   info "venv ready"
 }
@@ -1168,6 +1169,12 @@ cmd_reload() {
   if [ "$PRESERVE_ENGINES" = 1 ] && [ -f "$ENGINE_HANDOFF_MANIFEST" ]; then
     if engine_matches_checkout; then
       info "installed engine already matches the release handoff — preserving it"
+    elif [ "$(host_arch)" != arm64 ]; then
+      # Release image assets are ARM64-only. The old updater still passes --no-engines on
+      # amd64, so explicitly release that preservation request and let the normal native
+      # overlay/build path refresh the Engine instead of importing an incompatible archive.
+      info "no distributed Engine asset for $(host_arch) — refreshing the native image locally"
+      PRESERVE_ENGINES=0
     else
       handoff_release_engine
       PRESERVE_ENGINES=0

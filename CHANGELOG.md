@@ -2,6 +2,22 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.5.1] - 2026-08-26
+
+### Fixed
+
+- [Issue #13](https://github.com/MddIdd/mdd-sim-gateway/issues/13): an amd64 host upgrading
+  from v1.4.1 downloaded the ARM64 Engine Release asset, then failed only after the source had
+  already been replaced because the imported image could not pass the host-architecture check.
+  Release image assets now remain ARM64-only by design, while amd64 upgrades skip them and refresh
+  or build native Engine and Docker-control images locally. The v1.4.1 handoff also overrides its
+  old `--no-engines` request on amd64 so the previous Engine cannot be left behind.
+
+- A locally preserved virtual environment whose `pip` launcher had lost its executable bit made
+  reload fail even though the Python interpreter and installed dependencies were healthy. Reload
+  now invokes pip through the virtual environment's interpreter, avoiding that unnecessary
+  dependency on the wrapper script's mode.
+
 ## [1.5.0] - 2026-08-26
 
 ### Added

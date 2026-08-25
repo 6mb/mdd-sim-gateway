@@ -92,6 +92,9 @@ class EngineImageRefreshTests(unittest.TestCase):
         handoff = reload_body.index("handoff_release_engine", handoff_gate)
         preserve = reload_body.index('if [ "$PRESERVE_ENGINES" = 1 ]; then', handoff)
         self.assertIn("PRESERVE_ENGINES=0", reload_body[handoff:preserve])
+        self.assertIn('elif [ "$(host_arch)" != arm64 ]; then', reload_body[handoff_gate:preserve])
+        self.assertLess(reload_body.index("refreshing the native image locally", handoff_gate),
+                        handoff)
         self.assertLess(preserve, reload_body.index('[ "$ENGINE_IMAGE_CHANGED" = 1 ]'))
 
     def test_release_handoff_reuses_the_old_updaters_private_route_file(self):

@@ -5,9 +5,11 @@
 - 推荐 ARM64 Debian、Ubuntu 或 Armbian，systemd 可用。
 - Docker、USB、内核 TUN、pcscd；蜂窝模块还需要 ModemManager/NetworkManager。
 - 已实机验证的三体电子 SCR Prime（`04d9:c001`）提供标准 CCID 接口，但尚未进入 libccid 1.6.2 的设备表。连接该型号时执行 `sudo ./install.sh patchprime`，安装程序会从校验过的固定版本源码构建驱动并加入设备匹配；完成后支持热插拔。
-- 至少 4 GB 可用磁盘。正式版本升级会通过与源码包相同的直连或代理通道下载 CI 在原生
-  ARM64 runner 构建、并按校验和、版本与源码指纹核验的 Engine；设备不再为了 Engine
-  变更编译 Asterisk。同一镜像仍发布到 GHCR，供手工安装与独立核验。
+- 至少 4 GB 可用磁盘。ARM64 正式版本升级会通过与源码包相同的直连或代理通道下载 CI 在
+  原生 ARM64 runner 构建、并按校验和、版本与源码指纹核验的 Engine；设备不再为了 Engine
+  变更编译 Asterisk。同一镜像仍发布到 GHCR，供手工安装与独立核验。amd64 没有对应的
+  Release 镜像资产，升级器会保留架构边界并在本机刷新或构建原生 Engine，绝不导入 ARM64
+  镜像。
 - 手工执行全新 Engine 构建时，固定 commit 从项目维护的 GitHub sysmocom 镜像获取；
   镜像只保存构建所需的上游分支，原始项目与许可归属不变。离线迁移仍可使用已经审核的
   `MDD_ENGINE_BASE_IMAGE`，不得关闭 TLS 验证或改用未审核源码。
@@ -38,8 +40,9 @@ sudo ./install.sh install --mode docker   # 控制面也运行在 Docker
 正式 Release 归档包内含 CI 预构建的 `webui/dist`，一键升级校验整个归档后直接复用，因此不需要在树莓派上下载 Node 镜像或编译前端。GitHub `main` 与其 Release 是唯一支持的更新通道。
 
 `v1.4.1` 的升级器早于 Engine Release 资产，完成源码校验后会调用新版本安装器并要求保留旧
-Engine。为允许用户直接跨级，正式源码包额外携带一次性 Engine 校验清单；新安装器会读取旧
-升级任务尚未删除的私有线路文件，以相同的直连和代理候选下载、校验并导入 Engine。成功后清单
+Engine。为允许用户直接跨级，正式源码包额外携带一次性 Engine 校验清单；在 ARM64 上，新
+安装器会读取旧升级任务尚未删除的私有线路文件，以相同的直连和代理候选下载、校验并导入
+Engine；在 amd64 上则撤销旧升级器的 Engine 保留请求，转入本机原生刷新或构建。成功后清单
 即被删除，不改变日常手工执行 `--no-engines` 的含义，也不要求先安装桥接版本。
 
 也可以随时在主机上手动更新：备份并用受信任来源更新源码后执行：

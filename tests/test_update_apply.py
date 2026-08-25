@@ -144,8 +144,8 @@ class UpdaterTests(unittest.TestCase):
     def test_reload_reuses_satisfied_python_requirements_offline(self):
         installer = (Path(__file__).resolve().parent.parent / "install.sh").read_text(
             encoding="utf-8")
-        offline = 'pip" install --quiet --no-index'
-        online = 'pip" install --quiet wheel -r'
+        offline = 'python" -m pip install --quiet --no-index'
+        online = 'python" -m pip install --quiet wheel'
         self.assertIn(offline, installer)
         self.assertIn(online, installer)
         self.assertLess(installer.index(offline), installer.index(online))
@@ -428,6 +428,7 @@ class UpdaterTests(unittest.TestCase):
                 destination.write_bytes(b"ok")
 
             with patch.object(mdd_update, "download", side_effect=fake_download), \
+                    patch.object(mdd_update.platform, "machine", return_value="aarch64"), \
                     patch.object(mdd_update, "verify_release_archive"), \
                     patch.object(mdd_update, "extract", return_value=source), \
                     patch.object(mdd_update, "release_engine_fingerprints",
@@ -453,6 +454,47 @@ class UpdaterTests(unittest.TestCase):
             self.assertTrue(any(call.args[0].name == engine_name
                                 and call.args[2] == "ARM64 Engine image"
                                 for call in verify_file.call_args_list))
+
+    def test_amd64_refreshes_engine_and_docker_control_locally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, data, source = base / "repo", base / "data", base / "source"
+            repo.mkdir(); data.mkdir()
+            (data / "install-mode").write_text("docker\n", encoding="utf-8")
+            (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+            (source / "webui/dist").mkdir(parents=True)
+            (source / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+            (source / "webui/dist/index.html").write_text("ok", encoding="utf-8")
+            (source / "webui/dist/.mdd-release-version").write_text(
+                "9.9.9\n", encoding="utf-8")
+            downloads = []
+
+            def fake_download(url, destination, _env, _proxy="", **_kwargs):
+                downloads.append(destination.name)
+                destination.write_bytes(b"ok")
+
+            status = mdd_update.Status(data / "orchestrator/status.json", "9.9.9")
+            with patch.object(mdd_update.platform, "machine", return_value="x86_64"), \
+                    patch.object(mdd_update, "download", side_effect=fake_download), \
+                    patch.object(mdd_update, "verify_release_archive"), \
+                    patch.object(mdd_update, "extract", return_value=source), \
+                    patch.object(mdd_update, "release_engine_fingerprints",
+                                 return_value=("a" * 64, "b" * 64)), \
+                    patch.object(mdd_update, "engine_image_matches_inputs", return_value=False), \
+                    patch.object(mdd_update, "backup", return_value=base / "backup.tar.gz"), \
+                    patch.object(mdd_update, "apply_tree"), \
+                    patch.object(mdd_update, "load_release_engine") as load_engine, \
+                    patch.object(mdd_update, "load_control_image") as load_control, \
+                    patch.object(mdd_update, "reload_services", return_value=0) as reload:
+                mdd_update.perform(repo, data, "9.9.9", "MddIdd/mdd-sim-gateway", status)
+
+            command, _, env = reload.call_args.args[:3]
+            self.assertEqual(command, ["sh", str(repo / "install.sh"), "reload"])
+            self.assertNotIn("MDD_ENGINE_DISTRIBUTION_IMAGE", env)
+            self.assertNotIn("MDD_REUSE_CONTROL_IMAGE", env)
+            self.assertEqual(downloads, ["mdd-sim-gateway-v9.9.9.tar.gz", "SHA256SUMS"])
+            load_engine.assert_not_called()
+            load_control.assert_not_called()
 
     def test_perform_rejects_malformed_version_and_repository(self):
         with tempfile.TemporaryDirectory() as tmp:
