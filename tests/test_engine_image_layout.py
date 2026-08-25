@@ -15,6 +15,17 @@ DOCKERFILE = (
 
 
 class EngineImageLayoutTests(unittest.TestCase):
+    def test_pinned_sources_use_the_reviewed_github_mirrors(self):
+        self.assertIn(
+            "PJPROJECT_REPOSITORY=https://github.com/MddIdd/pjproject-sysmocom-mirror.git",
+            DOCKERFILE,
+        )
+        self.assertIn(
+            "ASTERISK_REPOSITORY=https://github.com/MddIdd/asterisk-sysmocom-mirror.git",
+            DOCKERFILE,
+        )
+        self.assertNotIn("gitea.sysmocom.de", DOCKERFILE)
+
     def test_engine_uses_separate_build_and_runtime_stages(self):
         stages = re.findall(r"(?im)^FROM\s+\S+\s+AS\s+(\S+)", DOCKERFILE)
         self.assertEqual(stages, ["build", "runtime"])

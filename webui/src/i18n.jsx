@@ -314,7 +314,7 @@ const zh = {
   'A new version is available. Review the release notes before updating.': '发现新版本，请先查看更新说明再决定是否升级。', 'Review update': '查看并升级',
   'Updating to v{version}…': '正在升级到 v{version}…',
   'Contacting the host…': '正在联系主机…', 'Downloading the new release…': '正在下载新版本…',
-  'Verifying the package…': '正在校验安装包…', 'Backing up the current version…': '正在备份当前版本…',
+  'Verifying the package…': '正在校验安装包…', 'Importing the verified Engine image…': '正在导入已验证的引擎镜像…', 'Backing up the current version…': '正在备份当前版本…',
   'Applying files…': '正在写入新文件…', 'Rebuilding and restarting services…': '正在重建并重启服务…',
   'Installation mode': '安装模式', 'Docker container': 'Docker 容器', 'Local service': '本地服务',
   'Download route': '下载线路', 'Direct connection': '直连', 'Elapsed time': '已用时间',

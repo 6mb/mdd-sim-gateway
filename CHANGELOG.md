@@ -49,6 +49,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   materially reduces release downloads and Raspberry Pi system-disk use without narrowing the
   supported codec or module surface.
 
+- Releases now build the Engine natively on an ARM64 GitHub runner from reviewed mirrors of the
+  pinned sysmocom commits and publish a versioned image through GHCR. One-click update downloads
+  it only when the Engine inputs changed, verifies its architecture, version and source
+  fingerprints, preserves the previous image for rollback, then recreates only affected lines.
+
 ### Removed
 
 - The 3/2/1-day activation reminder. Number keeping covers what it was for: a plan SIM now

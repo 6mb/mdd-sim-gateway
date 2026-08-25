@@ -237,11 +237,12 @@ export default function App() {
 const UPDATE_PHASES = {
   requested: 'Contacting the host…', launching: 'Contacting the host…',
   downloading: 'Downloading the new release…', verifying: 'Verifying the package…',
+  engine_image: 'Importing the verified Engine image…',
   backup: 'Backing up the current version…', applying: 'Applying files…',
   control_image: 'Importing the verified control image…',
   reloading: 'Rebuilding and restarting services…',
 }
-const UPDATE_PHASE_ORDER = ['requested', 'downloading', 'verifying', 'control_image', 'backup', 'applying', 'reloading', 'done']
+const UPDATE_PHASE_ORDER = ['requested', 'downloading', 'verifying', 'engine_image', 'control_image', 'backup', 'applying', 'reloading', 'done']
 const normalizedUpdatePhase = phase => phase === 'launching' ? 'requested' : (phase || 'requested')
 const formatUpdateBytes = value => {
   const bytes = Math.max(0, Number(value) || 0)
@@ -335,13 +336,15 @@ function UpdateModal({ update, current, t, onClose }) {
     } catch (err) { setError(err.message); setMode('failed') } finally { setCancelling(false) }
   }
   const mute = { fontSize: 12, color: 'var(--text-mute)' }
-  const visiblePhases = UPDATE_PHASE_ORDER.filter(key => key !== 'control_image' || progress?.install_mode === 'docker')
+  const visiblePhases = UPDATE_PHASE_ORDER.filter(key =>
+    (key !== 'control_image' || progress?.install_mode === 'docker') &&
+    (key !== 'engine_image' || progress?.engine_image_required))
   const activePhase = normalizedUpdatePhase(phase)
   const activeIndex = Math.max(0, visiblePhases.indexOf(activePhase))
   const downloaded = Number(progress?.downloaded_bytes) || 0
   const total = Number(progress?.total_bytes) || 0
   const percent = total > 0 ? Math.min(100, Math.round(downloaded * 100 / total)) : 0
-  const transferring = activePhase === 'downloading' || activePhase === 'control_image'
+  const transferring = ['downloading', 'engine_image', 'control_image'].includes(activePhase)
   const speed = Number(progress?.bytes_per_second) || 0
   // Only an estimate the host can actually support: a Release whose size the check never
   // returned, or a transfer that has not moved yet, gets no countdown rather than a wrong one.

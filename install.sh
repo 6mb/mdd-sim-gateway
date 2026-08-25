@@ -36,6 +36,7 @@
 #   MDD_ADVERTISE_ADDR  host LAN IP for SIP/WebRTC media           (default: auto-detect)
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
 #   MDD_ENGINE_BASE_IMAGE optional trusted local engine image for an offline overlay migration
+#   MDD_ENGINE_DISTRIBUTION_IMAGE optional already-pulled, release-matched Engine image
 #   MDD_REUSE_WEBUI     set to 1 to reuse a prebuilt, reviewed webui/dist in an offline install
 #   MDD_REUSE_CONTROL_IMAGE set to 1 to reuse a checksummed Release control image (docker mode)
 #   PCSC_VERSION           pinned pcsc-lite version                   (default 2.3.3)
@@ -555,23 +556,10 @@ _build_pcsclite_host() {
 # Dockerfile — so an unforced reinstall reuses the existing patched image instead of rebuilding it.
 # Files the overlay can refresh on its own, versus the ones that decide what the base contains.
 # Splitting them is what lets an update ship an engine fix without a 15-minute Asterisk rebuild.
-ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py log_capture.py render.py notify.py entrypoint.sh"
 ENGINE_BASE_TAG="mdd-sim-gateway/engine-base:trusted"
 
 engine_fingerprint() {
-  # $1: runtime|base. Hash of the inputs that class owns; order is fixed so it is reproducible.
-  eng="$REPO_DIR/engine"
-  if [ "$1" = runtime ]; then
-    # shellcheck disable=SC2086
-    { for f in $ENGINE_RUNTIME_FILES; do [ -f "$eng/$f" ] && cat "$eng/$f"; done
-      find "$eng/templates" -type f 2>/dev/null | LC_ALL=C sort | while read -r t; do cat "$t"; done
-    } | sha256sum | cut -d' ' -f1
-  else
-    { cat "$eng/Dockerfile" 2>/dev/null
-      echo "pcsc=$PCSC_VERSION"
-      find "$eng/patches" -type f 2>/dev/null | LC_ALL=C sort | while read -r p; do cat "$p"; done
-    } | sha256sum | cut -d' ' -f1
-  fi
+  PCSC_VERSION="$PCSC_VERSION" sh "$REPO_DIR/tools/engine-fingerprint.sh" "$1"
 }
 
 engine_image_label() {
@@ -595,6 +583,30 @@ ensure_engine_image() {
   base_fp=$(engine_fingerprint base)
   have_image=0
   docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 && have_image=1
+
+  if [ -n "${MDD_ENGINE_DISTRIBUTION_IMAGE:-}" ]; then
+    distributed="$MDD_ENGINE_DISTRIBUTION_IMAGE"
+    docker image inspect "$distributed" >/dev/null 2>&1 || \
+      die "distributed engine image not found: $distributed"
+    expected_version=$(tr -d '\n' < "$REPO_DIR/VERSION")
+    expected_arch=$(uname -m)
+    [ "$expected_arch" = aarch64 ] && expected_arch=arm64
+    [ "$expected_arch" = x86_64 ] && expected_arch=amd64
+    identity=$(docker image inspect "$distributed" --format \
+      '{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.version"}}|{{index .Config.Labels "io.mdd-sim-gateway.runtime-fp"}}|{{index .Config.Labels "io.mdd-sim-gateway.base-fp"}}' 2>/dev/null || true)
+    expected="$expected_arch|$expected_version|$runtime_fp|$base_fp"
+    [ "$identity" = "$expected" ] || \
+      die "distributed engine image identity mismatch: ${identity:-unreadable}"
+    if [ "$have_image" = 1 ]; then
+      docker tag "$ENGINE_IMAGE" "$ENGINE_IMAGE:previous" || \
+        die "could not preserve the current engine image"
+    fi
+    docker tag "$distributed" "$ENGINE_IMAGE" || die "could not activate distributed engine image"
+    docker tag "$distributed" "$ENGINE_BASE_TAG" >/dev/null 2>&1 || true
+    ENGINE_IMAGE_CHANGED=1
+    info "using verified distributed engine image $distributed"
+    return
+  fi
 
   if [ "$have_image" = 1 ] && [ -z "$force" ] && [ -z "$NOCACHE_FLAG" ]; then
     image_runtime=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.runtime-fp)
@@ -635,6 +647,7 @@ ensure_engine_image() {
     # shellcheck disable=SC2086
     docker build $NOCACHE_FLAG --build-arg "PCSC_VERSION=$PCSC_VERSION" \
       --build-arg "RUNTIME_FP=$runtime_fp" --build-arg "BASE_FP=$base_fp" \
+      --build-arg "MDD_VERSION=$(tr -d '\n' < "$REPO_DIR/VERSION")" \
       -t "$ENGINE_IMAGE" "$REPO_DIR/engine"
     # Keep the full build as the base every future overlay starts from, so repeated updates
     # stack one layer on a known-good image instead of a layer per update.
@@ -659,6 +672,7 @@ engine_overlay_build() {
     docker tag "$ENGINE_IMAGE" "$ENGINE_IMAGE:previous" >/dev/null 2>&1
   docker build --build-arg "BASE_IMAGE=$overlay_base" \
     --build-arg "RUNTIME_FP=$overlay_runtime_fp" --build-arg "BASE_FP=$overlay_base_fp" \
+    --build-arg "MDD_VERSION=$(tr -d '\n' < "$REPO_DIR/VERSION")" \
     -t "$ENGINE_IMAGE" -f "$REPO_DIR/engine/Dockerfile.overlay" "$REPO_DIR/engine"
 }
 

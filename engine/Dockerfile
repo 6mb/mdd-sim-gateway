@@ -17,6 +17,8 @@ FROM fedora:44@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8e
 # client/server protocol mismatch that distro-default pcsc-lite packages cause.
 ARG PCSC_VERSION=2.3.3
 ARG PCSC_SHA256=00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f
+ARG PJPROJECT_REPOSITORY=https://github.com/MddIdd/pjproject-sysmocom-mirror.git
+ARG ASTERISK_REPOSITORY=https://github.com/MddIdd/asterisk-sysmocom-mirror.git
 
 WORKDIR /home/asterisk-build
 
@@ -82,8 +84,8 @@ RUN set -eu; \
         done; \
         return 1; \
     }; \
-    checkout_with_retry https://gitea.sysmocom.de/sysmocom/pjproject.git pjproject 20537ab1e6beb2baf9ec15599e0217a601cf7ce5 && \
-    checkout_with_retry https://gitea.sysmocom.de/sysmocom/asterisk.git asterisk d231cb2c658545773fcd5eb9de787219b9ef6566 && \
+    checkout_with_retry "$PJPROJECT_REPOSITORY" pjproject 20537ab1e6beb2baf9ec15599e0217a601cf7ce5 && \
+    checkout_with_retry "$ASTERISK_REPOSITORY" asterisk d231cb2c658545773fcd5eb9de787219b9ef6566 && \
     cd asterisk && \
     git config user.email "build@vowifi" && git config user.name "vowifi build" && \
     fetch_with_retry . f1b60dcd9568c4045512fd0d8b619b9fb91a7f35 2 && \
@@ -185,8 +187,11 @@ RUN chmod +x /usr/local/bin/*.py /entrypoint.sh
 # rebuilding from source (see ensure_engine_image in install.sh).
 ARG RUNTIME_FP=""
 ARG BASE_FP=""
+ARG MDD_VERSION=""
 LABEL io.mdd-sim-gateway.managed="true" \
       io.mdd-sim-gateway.runtime-fp="${RUNTIME_FP}" \
       io.mdd-sim-gateway.base-fp="${BASE_FP}" \
+      org.opencontainers.image.version="${MDD_VERSION}" \
+      org.opencontainers.image.source="https://github.com/MddIdd/mdd-sim-gateway" \
       org.opencontainers.image.title="MDD Sim Gateway VoWiFi engine"
 ENTRYPOINT ["/entrypoint.sh"]

@@ -40,6 +40,7 @@ BACKUP_EXCLUDE = {"data", ".git", ".venv", "node_modules", "__pycache__"}
 
 VERSION_RE = re.compile(r"\d+(?:\.\d+)*(?:-[0-9A-Za-z.]+)?")
 REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+ENGINE_REGISTRY_IMAGE = "ghcr.io/mddidd/mdd-sim-gateway-engine"
 
 
 class UpdateError(RuntimeError):
@@ -254,6 +255,62 @@ def load_control_image(artifact: Path, version: str):
         raise UpdateError(f"Release control image identity mismatch: {actual or 'unreadable'}")
 
 
+def release_engine_fingerprints(source_root: Path) -> tuple[str, str] | None:
+    """Return the verified release's Engine inputs, or None for a transitional old release."""
+    script = source_root / "tools" / "engine-fingerprint.sh"
+    if not script.is_file():
+        return None
+    values = []
+    for kind in ("runtime", "base"):
+        result = subprocess.run(
+            ["sh", str(script), kind], cwd=str(source_root), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        value = result.stdout.strip() if result.returncode == 0 else ""
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise UpdateError(f"could not calculate release Engine {kind} fingerprint")
+        values.append(value)
+    return values[0], values[1]
+
+
+def engine_image_matches_inputs(image: str, runtime_fp: str, base_fp: str) -> bool:
+    checked = subprocess.run(
+        ["docker", "image", "inspect", image, "--format",
+         '{{index .Config.Labels "io.mdd-sim-gateway.runtime-fp"}}|'
+         '{{index .Config.Labels "io.mdd-sim-gateway.base-fp"}}'],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return checked.returncode == 0 and checked.stdout.strip() == f"{runtime_fp}|{base_fp}"
+
+
+def pull_release_engine(version: str, runtime_fp: str, base_fp: str, status: Status,
+                        log_path: Path) -> str:
+    """Pull and identify the native ARM64 Engine without replacing the running image yet."""
+    image = f"{ENGINE_REGISTRY_IMAGE}:v{version}"
+    started = time.monotonic()
+    with open(log_path, "w", encoding="utf-8") as log:
+        process = subprocess.Popen(["docker", "pull", image], stdout=log,
+                                   stderr=subprocess.STDOUT, text=True)
+        while process.poll() is None:
+            status.publish("running", "engine_image", artifact=image,
+                           engine_image_required=True,
+                           elapsed_seconds=max(0, int(time.monotonic() - started)),
+                           detail="pulling verified ARM64 Engine image")
+            time.sleep(3)
+    if process.returncode:
+        raise UpdateError(
+            f"could not pull Release Engine image: {_last_log_line(log_path, '') or 'docker pull failed'}")
+    checked = subprocess.run(
+        ["docker", "image", "inspect", image, "--format",
+         '{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.version"}}|'
+         '{{index .Config.Labels "io.mdd-sim-gateway.runtime-fp"}}|'
+         '{{index .Config.Labels "io.mdd-sim-gateway.base-fp"}}'],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    expected = f"arm64|{version}|{runtime_fp}|{base_fp}"
+    actual = checked.stdout.strip() if checked.returncode == 0 else ""
+    if actual != expected:
+        raise UpdateError(f"Release Engine image identity mismatch: {actual or 'unreadable'}")
+    return image
+
+
 def extract(archive: Path, destination: Path) -> Path:
     """Unpack the GitHub source tarball and return its single top-level directory."""
     with tarfile.open(archive, "r:gz") as tar:
@@ -408,6 +465,15 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         if dist_version != version or not (release_dist / "index.html").is_file():
             raise UpdateError("release archive has no matching prebuilt WebUI")
 
+        distributed_engine = ""
+        engine_fingerprints = release_engine_fingerprints(source_root)
+        if engine_fingerprints and not engine_image_matches_inputs(
+                "mdd-sim-gateway/engine", *engine_fingerprints):
+            if shutil.disk_usage(data / "update").free < 2 * 1024 * 1024 * 1024:
+                raise UpdateError("not enough persistent disk space to import the Engine image")
+            distributed_engine = pull_release_engine(
+                version, *engine_fingerprints, status, data / "update" / "engine-pull.log")
+
         if mode == "docker":
             if shutil.disk_usage(data / "update").free < 1024 * 1024 * 1024:
                 raise UpdateError("not enough persistent disk space to import the control image")
@@ -443,8 +509,13 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         env["MDD_REUSE_WEBUI"] = "1"
         if mode == "docker":
             env["MDD_REUSE_CONTROL_IMAGE"] = "1"
+        if distributed_engine:
+            env["MDD_ENGINE_DISTRIBUTION_IMAGE"] = distributed_engine
+        reload_command = ["sh", str(repo / "install.sh"), "reload"]
+        if not distributed_engine:
+            reload_command.append("--no-engines")
         result_code = reload_services(
-            ["sh", str(repo / "install.sh"), "reload", "--no-engines"], repo, env,
+            reload_command, repo, env,
             log_path, status, selected_proxy_url)
         redact_log(log_path, selected_proxy_url)
         if result_code != 0:

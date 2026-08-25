@@ -47,7 +47,17 @@ class EngineImageRefreshTests(unittest.TestCase):
         ensure = _body("ensure_engine_image")
         # Overlay refresh, the pre-fingerprint adoption path, the offline overlay and the
         # full build all replace the image; each has to say so or the containers are kept.
-        self.assertEqual(ensure.count("ENGINE_IMAGE_CHANGED=1"), 4, ensure)
+        # Four local build/overlay paths plus the verified CI-distributed image path.
+        self.assertEqual(ensure.count("ENGINE_IMAGE_CHANGED=1"), 5, ensure)
+
+    def test_a_distributed_image_is_identity_checked_before_activation(self):
+        ensure = _body("ensure_engine_image")
+        distributed = ensure.index('MDD_ENGINE_DISTRIBUTION_IMAGE')
+        activated = ensure.index('docker tag "$distributed" "$ENGINE_IMAGE"', distributed)
+        identity = ensure.index('identity=$(docker image inspect "$distributed"', distributed)
+        self.assertLess(identity, activated)
+        self.assertIn('[ "$identity" = "$expected" ]', ensure[identity:activated])
+        self.assertIn('"$ENGINE_IMAGE:previous"', ensure[identity:activated])
 
     def test_reusing_an_unchanged_image_leaves_the_lines_alone(self):
         # The flag starts at 0 and the reuse path returns before any assignment, so an
@@ -55,7 +65,11 @@ class EngineImageRefreshTests(unittest.TestCase):
         ensure = _body("ensure_engine_image")
         self.assertIn("ENGINE_IMAGE_CHANGED=0", ensure)
         reuse = ensure.index("matches this checkout — reusing")
-        self.assertNotIn("ENGINE_IMAGE_CHANGED=1", ensure[:reuse])
+        # The only earlier replacement is explicitly gated by the updater's distributed-image
+        # environment variable; the ordinary path itself returns without changing the flag.
+        prefix = ensure[:reuse]
+        self.assertEqual(prefix.count("ENGINE_IMAGE_CHANGED=1"), 1)
+        self.assertIn('if [ -n "${MDD_ENGINE_DISTRIBUTION_IMAGE:-}" ]', prefix)
 
     def test_an_explicit_request_to_keep_the_engines_still_wins(self):
         reload_body = _body("cmd_reload")

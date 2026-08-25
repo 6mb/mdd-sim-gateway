@@ -7,9 +7,40 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
+  engine:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify tag and version
+        run: test "v$(tr -d '\n' < VERSION)" = "${GITHUB_REF_NAME}"
+      - name: Build, validate and publish the ARM64 Engine image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          registry_image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/mdd-sim-gateway-engine"
+          runtime_fp=$(sh tools/engine-fingerprint.sh runtime)
+          base_fp=$(sh tools/engine-fingerprint.sh base)
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --no-cache \
+            --build-arg "MDD_VERSION=$(cat VERSION)" \
+            --build-arg "RUNTIME_FP=$runtime_fp" \
+            --build-arg "BASE_FP=$base_fp" \
+            -t "$registry_image:${GITHUB_REF_NAME}" engine
+          docker run --rm --entrypoint /bin/bash "$registry_image:${GITHUB_REF_NAME}" -lc '
+            set -e
+            test "$(uname -m)" = aarch64
+            test "$(find /usr/lib/asterisk/modules -name "*.so" | wc -l)" -eq 334
+            python3 -c "import Crypto, cryptography, jinja2, panoramisk, requests, serial, smartcard, socks, card"
+            asterisk -V
+          '
+          docker push "$registry_image:${GITHUB_REF_NAME}"
+
   package:
+    needs: engine
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,7 +59,7 @@ jobs:
           python -m pip install -r control/requirements.txt
           python -m py_compile control/app/*.py engine/*.py host/*.py
           python -m unittest discover -s tests -v
-          sh -n install.sh engine/entrypoint.sh
+          sh -n install.sh engine/entrypoint.sh tools/engine-fingerprint.sh
           cd webui
           npm ci
           npm audit --audit-level=high
@@ -37,7 +68,7 @@ jobs:
         with:
           platforms: arm64
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Build ARM64 control image asset and validate engine definition
+      - name: Build ARM64 control image asset and validate Engine definition
         run: |
           image_tar="mdd-sim-gateway-control-${GITHUB_REF_NAME}-arm64.tar"
           docker buildx build --platform linux/arm64 \
@@ -47,8 +78,8 @@ jobs:
             -t "mdd-sim-gateway/control:${GITHUB_REF_NAME}" \
             --output "type=docker,dest=${image_tar}" .
           gzip -1 "$image_tar"
-          # The clean target-ARM64 engine build is the manual gate documented in
-          # docs/RELEASE_CHECKLIST.md; hosted runners cannot reliably reach sysmocom.
+          # The native ARM64 engine job performs the clean build and publishes it to GHCR.
+          # Keep this cheap parser check here so packaging also rejects a malformed definition.
           docker build --check -f engine/Dockerfile engine
       - name: Build checksummed source archive
         run: |
