@@ -6,6 +6,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Balance and number keeping, on one page. A carrier reclaims a number that never bills, and
+  nothing here tracked that: balance was buried on two other screens and activity was not
+  shown at all. The page answers whether each number is still on a network, still funded, and
+  whether anything is keeping it used — and can now keep it used, by producing one real
+  chargeable event on a schedule you set. A prepaid SIM sends a billed SMS; a plan SIM renews
+  itself and instead has its balance watched against the next cycle's fee. A free balance
+  lookup is not usage with most carriers and cannot stand in for either.
+
+  Lines whose SIM is not currently in the gateway are listed separately: they cannot be kept
+  alive, but they are the ones sitting unused, so their expiry is the most useful thing the
+  page can show. They can also be deleted there — ported-away numbers and old test entries
+  accumulate, and a line whose reader is absent could not be reached from the device page.
+
 - Voicemail. An incoming call nobody answers — which, for a SIM kept at home, usually means
   no browser was open — now records the caller's message instead of ringing out into nothing.
   Recordings play from the call log beside the call they belong to, and stay on the gateway:
@@ -18,6 +31,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   still ringing, which is the moment least useful to someone who is not at the browser. A
   message left after the call replaces that notification rather than adding to it, so one
   unanswered call cannot buzz a phone twice.
+
+### Removed
+
+- The 3/2/1-day activation reminder. Number keeping covers what it was for: a plan SIM now
+  reports a balance too low to renew, and every line's expiry is on the page with the same
+  countdown. It only ever fired for lines whose activation date had been filled in by hand.
 
 ## [1.4.1] - 2026-08-22
 

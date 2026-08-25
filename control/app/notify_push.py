@@ -53,8 +53,12 @@ EV_NUMBER_CHANGED = "number_changed"
 # could carry a tunnel, or the failures were never the exit's fault to begin with. Both need
 # a person, and a gateway that cannot recover should say so rather than rebuild forever.
 EV_LINE_UNRECOVERABLE = "line_unrecoverable"
-# A manually tracked SIM activation is approaching its carrier-reported expiry date.
-EV_ACTIVATION_REMINDER = "activation_reminder"
+# The scheduled number-keeping action ran. Both outcomes are announced, not just failures:
+# the successful case spent the user's money on their SIM, and that deserves a receipt.
+EV_KEEPALIVE_RESULT = "keepalive_result"
+# A plan SIM renews itself, so what threatens the number is a balance too low to pay the next
+# cycle. Repeated on a slow cadence while it lasts rather than once, because it stays true.
+EV_BALANCE_LOW = "balance_low"
 # An inbound call that nobody answered. Separate from EV_INCOMING_CALL because that one fires
 # when the phone starts ringing (and is useful only while a browser is open to answer it),
 # whereas this one is the outcome — the notification that matters when nobody was there.
@@ -154,7 +158,8 @@ def _events_enabled(chan: dict) -> dict:
         EV_HOST_ALERT: ev.get(EV_HOST_ALERT, True),
         EV_NUMBER_CHANGED: ev.get(EV_NUMBER_CHANGED, True),
         EV_LINE_UNRECOVERABLE: ev.get(EV_LINE_UNRECOVERABLE, True),
-        EV_ACTIVATION_REMINDER: ev.get(EV_ACTIVATION_REMINDER, True),
+        EV_KEEPALIVE_RESULT: ev.get(EV_KEEPALIVE_RESULT, True),
+        EV_BALANCE_LOW: ev.get(EV_BALANCE_LOW, True),
         EV_MISSED_CALL: ev.get(EV_MISSED_CALL, True),
         EV_VOICEMAIL: ev.get(EV_VOICEMAIL, True),
     }
@@ -178,8 +183,8 @@ def build_payload(event: str, instance: dict, source: str, text: str | None) -> 
         "msisdn": instance.get("msisdn", "") or "",       # the line's own number (may be "")
         "from": source or "",                             # the event's source number
         "text": text if event in (EV_INCOMING_SMS, EV_HOST_ALERT, EV_NUMBER_CHANGED,
-                                  EV_LINE_UNRECOVERABLE, EV_ACTIVATION_REMINDER,
-                                  EV_VOICEMAIL) else None,
+                                  EV_LINE_UNRECOVERABLE, EV_KEEPALIVE_RESULT,
+                                  EV_BALANCE_LOW, EV_VOICEMAIL) else None,
     }
 
 
@@ -197,8 +202,10 @@ def build_notification_message(payload: dict) -> dict:
         return {"title": f"线路号码已变更 · {sim}", "content": payload.get("text") or ""}
     if event == EV_LINE_UNRECOVERABLE:
         return {"title": f"线路无法自动恢复 · {sim}", "content": payload.get("text") or ""}
-    if event == EV_ACTIVATION_REMINDER:
-        return {"title": f"SIM 即将到期 · {sim}", "content": payload.get("text") or ""}
+    if event == EV_KEEPALIVE_RESULT:
+        return {"title": f"保号执行结果 · {sim}", "content": payload.get("text") or ""}
+    if event == EV_BALANCE_LOW:
+        return {"title": f"余额不足 · {sim}", "content": payload.get("text") or ""}
     if event == EV_VOICEMAIL:
         return {"title": f"新留言 · {sim}", "content": payload.get("text") or ""}
     if event == EV_MISSED_CALL:
@@ -356,8 +363,11 @@ def _telegram_text(payload: dict) -> str:
         # hardware model).
         return "\n".join(["⚠️ 网关主机异常", str(payload.get("from") or ""), "",
                           payload.get("text") or ""])
-    if ev == EV_ACTIVATION_REMINDER:
-        return "\n".join([f"⏰ SIM 即将到期 · {payload.get('sim_name') or payload.get('instance')}",
+    if ev == EV_KEEPALIVE_RESULT:
+        return "\n".join([f"◷ 保号执行结果 · {payload.get('sim_name') or payload.get('instance')}",
+                           "", payload.get("text") or ""])
+    if ev == EV_BALANCE_LOW:
+        return "\n".join([f"⚠️ 余额不足 · {payload.get('sim_name') or payload.get('instance')}",
                            "", payload.get("text") or ""])
     if ev == EV_VOICEMAIL:
         return "\n".join([f"🎙 新留言 · {payload.get('sim_name') or payload.get('instance')}",

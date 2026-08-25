@@ -178,6 +178,38 @@ def init():
                     sent_ts INTEGER NOT NULL,
                     PRIMARY KEY(instance, expiry_date, days_before)
                 );
+                -- Number keeping. Carriers judge a number active by CHARGEABLE events, so
+                -- what is scheduled here is a real (paid) action, never a free balance
+                -- lookup. Config lives here rather than in the line config because the
+                -- engine has no use for it, and saving a line config restarts its container.
+                CREATE TABLE IF NOT EXISTS line_keepalive (
+                    instance TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    action TEXT NOT NULL DEFAULT 'sms',   -- 'sms' | 'balance_watch'
+                    sms_to TEXT NOT NULL DEFAULT '',
+                    sms_body TEXT NOT NULL DEFAULT '',
+                    verify_charge INTEGER NOT NULL DEFAULT 1,
+                    threshold TEXT NOT NULL DEFAULT '',
+                    interval_days INTEGER NOT NULL DEFAULT 30,
+                    -- The only persistent record of when a line last held a registration:
+                    -- line_states is pruned after 3 days and hub.ok_since dies with the
+                    -- process, so neither can answer "is this number still being used".
+                    last_registered_ts INTEGER NOT NULL DEFAULT 0,
+                    last_run_ts INTEGER NOT NULL DEFAULT 0,
+                    last_status TEXT NOT NULL DEFAULT '',
+                    last_detail TEXT NOT NULL DEFAULT '',
+                    next_due_ts INTEGER NOT NULL DEFAULT 0,
+                    balance_low_since INTEGER NOT NULL DEFAULT 0,
+                    balance_low_last_notified INTEGER NOT NULL DEFAULT 0
+                );
+                -- Claim ledger: an INSERT OR IGNORE here is what stops a restart mid-sweep
+                -- from charging the SIM twice for one due date.
+                CREATE TABLE IF NOT EXISTS keepalive_runs_claim (
+                    instance TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    claimed_ts INTEGER NOT NULL,
+                    PRIMARY KEY(instance, slot)
+                );
                 -- calls had no index at all: every per-line lookup was a full scan + sort.
                 CREATE INDEX IF NOT EXISTS idx_calls_inst ON calls(instance, start_ts);
                 -- Voicemail. The audio itself stays on the shared /logs volume: binary_sms
@@ -564,7 +596,8 @@ def clear_allowance_data(instance: str) -> None:
     """Remove SIM-specific cached usage and query settings before a reusable line id is freed."""
     with _lock, _conn() as c:
         for table in ("line_allowances", "allowance_query_rules", "allowance_queries",
-                      "allowance_reminders", "voicemails"):
+                      "allowance_reminders", "line_keepalive", "keepalive_runs_claim",
+                      "voicemails"):
             # Some recovery/tests open a minimal legacy DB before init() has created these
             # optional tables. Line deletion must still succeed in that degraded state.
             try:
@@ -584,6 +617,86 @@ def claim_allowance_reminder(instance: str, expiry_date: str, days_before: int,
              int(sent_ts or time.time())),
         )
         return cur.rowcount == 1
+
+
+KEEPALIVE_DEFAULTS = {
+    "enabled": 0, "action": "sms", "sms_to": "", "sms_body": "", "verify_charge": 1,
+    "threshold": "", "interval_days": 30, "last_registered_ts": 0, "last_run_ts": 0,
+    "last_status": "", "last_detail": "", "next_due_ts": 0,
+    "balance_low_since": 0, "balance_low_last_notified": 0,
+}
+_KEEPALIVE_CONFIG_KEYS = ("enabled", "action", "sms_to", "sms_body", "verify_charge",
+                          "threshold", "interval_days")
+_KEEPALIVE_STATE_KEYS = ("last_registered_ts", "last_run_ts", "last_status", "last_detail",
+                         "next_due_ts", "balance_low_since", "balance_low_last_notified")
+
+
+def get_keepalive(instance: str) -> dict:
+    """Always returns a full record: a line that was never configured reads as the defaults
+    rather than as an absence every caller would have to handle."""
+    with _lock, _conn() as c:
+        row = c.execute("SELECT * FROM line_keepalive WHERE instance=?",
+                        (str(instance),)).fetchone()
+    out = {**KEEPALIVE_DEFAULTS, "instance": str(instance)}
+    if row:
+        out.update({k: v for k, v in dict(row).items() if k in out or k == "instance"})
+    return out
+
+
+def _save_keepalive_fields(instance: str, values: dict, allowed: tuple) -> dict:
+    clean = {k: v for k, v in (values or {}).items() if k in allowed}
+    if not clean:
+        return get_keepalive(instance)
+    cols = ",".join(clean)
+    marks = ",".join("?" for _ in clean)
+    sets = ",".join(f"{k}=excluded.{k}" for k in clean)
+    with _lock, _conn() as c:
+        c.execute(
+            f"INSERT INTO line_keepalive(instance,{cols}) VALUES(?,{marks}) "
+            f"ON CONFLICT(instance) DO UPDATE SET {sets}",
+            (str(instance), *clean.values()),
+        )
+    return get_keepalive(instance)
+
+
+def save_keepalive_config(instance: str, values: dict) -> dict:
+    """Write only the user-editable fields; scheduler state is never clobbered by a save."""
+    return _save_keepalive_fields(instance, values, _KEEPALIVE_CONFIG_KEYS)
+
+
+def save_keepalive_state(instance: str, values: dict) -> dict:
+    """Write only scheduler-owned fields, so a run in flight cannot revert the user's config."""
+    return _save_keepalive_fields(instance, values, _KEEPALIVE_STATE_KEYS)
+
+
+def touch_line_registered(instance: str, ts: int | None = None) -> None:
+    """Remember that this line held a registration. Called from the status poller, so it is
+    deliberately a single narrow UPDATE-or-INSERT and nothing else."""
+    stamp = int(ts if ts is not None else time.time())
+    with _lock, _conn() as c:
+        c.execute(
+            "INSERT INTO line_keepalive(instance,last_registered_ts) VALUES(?,?) "
+            "ON CONFLICT(instance) DO UPDATE SET last_registered_ts=excluded.last_registered_ts",
+            (str(instance), stamp),
+        )
+
+
+def claim_keepalive_run(instance: str, slot: str, ts: int | None = None) -> bool:
+    """True for exactly one caller per (line, due date). The claim is what makes a restart
+    mid-sweep safe: the action being scheduled costs the user real money."""
+    stamp = int(ts if ts is not None else time.time())
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "INSERT OR IGNORE INTO keepalive_runs_claim(instance,slot,claimed_ts) "
+            "VALUES(?,?,?)", (str(instance), str(slot), stamp))
+        if not cur.rowcount:
+            return False
+        # Bounded like allowance_queries: the ledger only needs enough history to keep
+        # recent slots from re-firing.
+        c.execute("DELETE FROM keepalive_runs_claim WHERE instance=? AND slot NOT IN "
+                  "(SELECT slot FROM keepalive_runs_claim WHERE instance=? "
+                  "ORDER BY claimed_ts DESC LIMIT 20)", (str(instance), str(instance)))
+    return True
 
 
 VOICEMAIL_KEEP_PER_LINE = 30

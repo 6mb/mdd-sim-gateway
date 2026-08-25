@@ -163,35 +163,43 @@ class HostAlertNotificationTests(unittest.TestCase):
         self.assertTrue(notify_push._events_enabled({})[notify_push.EV_HOST_ALERT])
 
 
-class ActivationReminderNotificationTests(unittest.TestCase):
-    def test_it_is_enabled_by_default_and_can_be_disabled_per_channel(self):
-        self.assertTrue(notify_push._events_enabled({})[
-            notify_push.EV_ACTIVATION_REMINDER])
-        self.assertFalse(notify_push._events_enabled({"events": {
-            notify_push.EV_ACTIVATION_REMINDER: False,
-        }})[notify_push.EV_ACTIVATION_REMINDER])
+class MissedCallNotificationTests(unittest.TestCase):
+    """A missed call is the outcome of a call nobody answered — a different event from the
+    ringing announcement, and the one that matters when no browser was open."""
 
-    def test_it_has_expiry_wording_not_call_or_sms_wording(self):
+    def test_it_is_enabled_by_default_and_can_be_disabled_per_channel(self):
+        self.assertTrue(notify_push._events_enabled({})[notify_push.EV_MISSED_CALL])
+        self.assertFalse(notify_push._events_enabled({"events": {
+            notify_push.EV_MISSED_CALL: False,
+        }})[notify_push.EV_MISSED_CALL])
+
+    def test_it_is_worded_as_a_missed_call_not_a_ringing_one(self):
         payload = notify_push.build_payload(
-            notify_push.EV_ACTIVATION_REMINDER,
-            {"id": "1", "name": "US SIM"}, "2026-08-28",
-            "线路 US SIM 将于 2026-08-28 到期，还剩 3 天。")
+            notify_push.EV_MISSED_CALL,
+            {"id": "1", "name": "UK SIM", "msisdn": "+447700900123"},
+            "+447700900321", None)
         built = notify_push.build_notification_message(payload)
         telegram = notify_push._telegram_text(payload)
-        self.assertIn("即将到期", built["title"])
-        self.assertIn("还剩 3 天", built["content"])
-        self.assertIn("即将到期", telegram)
+        self.assertIn("未接来电", built["title"])
+        self.assertIn("+447700900321", built["content"])
+        self.assertIn("Missed call", telegram)
         self.assertNotIn("Incoming call", telegram)
         self.assertNotIn("Incoming SMS", telegram)
 
-    def test_enabled_channel_detection_honours_category_toggle(self):
+    def test_it_carries_no_message_body(self):
+        # Nothing was said into a call that was never answered; a body here could only be a
+        # leak from an adjacent SMS event.
+        payload = notify_push.build_payload(
+            notify_push.EV_MISSED_CALL, {"id": "1"}, "+15550000", "secret sms body")
+        self.assertIsNone(payload["text"])
+
+    def test_it_is_toggleable_independently_of_incoming_calls(self):
         settings = {"telegram": {"enabled": True, "events": {
-            notify_push.EV_ACTIVATION_REMINDER: False}}}
-        self.assertFalse(notify_push.has_enabled_channel(
-            settings, notify_push.EV_ACTIVATION_REMINDER))
-        settings["telegram"]["events"][notify_push.EV_ACTIVATION_REMINDER] = True
+            notify_push.EV_INCOMING_CALL: False, notify_push.EV_MISSED_CALL: True}}}
         self.assertTrue(notify_push.has_enabled_channel(
-            settings, notify_push.EV_ACTIVATION_REMINDER))
+            settings, notify_push.EV_MISSED_CALL))
+        self.assertFalse(notify_push.has_enabled_channel(
+            settings, notify_push.EV_INCOMING_CALL))
 
 
 class NumberChangeNotificationTests(unittest.TestCase):

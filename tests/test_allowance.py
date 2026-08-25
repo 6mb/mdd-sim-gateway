@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -93,24 +92,9 @@ class AllowanceTests(unittest.TestCase):
         self.assertIsNone(store.latest_allowance_query("4"))
         self.assertEqual(store.get_allowance("4")["balance"], "")
 
-    def test_activation_date_enables_only_three_two_one_day_reminders(self):
-        snapshot = {"activated_at": "2026-08-01", "valid_until": "08/28/2026"}
-        self.assertEqual(allowance.reminder_days(snapshot, date(2026, 8, 25)), 3)
-        self.assertEqual(allowance.reminder_days(snapshot, date(2026, 8, 26)), 2)
-        self.assertEqual(allowance.reminder_days(snapshot, date(2026, 8, 27)), 1)
-        self.assertIsNone(allowance.reminder_days(snapshot, date(2026, 8, 24)))
-        self.assertIsNone(allowance.reminder_days(
-            {"activated_at": "", "valid_until": "08/28/2026"}, date(2026, 8, 25)))
-
     def test_activation_date_requires_iso_format(self):
         with self.assertRaisesRegex(ValueError, "YYYY-MM-DD"):
             allowance.clean_allowance({"activated_at": "08/01/2026"})
-
-    def test_reminder_claim_is_persistent_and_deduplicated(self):
-        self.assertTrue(store.claim_allowance_reminder("1", "2026-08-28", 3, 100))
-        self.assertFalse(store.claim_allowance_reminder("1", "2026-08-28", 3, 101))
-        self.assertTrue(store.claim_allowance_reminder("1", "2026-08-28", 2, 102))
-        self.assertTrue(store.claim_allowance_reminder("1", "2026-09-28", 3, 103))
 
 
 if __name__ == "__main__":

@@ -291,6 +291,9 @@ def support_bundle(status_documents: dict, log_lines: int = 500) -> bytes:
         base = Path(cfg.DATA_DIR) / "instances"
         # Include the current logs, compact rebuild snapshots and retained IKE segments. Every
         # source goes through the same redaction and contributes only its configured tail.
+        # These globs are an allow-list on purpose. logs/voicemail/*.wav lives under the same
+        # directory and must NEVER be collected: a bundle is meant to be shareable, and a
+        # recording of a caller's voice cannot be redacted into something safe to share.
         paths = [*base.glob("*/run/*.log"), *base.glob("*/logs/diagnostics.jsonl"),
                  *base.glob("*/logs/ike/charon-*.log")]
         # The engine's call events are the only record of the Q.850 cause behind a service
