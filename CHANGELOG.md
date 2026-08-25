@@ -4,6 +4,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Four backend status messages appeared in English on a Chinese interface, including the one
+  shown when a reader holds another line's SIM — the sentence a user sees precisely when they
+  need to understand a binding mistake. The connectivity timeline could not label that state
+  at all and drew the raw code. Both tables are now checked against the backend by a test,
+  because a missing translation is invisible until someone reaches that exact state.
+
 ### Changed
 
 - Push notifications lead with the product name. A notification arrives out of context — on a

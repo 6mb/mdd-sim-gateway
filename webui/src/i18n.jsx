@@ -399,6 +399,13 @@ const zh = {
   'The backend will keep monitoring the line.': '后台将继续监控线路。',
   'Working': '运行正常', 'Registering to IMS': '正在注册 IMS', 'Stopped': '已停止', 'Stopped.': '线路已停止。',
   'Failed': '失败', 'PIN error': 'PIN 错误', 'Cannot resolve ePDG': '无法解析 ePDG', 'Establishing VoWiFi tunnel': '正在建立 VoWiFi 隧道',
+  // Backend reason sentences are used verbatim as translation keys, so these must match
+  // control/app/status.py REASONS exactly — including the em dash and the apostrophes.
+  "The reader this line is bound to holds a different line's SIM. VoWiFi will not authenticate against it — check this line's reader binding.": '该线路绑定的读卡器里是另一条线路的 SIM，VoWiFi 无法用它完成认证——请检查本线路的读卡器绑定。',
+  'The carrier ePDG did not answer the CHILD_SA rekey; rebuilding the tunnel.': '运营商 ePDG 未响应 CHILD_SA 换钥，正在重建隧道。',
+  'The carrier ePDG did not answer the IKE_SA rekey; rebuilding the tunnel.': '运营商 ePDG 未响应 IKE_SA 换钥，正在重建隧道。',
+  'The client could not send an IPsec rekey request; rebuilding the tunnel.': '客户端无法发出 IPsec 换钥请求，正在重建隧道。',
+  "Reader holds another line's SIM": '读卡器里是另一条线路的 SIM',
   'Refreshing line status…': '正在刷新线路状态…', 'The line was rebuilt successfully.': '线路已完成重建。',
   "VoWiFi tunnel is up — registering to the carrier's IMS…": 'VoWiFi 隧道已连接，正在注册运营商 IMS…',
   'Working — connected to the carrier over Wi-Fi.': '运行正常：已通过 Wi‑Fi 连接运营商。',
