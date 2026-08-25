@@ -565,7 +565,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
   }
   const checkUpdate=async()=>{setChecking(true);try{const result=await api.checkUpdate(true);setUpdate(result);showToast(result.update_available?t('Update available'):(result.ok?t('Already up to date'):t(result.error_code||result.error)))}catch(e){showToast(e.message)}finally{setChecking(false)}}
   const changePassword=async()=>{if(passwordForm.next!==passwordForm.confirm){showToast(t('Passwords do not match'));return}try{await api.authPassword(passwordForm.current,passwordForm.next);window.location.reload()}catch(e){showToast(e.message)}}
-  return <div className="u-page"><div className="u-tabs">{tabs.map(([k, l]) => <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>)}</div><div className="card u-panel">
+  return <div className="u-page"><div className="u-tabs">{tabs.map(([k, l]) => <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>)}</div><div className={['backup', 'maintenance'].includes(tab) ? 'u-settings-shell' : 'card u-panel'}>
     {tab === 'general' && <><h2>{t('General')}</h2><div className="u-form-grid"><div><label>{t('Language')}</label><select value={language} onChange={e => setLanguage(e.target.value)}><option value="zh">中文</option><option value="en">English</option></select></div><div><label>{t('Timezone')}</label><input list="timezones" value={s.timezone || ''} onChange={e => setS({ ...s, timezone: e.target.value })} /><datalist id="timezones"><option>Asia/Shanghai</option><option>Europe/London</option><option>America/New_York</option><option>America/Los_Angeles</option><option>Asia/Tokyo</option><option>UTC</option></datalist></div></div><h3>{t('New device defaults')}</h3><label><input type="checkbox" className="u-toggle" checked={!!s.device_defaults?.cellular_enabled} onChange={e => setS({ ...s, device_defaults: { ...s.device_defaults, cellular_enabled: e.target.checked } })} />{t('Enable 4G for newly detected modems')}</label><label><input type="checkbox" className="u-toggle" checked={s.device_defaults?.vowifi_enabled !== false} onChange={e => setS({ ...s, device_defaults: { ...s.device_defaults, vowifi_enabled: e.target.checked } })} />{t('Enable VoWiFi for newly detected modems')}</label><h3>{t('Hardware')}</h3><label><input type="checkbox" className="u-toggle" checked={s.hardware?.modem_backend === 'serial'} onChange={e => {
       const serial = e.target.checked
       if (!window.confirm(serial ? t('serialModeEnableConfirm') : t('serialModeDisableConfirm'))) return
@@ -582,37 +582,42 @@ export function SystemPage({ showToast, openUpdateDialog }) {
       </div>
       <p className="u-hint">{t('A call you decline on the softphone is never recorded. Changing these restarts the engine of each running line, which reconnects briefly.')}</p></>}
     {tab === 'security' && <><h2>{t('Security')}</h2><div className="u-detail"><span>{t('HTTPS')}</span><b>{status?.security?.https ? t('Enabled') : t('Disabled')}</b></div><div className="u-detail"><span>{t('Certificate mode')}</span><b>{status?.security?.certificate_mode ? t(status.security.certificate_mode) : '—'}</b></div><h3>{t('Change administrator password')}</h3><div className="u-form-grid"><div><label>{t('Current password')}</label><input type="password" autoComplete="current-password" value={passwordForm.current} onChange={e=>setPasswordForm({...passwordForm,current:e.target.value})}/></div><div><label>{t('New password (at least 10 characters)')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.next} onChange={e=>setPasswordForm({...passwordForm,next:e.target.value})}/></div><div><label>{t('Confirm password')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.confirm} onChange={e=>setPasswordForm({...passwordForm,confirm:e.target.value})}/></div></div><button className="btn btn-ghost" disabled={!passwordForm.current||passwordForm.next.length<10||!passwordForm.confirm} onClick={changePassword}>{t('Change password')}</button><label><input type="checkbox" className="u-toggle" checked={s.security?.audit_enabled !== false} onChange={e => setS({ ...s, security: { ...s.security, audit_enabled: e.target.checked } })} />{t('Record administrative operations')}</label><label>{t('Trusted reverse proxies (comma-separated)')}</label><input value={(s.security?.trusted_proxies || []).join(', ')} onChange={e => setS({ ...s, security: { ...s.security, trusted_proxies: e.target.value.split(',').map(x => x.trim()).filter(Boolean) } })} /></>}
-    {tab === 'backup' && <>
-      <div className="u-card-head"><div><h2>{t('Backup & updates')}</h2><p>{t('Backups stay encrypted by host permissions and are not downloaded through the browser.')}</p></div><button className="btn btn-primary" onClick={() => action('backup')}>{t('Create local backup')}</button></div>
-      <div className="u-detail"><span>{t('Running version')}</span><b>{status?.version || '—'}</b></div>
-      <h3>{t('Update connection')}</h3>
-      <p className="u-note">{t('Automatic tries a direct connection first, then the available proxy library entries. The route that passes the check is reused for the download.')}</p>
-      <div className="u-form-grid">
-        <div><label>{t('Connection')}</label><select value={s.updates?.proxy_mode || 'auto'} onChange={e => setS({ ...s, updates: { ...s.updates, proxy_mode: e.target.value, proxy_profile_id: e.target.value === 'library' ? (s.updates?.proxy_profile_id || '') : '' } })}><option value="auto">{t('Automatic — direct, then proxy library')}</option><option value="direct">{t('Direct only')}</option><option value="library">{t('Specified proxy')}</option></select></div>
-        {s.updates?.proxy_mode === 'library' && <div><label>{t('Proxy')}</label><select value={s.updates?.proxy_profile_id || ''} onChange={e => setS({ ...s, updates: { ...s.updates, proxy_mode: 'library', proxy_profile_id: e.target.value } })}><option value="">{t('Select a proxy…')}</option>{Object.entries(s.proxy?.profiles || {}).map(([id, profile]) => <option key={id} value={id}>{profile.name || t('Unnamed proxy')}</option>)}</select></div>}
-        <div><label>{t('Update notifications')}</label><select value={s.updates?.notification_mode || 'all'} onChange={e => setS({ ...s, updates: { ...s.updates, notification_mode: e.target.value } })}><option value="all">{t('Notify for every new version')}</option><option value="feature">{t('Only notify for feature updates')}</option></select></div>
+    {tab === 'backup' && <div className="u-settings-stack">
+      <div className="u-settings-grid">
+        <section className="card u-panel u-settings-card">
+          <div className="u-settings-card-head"><div><h2>{t('Local backups')}</h2><p>{t('Backups stay encrypted by host permissions and are not downloaded through the browser.')}</p></div><button className="btn btn-primary" onClick={() => action('backup')}>{t('Create local backup')}</button></div>
+          <div className="u-settings-list">{(status?.backups || []).map(item => <div className="u-detail" key={item.name}><span>{item.name}</span><b>{formatBytes(item.size)} · {new Date(item.created_at * 1000).toLocaleString()}</b></div>)}</div>
+        </section>
+        <section className="card u-panel u-settings-card">
+          <div className="u-settings-card-head"><div><h2>{t('Software updates')}</h2><p>{t('Check the latest release and review it before a manual update.')}</p></div><button className="btn btn-ghost" disabled={checking} onClick={checkUpdate}>{t(checking?'Checking…':'Check for updates')}</button></div>
+          <div className="u-settings-facts"><div><span>{t('Running version')}</span><b>v{status?.version || '—'}</b></div><div><span>{t('Latest version')}</span><b>{update?.latest ? `v${update.latest}` : t(update ? 'Update check failed' : 'Not checked')}</b></div></div>
+          {update?.update_available&&<div className="u-note u-update-note"><span>{t('A new version is available. Review the release notes before updating.')}</span><button className="btn btn-primary" onClick={()=>openUpdateDialog(update)}>{t('Review update')}</button></div>}
+          {update&&!update.ok&&<p className="u-error">{t(update.error_code||update.error)}</p>}
+        </section>
       </div>
-      <p className="u-hint">{t('Feature-only notifications ignore a change to the final version number, such as 1.4.1 → 1.4.2.')}</p>
-      <label><input type="checkbox" className="u-toggle" checked={!!s.updates?.auto_update} onChange={e => setS({ ...s, updates: { ...s.updates, auto_update: e.target.checked } })} />{t('Install approved updates automatically')}</label>
-      <p className="u-note">{t('Publishing a release never starts an automatic update. Installation begins only after that exact version is separately approved in the update policy, at or after its scheduled time.')}</p>
-      {s.updates?.proxy_mode === 'library' && <p className="u-note">{t('SOCKS5 entries connect directly. Subscription and node entries reuse a ready country exit assigned to that proxy.')}</p>}
-      <button className="btn btn-ghost" onClick={save}>{t('Save update connection')}</button>
-      <div className="u-detail"><span>{t('Software updates')}</span><div className="u-inline"><b>{update?.latest ? `v${update.latest}` : t(update ? 'Update check failed' : 'Not checked')}</b><button className="btn btn-ghost" disabled={checking} onClick={checkUpdate}>{t(checking?'Checking…':'Check for updates')}</button></div></div>
-      {update?.update_available&&<div className="u-note u-update-note"><span>{t('A new version is available. Review the release notes before updating.')}</span><button className="btn btn-primary" onClick={()=>openUpdateDialog(update)}>{t('Review update')}</button></div>}
-      {update&&!update.ok&&<p className="u-error">{t(update.error_code||update.error)}</p>}
-      {(status?.backups || []).map(item => <div className="u-detail" key={item.name}><span>{item.name}</span><b>{formatBytes(item.size)} · {new Date(item.created_at * 1000).toLocaleString()}</b></div>)}
-    </>}
-    {tab === 'maintenance' && <><h2>{t('Maintenance')}</h2>
-      <div className="u-action-grid"><button className="btn btn-ghost" onClick={() => action('restart_lines')}>{t('Restart all VoWiFi lines')}</button><button className="btn btn-ghost" onClick={() => action('refresh_egress')}>{t('Refresh country exits')}</button><button className="btn btn-ghost" onClick={() => action('clear_notification_history')}>{t('Clear notification history')}</button></div>
-      <h3>{t('Restart')}</h3>
-      <p className="u-note">{t('Ordered by how much they interrupt: the control plane can be restarted without touching a call, the host cannot.')}</p>
-      <div className="u-action-grid">
-        <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('control')}>{t('Restart the control plane')}</button>
-        <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('services')}>{t('Restart all gateway services')}</button>
-        <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('host')}>{t('Restart the host')}</button>
-      </div>
-      {restarting && <p className="u-note u-restart-note">{t(`restart.waiting.${restarting}`)}</p>}
-    </>}
+      <section className="card u-panel u-settings-card">
+        <div className="u-settings-card-head"><div><h2>{t('Update policy')}</h2><p>{t('Notifications announce releases; automatic updates install only versions marked stable.')}</p></div></div>
+        <p className="u-note">{t('Automatic tries a direct connection first, then the available proxy library entries. The route that passes the check is reused for the download.')}</p>
+        <div className="u-form-grid">
+          <div><label>{t('Connection')}</label><select value={s.updates?.proxy_mode || 'auto'} onChange={e => setS({ ...s, updates: { ...s.updates, proxy_mode: e.target.value, proxy_profile_id: e.target.value === 'library' ? (s.updates?.proxy_profile_id || '') : '' } })}><option value="auto">{t('Automatic — direct, then proxy library')}</option><option value="direct">{t('Direct only')}</option><option value="library">{t('Specified proxy')}</option></select></div>
+          {s.updates?.proxy_mode === 'library' && <div><label>{t('Proxy')}</label><select value={s.updates?.proxy_profile_id || ''} onChange={e => setS({ ...s, updates: { ...s.updates, proxy_mode: 'library', proxy_profile_id: e.target.value } })}><option value="">{t('Select a proxy…')}</option>{Object.entries(s.proxy?.profiles || {}).map(([id, profile]) => <option key={id} value={id}>{profile.name || t('Unnamed proxy')}</option>)}</select></div>}
+          <div><label>{t('Update notifications')}</label><select value={s.updates?.notification_mode || 'all'} onChange={e => setS({ ...s, updates: { ...s.updates, notification_mode: e.target.value } })}><option value="all">{t('Notify for every new version')}</option><option value="feature">{t('Only notify for feature updates')}</option></select></div>
+        </div>
+        <p className="u-hint">{t('Feature-only notifications ignore a change to the final version number, such as 1.4.1 → 1.4.2.')}</p>
+        <div className="u-settings-toggle"><div><b>{t('Automatically update to stable versions')}</b><p>{t('Release notifications and automatic installation are independent. Patch releases can install silently when feature-only notifications are selected.')}</p></div><input type="checkbox" className="u-toggle" checked={!!s.updates?.auto_update} onChange={e => setS({ ...s, updates: { ...s.updates, auto_update: e.target.checked } })} /></div>
+        <p className="u-note">{t('A newly published release is never installed immediately. It must first pass the observation period, be marked stable, and reach its scheduled rollout time.')}</p>
+        {s.updates?.proxy_mode === 'library' && <p className="u-note">{t('SOCKS5 entries connect directly. Subscription and node entries reuse a ready country exit assigned to that proxy.')}</p>}
+        <div className="u-settings-actions"><button className="btn btn-primary" onClick={save}>{t('Save update settings')}</button></div>
+      </section>
+    </div>}
+    {tab === 'maintenance' && <div className="u-settings-grid u-maintenance-grid">
+      <section className="card u-panel u-settings-card"><div className="u-settings-card-head"><div><h2>{t('Routine maintenance')}</h2><p>{t('Refresh runtime state without restarting the host.')}</p></div></div><div className="u-action-list"><button className="btn btn-ghost" onClick={() => action('restart_lines')}>{t('Restart all VoWiFi lines')}</button><button className="btn btn-ghost" onClick={() => action('refresh_egress')}>{t('Refresh country exits')}</button><button className="btn btn-ghost" onClick={() => action('clear_notification_history')}>{t('Clear notification history')}</button></div></section>
+      <section className="card u-panel u-settings-card"><div className="u-settings-card-head"><div><h2>{t('Restart')}</h2><p>{t('Ordered by how much they interrupt: the control plane can be restarted without touching a call, the host cannot.')}</p></div></div><div className="u-action-list">
+          <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('control')}>{t('Restart the control plane')}</button>
+          <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('services')}>{t('Restart all gateway services')}</button>
+          <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('host')}>{t('Restart the host')}</button>
+        </div>{restarting && <p className="u-note u-restart-note">{t(`restart.waiting.${restarting}`)}</p>}</section>
+    </div>}
   </div>{!['backup', 'maintenance'].includes(tab) && <button className="btn btn-primary" onClick={save}>{t('Save')}</button>}</div>
 }
 

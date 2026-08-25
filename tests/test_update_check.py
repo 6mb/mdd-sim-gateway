@@ -240,6 +240,23 @@ class UpdateAutomationTests(unittest.TestCase):
         self.assertFalse(result["notified"])
         dispatch.assert_not_called()
 
+    def test_feature_mode_still_auto_installs_a_stable_patch(self):
+        patch_info = {**self.INFO, "latest": update_check.VERSION.rsplit(".", 1)[0] + ".99"}
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(config, "DATA_DIR", temp), \
+                patch.object(update_check, "check", return_value=patch_info), \
+                patch.object(config, "get_settings", return_value=self._settings(
+                    notification_mode="feature", auto_update=True)), \
+                patch.object(update_check, "auto_update_authorization",
+                             return_value={"authorized": True, "reason": "promoted"}), \
+                patch.object(update_check, "request_apply", return_value={"ok": True}) as apply, \
+                patch("control.app.notify_push.dispatch") as dispatch:
+            result = update_check.automation_cycle()
+        self.assertFalse(result["notified"])
+        self.assertTrue(result["auto_update_requested"])
+        dispatch.assert_not_called()
+        apply.assert_called_once()
+
 
 class UpdateProxyMigrationTests(unittest.TestCase):
     def _load(self, settings):
