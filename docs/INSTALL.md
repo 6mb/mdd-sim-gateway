@@ -30,10 +30,10 @@ sudo ./install.sh install --mode docker   # 控制面也运行在 Docker
 
 ## 更新
 
-系统设置可在“自动更新”和“提示更新”中二选一，并分别选择全部版本或主版本（忽略最后一位版本号变化）。新安装默认自动更新主版本；自动模式不再发送发现新版本提示，匹配的版本仍必须由 `update-policy.json` 单独标记为稳定、匹配完全相同的版本并到达 `not_before` 时间，单纯发布 Release 不会触发安装。提示模式默认提示全部版本，左下角版本号出现红点后，由管理员查看说明并确认“立即升级”。更新时控制面把请求写入编排器目录，主机上的 `mdd-sim-gateway-orchestrator` 以独立的临时 systemd 单元（`mdd-sim-gateway-update`）运行 `host/mdd_update.py` —— 下载对应 `vX.Y.Z` Release 资产、校验 SHA-256 和版本，备份当前代码到数据目录 `backups/` 后覆盖安装，最后复用资产内已构建的 WebUI 并执行 `install.sh reload --no-engines` 重启控制服务。Docker 控制面模式还会用同一条下载线路取得已校验的 ARM64 控制镜像资产并执行 `docker load`，不需要 Docker daemon 访问镜像仓库。`data/`、`.env`、`.git`、虚拟环境和已有 Engine 镜像、容器全部保留。Engine 变更仍按本项目的构建机部署流程单独发布。日志见 `journalctl -u mdd-sim-gateway-update` 与数据目录下 `update/reload.log`。
+系统设置可在“自动更新”和“提示更新”中二选一，并分别选择全部版本或主版本。主版本不按版本号推断，而由 `update-policy.json` 的 `release.kind` 明确标记为 `main`；其他版本标记为 `patch`。新安装默认自动更新主版本；自动模式不再发送发现新版本提示，匹配的版本仍必须由同一策略文件单独标记为稳定、匹配完全相同的版本并到达 `not_before` 时间，单纯发布 Release 不会触发安装。提示模式默认提示全部版本，左下角版本号出现红点后，由管理员查看说明并确认“立即升级”。更新时控制面把请求写入编排器目录，主机上的 `mdd-sim-gateway-orchestrator` 以独立的临时 systemd 单元（`mdd-sim-gateway-update`）运行 `host/mdd_update.py` —— 下载对应 `vX.Y.Z` Release 资产、校验 SHA-256 和版本，备份当前代码到数据目录 `backups/` 后覆盖安装，最后复用资产内已构建的 WebUI 并执行 `install.sh reload --no-engines` 重启控制服务。Docker 控制面模式还会用同一条下载线路取得已校验的 ARM64 控制镜像资产并执行 `docker load`，不需要 Docker daemon 访问镜像仓库。`data/`、`.env`、`.git`、虚拟环境和已有 Engine 镜像、容器全部保留。Engine 变更仍按本项目的构建机部署流程单独发布。日志见 `journalctl -u mdd-sim-gateway-update` 与数据目录下 `update/reload.log`。
 
 “系统设置 → 备份与更新”默认使用“自动”联网：先直连 GitHub，连接失败、超时或被限流时，再按代理库顺序尝试可用条目；检查成功的线路会继续用于更新下载。也可选择“仅直连”或指定一个代理库条目。SOCKS5 条目可直接使用；订阅、具体节点和导入的 outbound 需已分配给一个已启用且就绪的国家出口。代理凭据只保存一份，并只通过主机权限为 `0600` 的配置/临时文件传递，不写入 systemd 命令行或升级状态。
-控制面不依赖浏览器登录，每 6 小时检查一次 Release，并通过已启用的 Webhook、Telegram 或 PushPlus 通道发送一次去重通知。通知策略可选择所有新版本，或仅在主版本/次版本变化时通知；例如后者不会通知 `1.4.1 → 1.4.2`。
+控制面不依赖浏览器登录，每 6 小时检查一次 Release。提示更新模式会通过已启用的 Webhook、Telegram 或 PushPlus 通道发送一次去重通知；选择“仅主版本”时，只处理在 `update-policy.json` 中明确标记为 `main` 的 Release，不从版本号位数推断。
 正式 Release 归档包内含 CI 预构建的 `webui/dist`，一键升级校验整个归档后直接复用，因此不需要在树莓派上下载 Node 镜像或编译前端。GitHub `main` 与其 Release 是唯一支持的更新通道。
 
 也可以随时在主机上手动更新：备份并用受信任来源更新源码后执行：

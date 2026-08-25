@@ -1,5 +1,9 @@
 {
   "schema": 1,
+  "release": {
+    "version": "",
+    "kind": ""
+  },
   "auto_update": {
     "version": "",
     "not_before": ""

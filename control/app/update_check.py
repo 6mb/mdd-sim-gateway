@@ -68,13 +68,16 @@ def validate_update_settings(value: dict | None) -> dict:
         update_mode = "automatic" if legacy is not False else "notify"
         if version_scope is None:
             version_scope = (value.get("notification_mode") or "all") \
-                if update_mode == "notify" else "all" if legacy is True else "feature"
+                if update_mode == "notify" else "all" if legacy is True else "main"
     update_mode = str(update_mode).strip().lower()
-    version_scope = str(version_scope or ("feature" if update_mode == "automatic" else "all")).strip().lower()
+    version_scope = str(version_scope or ("main" if update_mode == "automatic" else "all")) \
+        .strip().lower()
+    if version_scope == "feature":
+        version_scope = "main"
     if update_mode not in {"automatic", "notify"}:
         raise UpdateNetworkError("update mode must be automatic or notify")
-    if version_scope not in {"all", "feature"}:
-        raise UpdateNetworkError("update version scope must be all or feature")
+    if version_scope not in {"all", "main"}:
+        raise UpdateNetworkError("update version scope must be all or main")
     result.update(update_mode=update_mode, version_scope=version_scope)
     return result
 
@@ -295,14 +298,6 @@ def check(force: bool = False) -> dict:
     return dict(result)
 
 
-def is_feature_update(current: str, latest: str) -> bool:
-    """A feature update changes major/minor; the final patch component alone is ignored."""
-    current_parts, latest_parts = _version_tuple(current), _version_tuple(latest)
-    current_feature = (current_parts + (0, 0))[:2]
-    latest_feature = (latest_parts + (0, 0))[:2]
-    return latest_feature > current_feature
-
-
 def _policy_url() -> str:
     override = os.environ.get("MDD_UPDATE_POLICY_URL", "").strip()
     return override or f"https://raw.githubusercontent.com/{repository()}/main/update-policy.json"
@@ -319,12 +314,12 @@ def _policy_time(value: str) -> datetime | None:
 
 
 def auto_update_authorization(info: dict, now: datetime | None = None) -> dict:
-    """Check the independent promotion document for the latest discovered Release.
+    """Read classification and promotion policy for the latest discovered Release.
 
     A GitHub Release alone never authorizes unattended installation. The repository owner
-    promotes it later by changing update-policy.json on main, optionally with a future
-    not_before time. Keeping this lookup separate from ``check`` means a policy outage never
-    hides a release from manual update or notification.
+    classifies it explicitly as main/patch and promotes it later by changing
+    update-policy.json, optionally with a future not_before time. Keeping this lookup separate
+    from ``check`` means a policy outage never hides a release from manual update.
     """
     latest = str(info.get("latest") or "")
     result = {"authorized": False, "version": latest, "reason": "not_promoted"}
@@ -340,13 +335,18 @@ def auto_update_authorization(info: dict, now: datetime | None = None) -> dict:
         result["reason"] = "policy_unavailable"
         return result
     promoted = (policy.get("auto_update") if isinstance(policy, dict) else None) or {}
+    classified = (policy.get("release") if isinstance(policy, dict) else None) or {}
     try:
         schema = int(policy.get("schema") or 0) if isinstance(policy, dict) else 0
     except (TypeError, ValueError):
         schema = 0
-    if not isinstance(promoted, dict) or schema != 1:
+    if not isinstance(promoted, dict) or not isinstance(classified, dict) or schema != 1:
         result["reason"] = "invalid_policy"
         return result
+    if str(classified.get("version") or "").removeprefix("v") == latest:
+        release_kind = str(classified.get("kind") or "").strip().lower()
+        if release_kind in {"main", "patch"}:
+            result["release_kind"] = release_kind
     if str(promoted.get("version") or "").removeprefix("v") != latest:
         return result
     not_before_text = str(promoted.get("not_before") or "")
@@ -394,9 +394,13 @@ def automation_cycle() -> dict:
     updates = validate_update_settings(settings.get("updates"))
     state = _read_automation_state()
     latest = str(info.get("latest") or "")
-    feature_update = is_feature_update(VERSION, latest)
+    policy = None
+    if updates["update_mode"] == "automatic" or updates["version_scope"] == "main":
+        policy = auto_update_authorization(info)
+    in_scope = (updates["version_scope"] == "all"
+                or policy is not None and policy.get("release_kind") == "main")
     should_notify = (updates["update_mode"] == "notify"
-                     and (updates["version_scope"] == "all" or feature_update))
+                     and in_scope)
     if (should_notify and state.get("notified_version") != latest
             and notify_push.has_enabled_channel(settings, notify_push.EV_SOFTWARE_UPDATE)):
         text = f"v{VERSION} → v{latest}\n{info.get('release_url') or ''}".strip()
@@ -406,10 +410,10 @@ def automation_cycle() -> dict:
         _save_automation_state(state)
         result["notified"] = True
     should_auto_update = (updates["update_mode"] == "automatic"
-                          and (updates["version_scope"] == "all" or feature_update))
+                          and in_scope)
     if not should_auto_update or state.get("auto_requested_version") == latest:
         return result
-    authorization = auto_update_authorization(info)
+    authorization = policy or auto_update_authorization(info)
     result["authorization"] = authorization
     if not authorization.get("authorized"):
         return result

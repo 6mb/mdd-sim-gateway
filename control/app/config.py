@@ -154,10 +154,11 @@ DEFAULTS = {
             "proxy_mode": "auto",
             "proxy_profile_id": "",
             # Automatic and notify-only are mutually exclusive. New installations track stable
-            # feature releases automatically; every automatic install still requires an exact
+            # releases explicitly classified as main automatically; every automatic install
+            # still requires an exact
             # promotion in update-policy.json.
             "update_mode": "automatic",
-            "version_scope": "feature",
+            "version_scope": "main",
         },
         # Local lpac (eSIM LPA) integration. Binary is built by `./install.sh build-lpac` into
         # $MDD_DATA/lpac/ (STANDALONE layout). Empty lpac_bin → default path below.
@@ -392,6 +393,8 @@ def load() -> dict:
         raw_updates = data.get("settings", {}).get("updates", {}) or {}
         update_mode = str(raw_updates.get("update_mode") or "").lower()
         version_scope = str(raw_updates.get("version_scope") or "").lower()
+        if version_scope == "feature":
+            version_scope = "main"
         if update_mode not in {"automatic", "notify"}:
             legacy_auto_update = raw_updates.get("auto_update")
             update_mode = "automatic" if legacy_auto_update is True else \
@@ -399,9 +402,11 @@ def load() -> dict:
             if not version_scope:
                 version_scope = str(raw_updates.get("notification_mode") or "all") \
                     if update_mode == "notify" else "all" if legacy_auto_update is True \
-                    else "feature"
-        if version_scope not in {"all", "feature"}:
-            version_scope = "feature" if update_mode == "automatic" else "all"
+                    else "main"
+            if version_scope == "feature":
+                version_scope = "main"
+        if version_scope not in {"all", "main"}:
+            version_scope = "main" if update_mode == "automatic" else "all"
         out["settings"]["updates"] = {
             "proxy_mode": normalized_update_mode,
             "proxy_profile_id": update_profile_id if normalized_update_mode == "library" else "",
