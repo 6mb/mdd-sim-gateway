@@ -4,6 +4,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- Push notifications lead with the product name. A notification arrives out of context — on a
+  lock screen, or in a Telegram list beside a dozen other bots — where "未接来电" alone does
+  not say which machine is talking.
+
 ### Added
 
 - Balance and number keeping, on one page. A carrier reclaims a number that never bills, and

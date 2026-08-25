@@ -128,6 +128,46 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class BrandPrefixTests(unittest.TestCase):
+    """A push arrives out of context — a lock screen, a Telegram list beside other bots — and
+    the event alone does not say which machine is talking."""
+
+    EVENTS = ("incoming_sms", "incoming_call", "missed_call", "voicemail_received",
+              "host_alert", "number_changed", "line_unrecoverable", "keepalive_result",
+              "balance_low", "software_update")
+
+    def _payload(self, event):
+        return notify_push.build_payload(
+            event, {"id": "1", "name": "UK SIM", "msisdn": "+447700900123"},
+            "+447700900321", "detail")
+
+    def test_every_title_leads_with_the_brand(self):
+        for event in self.EVENTS:
+            title = notify_push.build_notification_message(self._payload(event))["title"]
+            self.assertTrue(title.startswith(notify_push.BRAND), f"{event}: {title}")
+
+    def test_every_telegram_message_leads_with_the_brand(self):
+        for event in self.EVENTS:
+            first = notify_push._telegram_text(self._payload(event)).splitlines()[0]
+            self.assertIn(notify_push.BRAND, first, f"{event}: {first}")
+
+    def test_the_brand_is_not_repeated_when_the_text_already_carries_it(self):
+        # The software-update wording names the product, so a blind prefix would read
+        # "MDD · MDD Sim Gateway 新版本".
+        title = notify_push.build_notification_message(
+            self._payload("software_update"))["title"]
+        self.assertEqual(title.count(notify_push.BRAND), 1, title)
+        first = notify_push._telegram_text(
+            self._payload("software_update")).splitlines()[0]
+        self.assertEqual(first.count(notify_push.BRAND), 1, first)
+
+    def test_the_icon_stays_leftmost_in_telegram(self):
+        # It is what makes the event type scannable in a chat list.
+        first = notify_push._telegram_text(self._payload("missed_call")).splitlines()[0]
+        self.assertFalse(first.startswith(notify_push.BRAND), first)
+        self.assertLess(first.index("📵"), first.index(notify_push.BRAND))
+
+
 class HostAlertNotificationTests(unittest.TestCase):
     """The host alert is not a SIM event. Rendering it through the call/SMS path produced
     "📞 Incoming call — SIM: Raspberry Pi 3 Model B, From: Raspberry Pi 3 Model B"."""

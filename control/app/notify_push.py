@@ -193,6 +193,18 @@ def build_payload(event: str, instance: dict, source: str, text: str | None) -> 
     }
 
 
+# Every notification leads with this. A push arrives out of context — on a lock screen, in a
+# Telegram list beside a dozen other bots — and "未接来电" alone does not say which machine is
+# talking. Kept short because notification titles are truncated aggressively.
+BRAND = "MDD"
+
+
+def _titled(text: str) -> str:
+    """Prefix once. The software-update title already carries the product name, so a blind
+    prefix would render it as "MDD · MDD Sim Gateway …"."""
+    return text if text.startswith(BRAND) else f"{BRAND} · {text}"
+
+
 def build_notification_message(payload: dict) -> dict:
     """Build the human-readable title/content shared by templates and vendor channels."""
     event = payload.get("event")
@@ -201,28 +213,28 @@ def build_notification_message(payload: dict) -> dict:
     sender = payload.get("from") or "unknown"
     if event == EV_HOST_ALERT:
         # Not about one SIM: the box is degraded and every line is affected at once.
-        return {"title": f"网关主机异常 · {sender}",
+        return {"title": _titled(f"网关主机异常 · {sender}"),
                 "content": payload.get("text") or ""}
     if event == EV_NUMBER_CHANGED:
-        return {"title": f"线路号码已变更 · {sim}", "content": payload.get("text") or ""}
+        return {"title": _titled(f"线路号码已变更 · {sim}"), "content": payload.get("text") or ""}
     if event == EV_LINE_UNRECOVERABLE:
-        return {"title": f"线路无法自动恢复 · {sim}", "content": payload.get("text") or ""}
+        return {"title": _titled(f"线路无法自动恢复 · {sim}"), "content": payload.get("text") or ""}
     if event == EV_KEEPALIVE_RESULT:
-        return {"title": f"保号执行结果 · {sim}", "content": payload.get("text") or ""}
+        return {"title": _titled(f"保号执行结果 · {sim}"), "content": payload.get("text") or ""}
     if event == EV_BALANCE_LOW:
-        return {"title": f"余额不足 · {sim}", "content": payload.get("text") or ""}
+        return {"title": _titled(f"余额不足 · {sim}"), "content": payload.get("text") or ""}
     if event == EV_VOICEMAIL:
-        return {"title": f"新留言 · {sim}", "content": payload.get("text") or ""}
+        return {"title": _titled(f"新留言 · {sim}"), "content": payload.get("text") or ""}
     if event == EV_MISSED_CALL:
         lines = [f"SIM: {sim}"]
         if own:
             lines.append(f"本机号码: {own}")
         lines.append(f"来源号码: {sender}")
-        return {"title": f"未接来电 · {sim}", "content": "\n".join(lines)}
+        return {"title": _titled(f"未接来电 · {sim}"), "content": "\n".join(lines)}
     if event == EV_SOFTWARE_UPDATE:
-        return {"title": f"MDD Sim Gateway 新版本 · v{sender}",
+        return {"title": _titled(f"MDD Sim Gateway 新版本 · v{sender}"),
                 "content": payload.get("text") or ""}
-    title = f"VoWiFi {'短信' if event == EV_INCOMING_SMS else '来电'} · {sim}"
+    title = _titled(f"VoWiFi {'短信' if event == EV_INCOMING_SMS else '来电'} · {sim}")
     lines = [f"SIM: {sim}"]
     if own:
         lines.append(f"本机号码: {own}")
@@ -357,39 +369,48 @@ def send_pushplus(cfg: dict, payload: dict) -> dict:
     return {"ok": True, "status_code": response.status_code}
 
 
+def _telegram_headline(icon: str, text: str) -> str:
+    """Telegram's own first line. The icon stays leftmost — it is what makes the event type
+    scannable in a chat list — and the brand follows it, for the same reason the titles carry
+    one: a bot's messages arrive with no other indication of which machine sent them."""
+    text = text.removeprefix(f"{BRAND} ").removeprefix(f"{BRAND} · ")
+    return f"{icon} {BRAND} · {text}" if icon else f"{BRAND} · {text}"
+
+
 def _telegram_text(payload: dict) -> str:
     ev = payload.get("event")
     if ev == EV_LINE_UNRECOVERABLE:
-        return "\n".join([f"🛑 线路无法自动恢复 · {payload.get('sim_name') or payload.get('instance')}",
+        return "\n".join([_telegram_headline("🛑", f"线路无法自动恢复 · {payload.get('sim_name') or payload.get('instance')}"),
                            "", payload.get("text") or ""])
     if ev == EV_NUMBER_CHANGED:
-        return "\n".join([f"🔄 线路号码已变更 · {payload.get('sim_name') or payload.get('instance')}",
+        return "\n".join([_telegram_headline("🔄", f"线路号码已变更 · {payload.get('sim_name') or payload.get('instance')}"),
                            "", payload.get("text") or ""])
     if ev == EV_HOST_ALERT:
         # Not a SIM event: the box itself is degraded, so the SIM/From lines would be
         # meaningless (a previous version rendered this as an incoming call from the
         # hardware model).
-        return "\n".join(["⚠️ 网关主机异常", str(payload.get("from") or ""), "",
+        return "\n".join([_telegram_headline("⚠️", "网关主机异常"), str(payload.get("from") or ""), "",
                           payload.get("text") or ""])
     if ev == EV_KEEPALIVE_RESULT:
-        return "\n".join([f"◷ 保号执行结果 · {payload.get('sim_name') or payload.get('instance')}",
+        return "\n".join([_telegram_headline("◷", f"保号执行结果 · {payload.get('sim_name') or payload.get('instance')}"),
                            "", payload.get("text") or ""])
     if ev == EV_BALANCE_LOW:
-        return "\n".join([f"⚠️ 余额不足 · {payload.get('sim_name') or payload.get('instance')}",
+        return "\n".join([_telegram_headline("⚠️", f"余额不足 · {payload.get('sim_name') or payload.get('instance')}"),
                            "", payload.get("text") or ""])
     if ev == EV_VOICEMAIL:
-        return "\n".join([f"🎙 新留言 · {payload.get('sim_name') or payload.get('instance')}",
+        return "\n".join([_telegram_headline("🎙", f"新留言 · {payload.get('sim_name') or payload.get('instance')}"),
                            "", payload.get("text") or ""])
     if ev == EV_MISSED_CALL:
         name = payload.get("sim_name") or payload.get("iccid") or payload.get("instance")
         msisdn = payload.get("msisdn")
-        return "\n".join(["📵 Missed call",
+        return "\n".join([_telegram_headline("📵", "Missed call"),
                           f"SIM: {name}" + (f" ({msisdn})" if msisdn else ""),
                           f"From: {payload.get('from') or 'unknown'}"])
     if ev == EV_SOFTWARE_UPDATE:
-        return "\n".join([f"🆕 MDD Sim Gateway 新版本 · v{payload.get('from') or ''}",
+        return "\n".join([_telegram_headline("🆕", f"Sim Gateway 新版本 · v{payload.get('from') or ''}"),
                            "", payload.get("text") or ""])
-    head = "📩 Incoming SMS" if ev == EV_INCOMING_SMS else "📞 Incoming call"
+    head = _telegram_headline("📩" if ev == EV_INCOMING_SMS else "📞",
+                              "Incoming SMS" if ev == EV_INCOMING_SMS else "Incoming call")
     name = payload.get("sim_name") or payload.get("iccid") or payload.get("instance")
     msisdn = payload.get("msisdn")
     sim_line = f"SIM: {name}" + (f" ({msisdn})" if msisdn else "")
