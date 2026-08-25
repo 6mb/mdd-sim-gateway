@@ -108,7 +108,7 @@ sudo ./install.sh build-lpac
 sudo ./install.sh uninstall
 ```
 
-完整说明见 [安装与升级](docs/INSTALL.md)，系统边界见 [架构说明](docs/ARCHITECTURE.md)，问题排查见 [故障排查](docs/TROUBLESHOOTING.md)。
+完整说明见 [安装与升级](docs/INSTALL.md)，系统边界见 [架构说明](docs/ARCHITECTURE.md)，问题排查见 [故障排查](docs/TROUBLESHOOTING.md)。参与开发前请先读 [开发与协作规范](docs/DEVELOPMENT.md)。
 
 ## 使用边界
 
