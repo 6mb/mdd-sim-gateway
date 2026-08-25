@@ -4,6 +4,21 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Voicemail. An incoming call nobody answers — which, for a SIM kept at home, usually means
+  no browser was open — now records the caller's message instead of ringing out into nothing.
+  Recordings play from the call log beside the call they belong to, and stay on the gateway:
+  they are never attached to a notification and never collected into a support bundle. Off by
+  default, with a per-line override, because recording a caller is the operator's decision
+  rather than something the product should assume. A call declined on the softphone is never
+  recorded.
+
+- Missed calls are announced. Until now the only call notification fired while the phone was
+  still ringing, which is the moment least useful to someone who is not at the browser. A
+  message left after the call replaces that notification rather than adding to it, so one
+  unanswered call cannot buzz a phone twice.
+
 ## [1.4.1] - 2026-08-22
 
 ### Fixed

@@ -55,6 +55,14 @@ EV_NUMBER_CHANGED = "number_changed"
 EV_LINE_UNRECOVERABLE = "line_unrecoverable"
 # A manually tracked SIM activation is approaching its carrier-reported expiry date.
 EV_ACTIVATION_REMINDER = "activation_reminder"
+# An inbound call that nobody answered. Separate from EV_INCOMING_CALL because that one fires
+# when the phone starts ringing (and is useful only while a browser is open to answer it),
+# whereas this one is the outcome — the notification that matters when nobody was there.
+# A call the user actively declined is NOT a missed call and never raises this.
+EV_MISSED_CALL = "missed_call"
+# Somebody left a message. Announced separately from the missed call itself because the
+# action it invites is different: there is now something to listen to.
+EV_VOICEMAIL = "voicemail_received"
 
 _TIMEOUT = 8  # seconds; keep short so a dead endpoint never piles up threads
 _TOKEN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
@@ -147,6 +155,8 @@ def _events_enabled(chan: dict) -> dict:
         EV_NUMBER_CHANGED: ev.get(EV_NUMBER_CHANGED, True),
         EV_LINE_UNRECOVERABLE: ev.get(EV_LINE_UNRECOVERABLE, True),
         EV_ACTIVATION_REMINDER: ev.get(EV_ACTIVATION_REMINDER, True),
+        EV_MISSED_CALL: ev.get(EV_MISSED_CALL, True),
+        EV_VOICEMAIL: ev.get(EV_VOICEMAIL, True),
     }
 
 
@@ -168,7 +178,8 @@ def build_payload(event: str, instance: dict, source: str, text: str | None) -> 
         "msisdn": instance.get("msisdn", "") or "",       # the line's own number (may be "")
         "from": source or "",                             # the event's source number
         "text": text if event in (EV_INCOMING_SMS, EV_HOST_ALERT, EV_NUMBER_CHANGED,
-                                  EV_LINE_UNRECOVERABLE, EV_ACTIVATION_REMINDER) else None,
+                                  EV_LINE_UNRECOVERABLE, EV_ACTIVATION_REMINDER,
+                                  EV_VOICEMAIL) else None,
     }
 
 
@@ -188,6 +199,14 @@ def build_notification_message(payload: dict) -> dict:
         return {"title": f"线路无法自动恢复 · {sim}", "content": payload.get("text") or ""}
     if event == EV_ACTIVATION_REMINDER:
         return {"title": f"SIM 即将到期 · {sim}", "content": payload.get("text") or ""}
+    if event == EV_VOICEMAIL:
+        return {"title": f"新留言 · {sim}", "content": payload.get("text") or ""}
+    if event == EV_MISSED_CALL:
+        lines = [f"SIM: {sim}"]
+        if own:
+            lines.append(f"本机号码: {own}")
+        lines.append(f"来源号码: {sender}")
+        return {"title": f"未接来电 · {sim}", "content": "\n".join(lines)}
     title = f"VoWiFi {'短信' if event == EV_INCOMING_SMS else '来电'} · {sim}"
     lines = [f"SIM: {sim}"]
     if own:
@@ -340,6 +359,15 @@ def _telegram_text(payload: dict) -> str:
     if ev == EV_ACTIVATION_REMINDER:
         return "\n".join([f"⏰ SIM 即将到期 · {payload.get('sim_name') or payload.get('instance')}",
                            "", payload.get("text") or ""])
+    if ev == EV_VOICEMAIL:
+        return "\n".join([f"🎙 新留言 · {payload.get('sim_name') or payload.get('instance')}",
+                           "", payload.get("text") or ""])
+    if ev == EV_MISSED_CALL:
+        name = payload.get("sim_name") or payload.get("iccid") or payload.get("instance")
+        msisdn = payload.get("msisdn")
+        return "\n".join(["📵 Missed call",
+                          f"SIM: {name}" + (f" ({msisdn})" if msisdn else ""),
+                          f"From: {payload.get('from') or 'unknown'}"])
     head = "📩 Incoming SMS" if ev == EV_INCOMING_SMS else "📞 Incoming call"
     name = payload.get("sim_name") or payload.get("iccid") or payload.get("instance")
     msisdn = payload.get("msisdn")
