@@ -41,6 +41,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   does not authorize unattended installation: the exact latest version and its earliest rollout
   time must also be approved in `update-policy.json`, allowing a release to soak before rollout.
 
+### Changed
+
+- The Engine image now builds Asterisk, pjproject and pcsc-lite in a disposable build stage and
+  copies only their runtime closure into the image sent to the gateway. The ARM64 image is about
+  1.04 GB unpacked instead of 3.22 GB, while retaining the same 334 Asterisk module files; this
+  materially reduces release downloads and Raspberry Pi system-disk use without narrowing the
+  supported codec or module surface.
+
 ### Removed
 
 - The 3/2/1-day activation reminder. Number keeping covers what it was for: a plan SIM now

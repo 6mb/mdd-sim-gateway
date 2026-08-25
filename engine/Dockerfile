@@ -9,7 +9,7 @@
 # Reproducibility: source inputs and the multi-architecture base manifest are pinned. Fedora
 # packages still resolve from the supported Fedora 44 repositories at build time, so every
 # release workflow performs a clean image build instead of claiming byte-for-byte reproducibility.
-FROM fedora:44@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898
+FROM fedora:44@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898 AS build
 
 # pcsc-lite is pinned to a fixed upstream version and built from source (see below), so the
 # engine's PC/SC client library matches the host pcscd EXACTLY across any distro — this is the
@@ -105,6 +105,69 @@ RUN python3 -m pip install --no-cache-dir panoramisk==1.4
 # include a software Milenage implementation or accept Ki/OP/OPc.
 RUN python3 -m pip install --no-cache-dir pyserial==3.5 pycryptodome==3.23.0 cryptography==50.0.0 \
     "git+https://github.com/mitshell/card.git@790a8fb0b8fbc0b06f568feba51aeef28352145e"
+
+# Derive the Fedora runtime package closure from the binary we just built and every Asterisk
+# module we ship. This keeps all codecs and optional modules loadable without carrying compilers,
+# headers or source trees into the final image. Packages needed by the Python tunnel and its shell
+# supervisor are explicit because they are not visible to ldd.
+RUN set -eu; \
+    { \
+      printf '%s\n' \
+        bash coreutils grep hostname iproute net-tools procps-ng \
+        tcpdump bind-utils iputils ca-certificates \
+        python3 python3-jinja2 python3-pyscard python3-pysocks python3-requests; \
+      { printf '%s\n' /usr/sbin/asterisk; find /usr/lib/asterisk/modules -type f -name '*.so'; } | \
+        while IFS= read -r binary; do \
+          ldd "$binary" 2>/dev/null || true; \
+        done | \
+        sed -n \
+          -e 's/^[[:space:]]*[^[:space:]]* => \([^[:space:]]*\).*/\1/p' \
+          -e 's/^[[:space:]]*\(\/[^[:space:]]*\) (.*/\1/p' | \
+        sort -u | \
+        while IFS= read -r library; do \
+          if package=$(rpm -qf --qf '%{NAME}' "$library" 2>/dev/null); then \
+            printf '%s\n' "$package"; \
+          fi; \
+        done; \
+    } | sort -u > /runtime-packages.txt
+
+FROM fedora:44@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898 AS runtime
+
+COPY --from=build /runtime-packages.txt /tmp/runtime-packages.txt
+RUN dnf -y --refresh --setopt=fastestmirror=True --setopt=max_parallel_downloads=20 \
+    --setopt=timeout=30 --setopt=minrate=50k --setopt=retries=3 upgrade && \
+    dnf -y --setopt=fastestmirror=True --setopt=max_parallel_downloads=20 \
+    --setopt=timeout=30 --setopt=minrate=50k --setopt=retries=3 \
+    --setopt=install_weak_deps=False install $(cat /tmp/runtime-packages.txt) && \
+    dnf clean all && rm -rf /var/cache/dnf /tmp/runtime-packages.txt
+
+# Asterisk and its bundled pjproject are built outside Fedora's RPM database. Copy only their
+# installed runtime trees. The pinned pcsc-lite client overwrites Fedora's client library so it
+# continues to match the host pcscd protocol exactly.
+COPY --from=build /usr/sbin/asterisk /usr/sbin/asterisk
+COPY --from=build /usr/lib/asterisk/ /usr/lib/asterisk/
+COPY --from=build /usr/lib/libasteriskpj.so /usr/lib/libasteriskpj.so
+COPY --from=build /usr/lib/libasteriskpj.so.2 /usr/lib/libasteriskpj.so.2
+COPY --from=build /usr/lib/libasteriskssl.so /usr/lib/libasteriskssl.so
+COPY --from=build /usr/lib/libasteriskssl.so.1 /usr/lib/libasteriskssl.so.1
+COPY --from=build /var/lib/asterisk/ /var/lib/asterisk/
+COPY --from=build /usr/lib64/libpcsclite.so /usr/lib64/libpcsclite.so
+COPY --from=build /usr/lib64/libpcsclite.so.1 /usr/lib64/libpcsclite.so.1
+COPY --from=build /usr/lib64/libpcsclite_real.so /usr/lib64/libpcsclite_real.so
+COPY --from=build /usr/lib64/libpcsclite_real.so.1 /usr/lib64/libpcsclite_real.so.1
+COPY --from=build /usr/local/ /usr/local/
+RUN mkdir -p /var/cache/asterisk /var/log/asterisk /var/spool/asterisk && ldconfig && \
+    missing=0; \
+    for binary in /usr/sbin/asterisk /usr/lib/asterisk/modules/*.so; do \
+      if ldd "$binary" 2>/dev/null | grep -q 'not found'; then \
+        echo "missing runtime dependency: $binary" >&2; \
+        ldd "$binary" >&2; \
+        missing=1; \
+      fi; \
+    done; \
+    [ "$missing" = 0 ] && \
+    python3 -c 'import Crypto, cryptography, jinja2, panoramisk, requests, serial, smartcard, socks, card' && \
+    asterisk -V
 
 # our scripts + templates
 COPY pin_keeper.py   /usr/local/bin/pin_keeper.py
