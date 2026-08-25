@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import requests
@@ -29,6 +30,7 @@ _STARS_CACHE_SECONDS = 15 * 60
 # v1.3.12 published no heartbeat at all during downloads and service reloads.
 _APPLY_STALE_SECONDS = 15 * 60
 _APPLY_ABANDONED_SECONDS = 6 * 3600
+_AUTOMATION_STATE_FILE = "automation-state.json"
 
 
 class UpdateNetworkError(RuntimeError):
@@ -49,6 +51,20 @@ def validate_network_settings(value: dict | None) -> dict:
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", profile_id):
             raise UpdateNetworkError("select a proxy from the proxy library for software updates")
         result["proxy_profile_id"] = profile_id
+    return result
+
+
+def validate_update_settings(value: dict | None) -> dict:
+    """Validate the complete update preference document saved from System Settings."""
+    value = value or {}
+    result = validate_network_settings(value)
+    notification_mode = str(value.get("notification_mode") or "all").strip().lower()
+    if notification_mode not in {"all", "feature"}:
+        raise UpdateNetworkError("update notification mode must be all or feature")
+    auto_update = value.get("auto_update", False)
+    if not isinstance(auto_update, bool):
+        raise UpdateNetworkError("automatic update setting must be boolean")
+    result.update(notification_mode=notification_mode, auto_update=auto_update)
     return result
 
 
@@ -268,6 +284,130 @@ def check(force: bool = False) -> dict:
     return dict(result)
 
 
+def is_feature_update(current: str, latest: str) -> bool:
+    """A feature update changes major/minor; the final patch component alone is ignored."""
+    current_parts, latest_parts = _version_tuple(current), _version_tuple(latest)
+    current_feature = (current_parts + (0, 0))[:2]
+    latest_feature = (latest_parts + (0, 0))[:2]
+    return latest_feature > current_feature
+
+
+def _policy_url() -> str:
+    override = os.environ.get("MDD_UPDATE_POLICY_URL", "").strip()
+    return override or f"https://raw.githubusercontent.com/{repository()}/main/update-policy.json"
+
+
+def _policy_time(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def auto_update_authorization(info: dict, now: datetime | None = None) -> dict:
+    """Check the independent promotion document for the latest discovered Release.
+
+    A GitHub Release alone never authorizes unattended installation. The repository owner
+    promotes it later by changing update-policy.json on main, optionally with a future
+    not_before time. Keeping this lookup separate from ``check`` means a policy outage never
+    hides a release from manual update or notification.
+    """
+    latest = str(info.get("latest") or "")
+    result = {"authorized": False, "version": latest, "reason": "not_promoted"}
+    if not info.get("update_available") or not latest:
+        result["reason"] = "not_available"
+        return result
+    selection = info.get("network") or _network_selection()
+    try:
+        response = _session(selection).get(_policy_url(), headers=_github_headers(), timeout=12)
+        response.raise_for_status()
+        policy = response.json()
+    except (requests.RequestException, UpdateNetworkError, OSError, ValueError, TypeError):
+        result["reason"] = "policy_unavailable"
+        return result
+    promoted = (policy.get("auto_update") if isinstance(policy, dict) else None) or {}
+    try:
+        schema = int(policy.get("schema") or 0) if isinstance(policy, dict) else 0
+    except (TypeError, ValueError):
+        schema = 0
+    if not isinstance(promoted, dict) or schema != 1:
+        result["reason"] = "invalid_policy"
+        return result
+    if str(promoted.get("version") or "").removeprefix("v") != latest:
+        return result
+    not_before_text = str(promoted.get("not_before") or "")
+    not_before = _policy_time(not_before_text)
+    if not not_before:
+        result["reason"] = "invalid_policy"
+        return result
+    current_time = now or datetime.now(timezone.utc)
+    result.update(not_before=not_before.isoformat().replace("+00:00", "Z"))
+    if current_time.astimezone(timezone.utc) < not_before:
+        result["reason"] = "waiting"
+        return result
+    result.update(authorized=True, reason="promoted")
+    return result
+
+
+def _automation_state_path() -> str:
+    from . import config as cfg
+    return os.path.join(cfg.DATA_DIR, "update", _AUTOMATION_STATE_FILE)
+
+
+def _read_automation_state() -> dict:
+    try:
+        with open(_automation_state_path(), encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_automation_state(value: dict) -> None:
+    _write_private_json(_automation_state_path(), value)
+
+
+def automation_cycle() -> dict:
+    """Run one background release check, notification and gated auto-update decision."""
+    from . import config as cfg, notify_push
+
+    info = check(True)
+    result = {"checked": True, "release": info, "notified": False,
+              "auto_update_requested": False}
+    if not info.get("update_available"):
+        return result
+    settings = cfg.get_settings()
+    updates = validate_update_settings(settings.get("updates"))
+    state = _read_automation_state()
+    latest = str(info.get("latest") or "")
+    should_notify = updates["notification_mode"] == "all" or is_feature_update(VERSION, latest)
+    if (should_notify and state.get("notified_version") != latest
+            and notify_push.has_enabled_channel(settings, notify_push.EV_SOFTWARE_UPDATE)):
+        text = f"v{VERSION} → v{latest}\n{info.get('release_url') or ''}".strip()
+        notify_push.dispatch(settings, notify_push.EV_SOFTWARE_UPDATE, {}, latest, text)
+        state["notified_version"] = latest
+        state["notified_at"] = int(time.time())
+        _save_automation_state(state)
+        result["notified"] = True
+    if not updates["auto_update"] or state.get("auto_requested_version") == latest:
+        return result
+    authorization = auto_update_authorization(info)
+    result["authorization"] = authorization
+    if not authorization.get("authorized"):
+        return result
+    applied = request_apply(info=info)
+    result["apply"] = applied
+    if applied.get("ok"):
+        state["auto_requested_version"] = latest
+        state["auto_requested_at"] = int(time.time())
+        _save_automation_state(state)
+        result["auto_update_requested"] = True
+    return result
+
+
 def _apply_paths() -> tuple[str, str]:
     from . import config as cfg
     root = os.path.join(cfg.DATA_DIR, "orchestrator")
@@ -339,13 +479,13 @@ def cancel_apply() -> dict:
     return {"ok": True}
 
 
-def request_apply() -> dict:
+def request_apply(info: dict | None = None) -> dict:
     """Publish a one-click update request for the host orchestrator."""
     status = apply_status()
     if status.get("state") == "running" and not status.get("stale"):
         return {"ok": False, "error": "An update is already in progress",
                 "error_code": "update.error.in_progress", "status": status}
-    info = check(True)
+    info = dict(info) if info is not None else check(True)
     if not info.get("update_available"):
         return {"ok": False, "error": info.get("error") or "No update is available",
                 "error_code": info.get("error_code") or "update.error.not_available"}

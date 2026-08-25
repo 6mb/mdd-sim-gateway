@@ -41,5 +41,6 @@
   发布后必须用 `gh release edit vX.Y.Z --notes-file <文件>` 替换。每条按
   「症状 → 原因 → 现在的行为」写一到三句：使用者据此判断该不该升级，而提交标题做不到这件事。
   若本版未重建引擎镜像，在结尾注明，免得对方做多余的构建。
+- 发布 Release 后保持 `update-policy.json` 不变，先完成观察和实机验证。只有决定向已主动开启自动更新的设备推送时，才另行提交目标版本和 UTC `not_before`；二者必须与当前最新正式 Release 完全一致。发现回归时清空许可即可阻止尚未开始的设备自动安装。
 - ARM64 交叉构建时，WebUI 阶段必须保持在 Docker `BUILDPLATFORM` 原生架构；前端产物是
   与架构无关的静态文件，不得在 GitHub x86 Runner 的 ARM64 QEMU 中执行 `npm ci`。

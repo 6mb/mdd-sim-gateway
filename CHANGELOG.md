@@ -32,6 +32,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   message left after the call replaces that notification rather than adding to it, so one
   unanswered call cannot buzz a phone twice.
 
+- The control plane now checks releases in the background even when nobody is signed in and
+  can send a deduplicated new-version notice through the configured Webhook, Telegram and
+  PushPlus channels. Administrators can announce every release or only major/minor feature
+  updates, ignoring a patch-only change to the final version component.
+
+- Automatic updates are opt-in and use a separate promotion gate. Publishing a GitHub Release
+  does not authorize unattended installation: the exact latest version and its earliest rollout
+  time must also be approved in `update-policy.json`, allowing a release to soak before rollout.
+
 ### Removed
 
 - The 3/2/1-day activation reminder. Number keeping covers what it was for: a plan SIM now

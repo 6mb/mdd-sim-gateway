@@ -113,7 +113,8 @@ DEFAULTS = {
             "verify_tls": True,
             "events": {"incoming_sms": True, "incoming_call": True,
                        "missed_call": True, "voicemail_received": True,
-                       "keepalive_result": True, "balance_low": True},
+                       "keepalive_result": True, "balance_low": True,
+                       "software_update": True},
         },
         "telegram": {
             "enabled": False,
@@ -124,7 +125,8 @@ DEFAULTS = {
             "proxy_country": "",
             "events": {"incoming_sms": True, "incoming_call": True,
                        "missed_call": True, "voicemail_received": True,
-                       "keepalive_result": True, "balance_low": True},
+                       "keepalive_result": True, "balance_low": True,
+                       "software_update": True},
         },
         "pushplus": {
             "enabled": False,
@@ -134,7 +136,8 @@ DEFAULTS = {
             "channel": "wechat",
             "events": {"incoming_sms": True, "incoming_call": True,
                        "missed_call": True, "voicemail_received": True,
-                       "keepalive_result": True, "balance_low": True},
+                       "keepalive_result": True, "balance_low": True,
+                       "software_update": True},
         },
         "security": {
             "https_only": True,
@@ -150,6 +153,12 @@ DEFAULTS = {
         "updates": {
             "proxy_mode": "auto",
             "proxy_profile_id": "",
+            # Push an update notice through the already-enabled notification channels.
+            # "all" includes patch releases; "feature" only announces a major/minor bump.
+            "notification_mode": "all",
+            # Publishing a Release is deliberately insufficient to trigger installation.
+            # The release must also be promoted in update-policy.json.
+            "auto_update": False,
         },
         # Local lpac (eSIM LPA) integration. Binary is built by `./install.sh build-lpac` into
         # $MDD_DATA/lpac/ (STANDALONE layout). Empty lpac_bin → default path below.
@@ -378,9 +387,14 @@ def load() -> dict:
             update_profile_id = str(updates["proxy_profile_id"])
         normalized_update_mode = "library" if update_mode == "library" and update_profile_id \
             else (update_mode if update_mode in {"auto", "direct"} else "auto")
+        notification_mode = str(updates.get("notification_mode") or "all").lower()
+        if notification_mode not in {"all", "feature"}:
+            notification_mode = "all"
         out["settings"]["updates"] = {
             "proxy_mode": normalized_update_mode,
             "proxy_profile_id": update_profile_id if normalized_update_mode == "library" else "",
+            "notification_mode": notification_mode,
+            "auto_update": updates.get("auto_update") is True,
         }
         # Asterisk debug includes complete SIP messages and IMS identities.  Older manual
         # provisioning forms accidentally enabled it by default, so normalize every loaded

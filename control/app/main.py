@@ -81,6 +81,7 @@ LINE_HISTORY_PRUNE_INTERVAL_SECONDS = 3600
 # Comfortably below store.LINE_STATE_CONTINUITY_SECONDS, so throttled writes still read back
 # as one uninterrupted observation.
 LINE_STATE_WRITE_INTERVAL_SECONDS = 30
+UPDATE_CHECK_INTERVAL_SECONDS = float(os.environ.get("MDD_UPDATE_CHECK_INTERVAL", "21600"))
 _line_state_written: dict[str, tuple[str, float]] = {}
 _line_registered_written: dict[str, float] = {}   # per-line throttle for the durable
                                                  # "last registered" stamp
@@ -2175,6 +2176,22 @@ def apply_health(iid, inst, st, container_id: str | None = None):
     return st
 
 
+async def update_automation_poller():
+    """Check releases without requiring a browser login.
+
+    Notification delivery and the promotion-gated auto-update decision are blocking network/
+    filesystem work, so keep them off the API event loop. A short startup delay lets the host
+    finish restoring routes after boot; later checks use the same six-hour cadence as the UI.
+    """
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await asyncio.to_thread(update_check.automation_cycle)
+        except Exception as exc:  # noqa: a failed poll must never take the control plane down
+            log.warning("background update check failed: %s", type(exc).__name__)
+        await asyncio.sleep(max(300, UPDATE_CHECK_INTERVAL_SECONDS))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     store.init()
@@ -2213,6 +2230,7 @@ async def lifespan(app: FastAPI):
     sms_poller = asyncio.create_task(cellular_sms_poller())
     host_poller = asyncio.create_task(host_health_poller())
     segment_reaper = asyncio.create_task(sms_segment_reaper())
+    update_poller = asyncio.create_task(update_automation_poller())
     for iid in recovered_modem_lines:
         asyncio.create_task(_auto_start_hotplugged_line(iid))
     yield
@@ -2221,10 +2239,11 @@ async def lifespan(app: FastAPI):
     sms_poller.cancel()
     host_poller.cancel()
     segment_reaper.cancel()
+    update_poller.cancel()
     # Reap the cancelled tasks (the monitor may be parked in a to_thread wait for up to
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
     await asyncio.gather(poller, monitor, sms_poller, host_poller,
-                         segment_reaper, return_exceptions=True)
+                         segment_reaper, update_poller, return_exceptions=True)
     await hub.runtime.close()
     for c in hub.ami.values():
         await c.close()
@@ -3905,7 +3924,7 @@ def api_put_settings(body: dict):
             raise HTTPException(400, "unsupported PushPlus template")
     if "updates" in body:
         try:
-            body["updates"] = update_check.validate_network_settings(body.get("updates"))
+            body["updates"] = update_check.validate_update_settings(body.get("updates"))
         except update_check.UpdateNetworkError as exc:
             raise HTTPException(400, str(exc)) from exc
         if body["updates"]["proxy_mode"] == "library":

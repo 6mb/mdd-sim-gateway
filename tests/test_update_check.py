@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -48,6 +49,11 @@ class UpdateCheckTests(unittest.TestCase):
     def test_semantic_comparison(self):
         self.assertGreater(update_check._version_tuple("v1.10.0"), update_check._version_tuple("1.9.9"))
 
+    def test_feature_update_ignores_only_the_final_component(self):
+        self.assertFalse(update_check.is_feature_update("1.4.1", "1.4.2"))
+        self.assertTrue(update_check.is_feature_update("1.4.9", "1.5.0"))
+        self.assertTrue(update_check.is_feature_update("1.9.9", "2.0.0"))
+
     def test_update_network_defaults_to_auto_and_requires_a_library_entry(self):
         self.assertEqual(update_check.validate_network_settings(None)["proxy_mode"], "auto")
         with self.assertRaises(update_check.UpdateNetworkError):
@@ -55,6 +61,44 @@ class UpdateCheckTests(unittest.TestCase):
                                                      "proxy_profile_id": ""})
         self.assertEqual(update_check.validate_network_settings({
             "proxy_mode": "country", "proxy_country": "us"})["proxy_mode"], "auto")
+
+    def test_complete_update_settings_default_to_notifications_and_no_auto_update(self):
+        self.assertEqual(update_check.validate_update_settings(None), {
+            "proxy_mode": "auto", "proxy_profile_id": "",
+            "notification_mode": "all", "auto_update": False,
+        })
+        with self.assertRaises(update_check.UpdateNetworkError):
+            update_check.validate_update_settings({"notification_mode": "sometimes"})
+
+    def test_auto_update_requires_separate_matching_promotion(self):
+        info = {"update_available": True, "latest": "1.5.0",
+                "network": {"proxy_mode": "direct", "proxy_profile_id": ""}}
+        session = MagicMock()
+        session.get.return_value = _Response({
+            "schema": 1,
+            "auto_update": {"version": "1.5.0", "not_before": "2026-09-01T00:00:00Z"},
+        })
+        with patch.object(update_check, "_session", return_value=session):
+            early = update_check.auto_update_authorization(
+                info, datetime(2026, 8, 31, tzinfo=timezone.utc))
+            ready = update_check.auto_update_authorization(
+                info, datetime(2026, 9, 2, tzinfo=timezone.utc))
+        self.assertFalse(early["authorized"])
+        self.assertEqual(early["reason"], "waiting")
+        self.assertTrue(ready["authorized"])
+
+    def test_unpromoted_release_cannot_auto_update(self):
+        info = {"update_available": True, "latest": "1.5.0",
+                "network": {"proxy_mode": "direct", "proxy_profile_id": ""}}
+        session = MagicMock()
+        session.get.return_value = _Response({
+            "schema": 1,
+            "auto_update": {"version": "1.4.9", "not_before": "2026-01-01T00:00:00Z"},
+        })
+        with patch.object(update_check, "_session", return_value=session):
+            result = update_check.auto_update_authorization(info)
+        self.assertFalse(result["authorized"])
+        self.assertEqual(result["reason"], "not_promoted")
 
     def test_repository_can_be_overridden_without_changing_the_ui(self):
         self.assertEqual(update_check.repository(), "MddIdd/mdd-sim-gateway")
@@ -138,6 +182,65 @@ class UpdateCheckTests(unittest.TestCase):
         session.assert_not_called()
 
 
+class UpdateAutomationTests(unittest.TestCase):
+    INFO = {"ok": True, "update_available": True, "latest": "1.5.0",
+            "release_url": "https://example.invalid/v1.5.0",
+            "network": {"proxy_mode": "direct", "proxy_profile_id": ""}}
+
+    def _settings(self, **updates):
+        return {
+            "updates": {"proxy_mode": "direct", "proxy_profile_id": "",
+                        "notification_mode": "all", "auto_update": False, **updates},
+            "telegram": {"enabled": True, "events": {"software_update": True}},
+            "webhook": {"enabled": False}, "pushplus": {"enabled": False},
+        }
+
+    def test_release_is_not_applied_without_promotion(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(config, "DATA_DIR", temp), \
+                patch.object(update_check, "check", return_value=dict(self.INFO)), \
+                patch.object(config, "get_settings",
+                             return_value=self._settings(auto_update=True)), \
+                patch.object(update_check, "auto_update_authorization",
+                             return_value={"authorized": False, "reason": "not_promoted"}), \
+                patch.object(update_check, "request_apply") as apply, \
+                patch("control.app.notify_push.dispatch"):
+            result = update_check.automation_cycle()
+        self.assertFalse(result["auto_update_requested"])
+        apply.assert_not_called()
+
+    def test_promoted_release_is_requested_and_notified_only_once(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(config, "DATA_DIR", temp), \
+                patch.object(update_check, "check", return_value=dict(self.INFO)), \
+                patch.object(config, "get_settings",
+                             return_value=self._settings(auto_update=True)), \
+                patch.object(update_check, "auto_update_authorization",
+                             return_value={"authorized": True, "reason": "promoted"}), \
+                patch.object(update_check, "request_apply", return_value={"ok": True}) as apply, \
+                patch("control.app.notify_push.dispatch") as dispatch:
+            first = update_check.automation_cycle()
+            second = update_check.automation_cycle()
+        self.assertTrue(first["notified"])
+        self.assertTrue(first["auto_update_requested"])
+        self.assertFalse(second["notified"])
+        self.assertFalse(second["auto_update_requested"])
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertEqual(apply.call_count, 1)
+
+    def test_feature_mode_suppresses_patch_notice(self):
+        patch_info = {**self.INFO, "latest": update_check.VERSION.rsplit(".", 1)[0] + ".99"}
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(config, "DATA_DIR", temp), \
+                patch.object(update_check, "check", return_value=patch_info), \
+                patch.object(config, "get_settings",
+                             return_value=self._settings(notification_mode="feature")), \
+                patch("control.app.notify_push.dispatch") as dispatch:
+            result = update_check.automation_cycle()
+        self.assertFalse(result["notified"])
+        dispatch.assert_not_called()
+
+
 class UpdateProxyMigrationTests(unittest.TestCase):
     def _load(self, settings):
         with tempfile.TemporaryDirectory() as temp, \
@@ -156,7 +259,8 @@ class UpdateProxyMigrationTests(unittest.TestCase):
     us: {enabled: true, profile_id: primary}
 updates: {proxy_mode: country, proxy_country: us}""")
         self.assertEqual(settings["updates"], {
-            "proxy_mode": "auto", "proxy_profile_id": ""})
+            "proxy_mode": "auto", "proxy_profile_id": "",
+            "notification_mode": "all", "auto_update": False})
         self.assertIn("primary", settings["proxy"]["profiles"])
 
     def test_old_socks_update_proxy_moves_into_the_library(self):
@@ -165,7 +269,8 @@ updates:
   proxy_mode: manual
   proxy_url: 'socks5h://alice:secret@proxy.example:1081'""")
         self.assertEqual(settings["updates"], {
-            "proxy_mode": "auto", "proxy_profile_id": ""})
+            "proxy_mode": "auto", "proxy_profile_id": "",
+            "notification_mode": "all", "auto_update": False})
         profile = settings["proxy"]["profiles"]["legacy-update-proxy"]
         self.assertEqual((profile["server"], profile["port"], profile["username"]),
                          ("proxy.example", 1081, "alice"))
