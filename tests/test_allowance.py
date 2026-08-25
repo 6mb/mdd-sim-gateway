@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from control.app import allowance, store
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 class AllowanceTests(unittest.TestCase):
     def setUp(self):
@@ -95,6 +97,16 @@ class AllowanceTests(unittest.TestCase):
     def test_activation_date_requires_iso_format(self):
         with self.assertRaisesRegex(ValueError, "YYYY-MM-DD"):
             allowance.clean_allowance({"activated_at": "08/01/2026"})
+
+
+class AllowancePanelTests(unittest.TestCase):
+    def test_query_rule_editor_is_reachable_from_the_allowance_page(self):
+        source = (ROOT / "webui" / "src" / "views" /
+                  "AllowancePanel.jsx").read_text(encoding="utf-8")
+        self.assertIn("setEditingRule(true)", source)
+        self.assertIn("{editingRule && <div", source)
+        self.assertIn(">{t('Query settings')}</button>", source)
+        self.assertNotIn("Configure it in Messages", source)
 
 
 if __name__ == "__main__":

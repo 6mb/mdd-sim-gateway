@@ -4941,7 +4941,7 @@ async def api_allowance_query(iid: str, body: dict):
     rule = _allowance_rule(inst)
     effective = rule.get("effective")
     if not effective:
-        raise HTTPException(409, "allowance query method is unknown; configure it in Messages")
+        raise HTTPException(409, "allowance query method is unknown; configure it in the allowance panel")
     transport = str((body or {}).get("transport") or "auto").lower()
     if transport not in {"auto", "vowifi", "cellular"}:
         raise HTTPException(422, "transport must be auto, vowifi, or cellular")

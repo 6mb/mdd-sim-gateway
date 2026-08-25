@@ -6,6 +6,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- The balance and allowance page told users with an unknown carrier query method to configure
+  it on the Messages page, even though that editor had moved away with the old Messages-page
+  integration. Query settings are now available directly on the balance and allowance card,
+  and attempting a query without a rule expands the editor in place.
+
 - [Issue #13](https://github.com/MddIdd/mdd-sim-gateway/issues/13): an amd64 host upgrading
   from v1.4.1 downloaded the ARM64 Engine Release asset, then failed only after the source had
   already been replaced because the imported image could not pass the host-architecture check.

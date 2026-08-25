@@ -41,7 +41,7 @@ const zh = {
   'Query allowance': '查询余量', 'Query settings': '查询设置', 'Working…': '处理中…',
   'Could not load allowance data': '无法读取余额与余量', 'Allowance data saved': '余额与余量已保存', 'Save failed': '保存失败',
   'Allowance reply received and cached': '已收到运营商回复并缓存余量',
-  'The query method for this carrier is unknown. Configure it in Messages.': '不知道当前运营商的查询方式，请到“短信”页面设置。',
+  'The query method for this carrier is unknown. Configure it below.': '不知道当前运营商的查询方式，请在下方设置。',
   'Send “{body}” to {recipient} to query the allowance? SMS charges may apply.': '将向 {recipient} 发送“{body}”查询余量，可能产生短信费用。是否继续？',
   'The query SMS was submitted with an uncertain result. Check Messages before retrying.': '查询短信提交结果不确定，请先到短信记录确认，不要立即重试。',
   'Query SMS sent; waiting for the carrier reply': '查询短信已发送，正在等待运营商回复',
