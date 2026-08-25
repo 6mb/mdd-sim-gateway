@@ -285,6 +285,9 @@ def load() -> dict:
             merged = {**DEFAULTS["settings"][key], **saved}
             merged["events"] = {**DEFAULTS["settings"][key]["events"],
                                 **(saved.get("events", {}) or {})}
+            # Number keeping superseded the old manually-entered activation countdown. Do not
+            # preserve its hidden checkbox forever when loading a pre-keepalive config.
+            merged["events"].pop("activation_reminder", None)
             out["settings"][key] = merged
         # Telegram is notification-only. Drop command settings left by an older configuration
         # so an upgrade cannot preserve a remote call/SMS control channel.
