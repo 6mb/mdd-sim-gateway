@@ -2,7 +2,7 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
-## [Unreleased]
+## [1.5.2] - 2026-08-26
 
 ### Fixed
 
