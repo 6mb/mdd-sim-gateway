@@ -1225,6 +1225,17 @@ cmd_reload() {
     fi
   fi
   rm -f "$ENGINE_HANDOFF_MANIFEST"
+  # Run cleanup from the newly applied checkout, not from the updater's staged runner.  An
+  # upgrade launched on an older version keeps executing that old runner after apply_tree, while
+  # this installer is already the target version.  Keeping cleanup here makes the first upgrade
+  # into a fixed release reclaim old images too.  Failure is best-effort: a healthy reload must
+  # not be reported as failed only because optional disk cleanup could not run.
+  if python3 "$REPO_DIR/host/mdd_image_cleanup.py" \
+      --version "$(tr -d '\n' < "$REPO_DIR/VERSION")"; then
+    info "removed superseded MDD image tags and dangling images"
+  else
+    warn "could not remove every superseded MDD image; services remain updated"
+  fi
   info "reload complete (data preserved)"
 }
 

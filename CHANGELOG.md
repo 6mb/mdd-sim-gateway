@@ -2,6 +2,21 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.5.3] - 2026-08-26
+
+### Fixed
+
+- [Issue #15](https://github.com/MddIdd/mdd-sim-gateway/issues/15): the v1.5.2 image cleanup
+  ran in the updater process copied from the installed version, so the first upgrade from an
+  older release could not execute the newly added cleanup. Cleanup now runs from the target
+  release's installer after a successful reload, making it effective on that first upgrade.
+
+- Superseded version tags in the MDD Control and Engine release repositories kept old images
+  from becoming dangling, so `docker image prune` alone could not enforce one-generation
+  rollback retention. Reload now removes only old MDD release-version tags before pruning,
+  while preserving the current version, `:previous`, the trusted Engine base, unrelated images,
+  and every image still referenced by a container.
+
 ## [1.5.2] - 2026-08-26
 
 ### Fixed
