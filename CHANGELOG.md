@@ -2,6 +2,14 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- [Issue #14](https://github.com/MddIdd/mdd-sim-gateway/issues/14): the 30-second status refresh
+  replaced a number-keeping form even while it contained unsaved edits. Polling now refreshes an
+  untouched form but leaves an active draft alone until it is saved or the row is closed.
+
 ## [1.5.1] - 2026-08-26
 
 ### Fixed
