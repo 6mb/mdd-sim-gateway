@@ -6,6 +6,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- The sign-in screen laid out the “keep me signed in” checkbox above its label because the
+  generic form-label grid rule overrode the row layout. The checkbox and text now stay aligned
+  on one line.
+
 - [Issue #14](https://github.com/MddIdd/mdd-sim-gateway/issues/14): the 30-second status refresh
   replaced a number-keeping form even while it contained unsaved edits. Polling now refreshes an
   untouched form but leaves an active draft alone until it is saved or the row is closed.
