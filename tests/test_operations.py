@@ -6,7 +6,7 @@ import unittest
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control.app import config, operations
 
@@ -17,6 +17,16 @@ except ImportError:      # the Docker SDK is a manager runtime dependency this d
 
 
 class OperationsTests(unittest.TestCase):
+    def test_build_cache_cleanup_uses_dangling_mode_without_all(self):
+        client = Mock()
+        client.api.prune_builds.return_value = {"SpaceReclaimed": 12345}
+        with patch.object(operations.docker, "from_env", return_value=client):
+            result = operations.prune_dangling_build_cache()
+        self.assertEqual(result, {"ok": True, "space_reclaimed_bytes": 12345})
+        client.api.prune_builds.assert_called_once_with(
+            filters={"dangling": True}, all=False)
+        client.close.assert_called_once_with()
+
     def test_engine_sources_do_not_log_authentication_secrets(self):
         root = Path(__file__).resolve().parents[1]
         sources = "\n".join(

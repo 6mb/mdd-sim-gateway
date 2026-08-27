@@ -910,6 +910,8 @@ Type=simple
 WorkingDirectory=$REPO_DIR/control
 Environment=MDD_DATA=$DATA_ABS
 Environment=MDD_HOST_DATA=$DATA_ABS
+Environment=MDD_REPO_DIR=$REPO_DIR
+Environment=MDD_VENV_DIR=$VENV_DIR
 Environment=MDD_WEBUI=$WEBUI_DIST
 Environment=MDD_HTTP_PORT=$MDD_PORT
 Environment=MDD_BIND=$MDD_BIND

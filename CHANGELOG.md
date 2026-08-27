@@ -15,6 +15,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   dangling legacy Docker build cache left by earlier on-device builds. It uses the conservative
   builder prune mode without `--all` and does not remove images, containers, or volumes.
 
+- Host diagnostics now show the filesystem's total, used and available space together with
+  separate MDD file, image, container-layer and shared Docker build-cache figures. System
+  maintenance can explicitly remove dangling builder records and reports the bytes reclaimed,
+  without deleting images, containers, volumes or reusable cache.
+
 ### Fixed
 
 - [Issue #17](https://github.com/MddIdd/mdd-sim-gateway/issues/17): cellular SMS sending

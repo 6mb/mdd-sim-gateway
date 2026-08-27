@@ -14,6 +14,7 @@ import tarfile
 import time
 import zipfile
 
+import docker
 import yaml
 
 from . import config as cfg
@@ -127,6 +128,27 @@ def redact_jsonl(text: str) -> str:
 
 
 CALL_EVENTS = ("call_out", "call_result", "ussd")
+
+
+def prune_dangling_build_cache() -> dict:
+    """Remove only dangling Docker builder records and report the reclaimed bytes.
+
+    Legacy builder records have no MDD ownership labels. This deliberately mirrors
+    ``docker builder prune`` without ``--all``: images, containers, volumes, and reusable
+    cache records remain untouched.
+    """
+    client = docker.from_env(timeout=30)
+    try:
+        result = client.api.prune_builds(filters={"dangling": True}, all=False) or {}
+    except docker.errors.DockerException as exc:
+        raise RuntimeError(f"could not prune Docker build cache: {exc}") from exc
+    finally:
+        try:
+            client.close()
+        except docker.errors.DockerException:
+            pass
+    return {"ok": True, "space_reclaimed_bytes": max(
+        0, int(result.get("SpaceReclaimed") or 0))}
 
 
 def call_event_evidence(text: str) -> str:

@@ -4192,6 +4192,17 @@ async def api_system_backup_delete(name: str):
 @app.post("/api/system/maintenance")
 async def api_system_maintenance(body: dict):
     action = str(body.get("action") or "")
+    if action == "prune_build_cache":
+        result = await asyncio.to_thread(operations.prune_dangling_build_cache)
+        # Refresh immediately so the button's follow-up status request shows the reclaimed
+        # space. Keep alert acknowledgement semantics instead of resurrecting a cleared banner.
+        previous = hub.host_snapshot or None
+        snapshot = await asyncio.to_thread(sysinfo.collect, cfg.DATA_DIR)
+        current_alerts = sysinfo.alerts(snapshot, previous)
+        state = hub.host_alert_state or _load_host_alert_state()
+        hub.host_snapshot = snapshot
+        hub.host_alerts = _visible_host_alerts(current_alerts, state)
+        return {**result, "action": action}
     if action == "clear_notification_history":
         notify_push.clear_delivery_history()
         return {"ok": True, "action": action}

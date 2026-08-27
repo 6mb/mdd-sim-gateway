@@ -528,7 +528,7 @@ export function NotificationsPage({ showToast }) {
 }
 
 export function SystemPage({ showToast, openUpdateDialog }) {
-  const { t, language, setLanguage } = useI18n(); const [s, setS] = useState(null); const [tab, setTab] = useState('general'); const [status, setStatus] = useState(null); const [update,setUpdate]=useState(null); const [checking,setChecking]=useState(false); const [passwordForm,setPasswordForm]=useState({current:'',next:'',confirm:''}); const [restarting,setRestarting]=useState(null)
+  const { t, language, setLanguage } = useI18n(); const [s, setS] = useState(null); const [tab, setTab] = useState('general'); const [status, setStatus] = useState(null); const [update,setUpdate]=useState(null); const [checking,setChecking]=useState(false); const [passwordForm,setPasswordForm]=useState({current:'',next:'',confirm:''}); const [restarting,setRestarting]=useState(null); const [maintenanceBusy,setMaintenanceBusy]=useState('')
   const loadStatus = () => api.systemStatus().then(setStatus).catch(() => setStatus(null))
   useEffect(() => { api.settings().then(setS).catch(() => setS({ tls: {}, retry: {}, rekey: {}, security: {}, device_defaults: {}, updates: { proxy_mode: 'auto' }, proxy: { profiles: {}, exits: {} } })); loadStatus() }, [])
   useEffect(() => {
@@ -555,6 +555,15 @@ export function SystemPage({ showToast, openUpdateDialog }) {
   const tabs = [['general', t('General')], ['web', t('Web access')], ['voice', t('Calls & VoWiFi')], ['security', t('Security')], ['backup', t('Backup & updates')], ['maintenance', t('Maintenance')]]
   const save = async () => { try { const saved = await api.saveSettings(s); setS(saved); showToast(t('Saved')) } catch (e) { showToast(e.message) } }
   const action = async name => { try { const result = name === 'backup' ? await api.createBackup() : await api.maintenance(name); showToast(result.ok ? t('Operation completed') : t('Operation completed with errors')); loadStatus() } catch (e) { showToast(e.message) } }
+  const pruneBuildCache = async () => {
+    if (!window.confirm(t('Clear dangling Docker build cache? Images, containers and volumes are kept.'))) return
+    setMaintenanceBusy('prune_build_cache')
+    try {
+      const result = await api.maintenance('prune_build_cache')
+      showToast(t('Build cache cleaned · {size} reclaimed', { size: formatBytes(result.space_reclaimed_bytes) }))
+      loadStatus()
+    } catch (e) { showToast(e.message) } finally { setMaintenanceBusy('') }
+  }
   const deleteBackup = async name => { if (!window.confirm(t('Delete this local backup? This cannot be undone.'))) return; try { await api.deleteBackup(name); showToast(t('Backup deleted')); loadStatus() } catch (e) { showToast(e.message) } }
   const restart = async scope => {
     if (!window.confirm(t(`restart.confirm.${scope}`))) return
@@ -611,7 +620,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
       </section>
     </div>}
     {tab === 'maintenance' && <div className="u-settings-grid u-maintenance-grid">
-      <section className="card u-panel u-settings-card"><div className="u-settings-card-head"><div><h2>{t('Routine maintenance')}</h2><p>{t('Refresh runtime state without restarting the host.')}</p></div></div><div className="u-action-list"><button className="btn btn-ghost" onClick={() => action('restart_lines')}>{t('Restart all VoWiFi lines')}</button><button className="btn btn-ghost" onClick={() => action('refresh_egress')}>{t('Refresh country exits')}</button><button className="btn btn-ghost" onClick={() => action('clear_notification_history')}>{t('Clear notification history')}</button></div></section>
+      <section className="card u-panel u-settings-card"><div className="u-settings-card-head"><div><h2>{t('Routine maintenance')}</h2><p>{t('Refresh runtime state without restarting the host.')}</p></div></div><div className="u-action-list"><button className="btn btn-ghost" onClick={() => action('restart_lines')}>{t('Restart all VoWiFi lines')}</button><button className="btn btn-ghost" onClick={() => action('refresh_egress')}>{t('Refresh country exits')}</button><button className="btn btn-ghost" onClick={() => action('clear_notification_history')}>{t('Clear notification history')}</button><button className="btn btn-ghost" disabled={!!maintenanceBusy} onClick={pruneBuildCache}>{t(maintenanceBusy === 'prune_build_cache' ? 'Cleaning build cache…' : 'Clear build cache')}</button></div><p className="u-hint">{t('Only dangling Docker builder records are removed. Images, containers, volumes and reusable cache are kept.')}</p></section>
       <section className="card u-panel u-settings-card"><div className="u-settings-card-head"><div><h2>{t('Restart')}</h2><p>{t('Ordered by how much they interrupt: the control plane can be restarted without touching a call, the host cannot.')}</p></div></div><div className="u-action-list">
           <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('control')}>{t('Restart the control plane')}</button>
           <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('services')}>{t('Restart all gateway services')}</button>
@@ -647,7 +656,7 @@ function Row({ label, children }) {
 function HostPanel({ host, alerts, loading, clearing, onClear, t }) {
   if (loading) return <Empty title={t('Reading host information…')} detail={t('Collecting power, storage, memory and network status.')} />
   if (!host?.model && !host?.memory) return <Empty title={t('Host information unavailable')} detail={t('The control plane has not sampled the host yet.')} />
-  const mem = host.memory || {}, disk = host.disk || {}, load = host.load || {}, net = host.network || {}
+  const mem = host.memory || {}, disk = host.disk || {}, project = host.project_storage || {}, load = host.load || {}, net = host.network || {}
   const throttle = host.throttling || {}
   const sticky = throttle.since_boot || [], now = throttle.now || []
   return <div className="u-device-grid">
@@ -672,7 +681,12 @@ function HostPanel({ host, alerts, loading, clearing, onClear, t }) {
       <h3>{t('Memory and storage')}</h3>
       <Row label={t('Memory')}>{mem.total_mb ? t('{used}% of {total} MB used', { used: mem.used_percent, total: mem.total_mb }) : '—'}</Row>
       <Row label={t('Swap')}>{mem.swap_total_mb ? t('{used} MB of {total} MB ({percent}%)', { used: mem.swap_used_mb, total: mem.swap_total_mb, percent: mem.swap_used_percent }) : '—'}</Row>
-      <Row label={t('Disk')}>{disk.total_mb ? t('{used}% used · {free} MB free', { used: disk.used_percent, free: disk.free_mb }) : '—'}</Row>
+      <Row label={t('Disk')}>{disk.total_bytes ? t('{percent}% used · {used} / {total} · {free} available', { percent: disk.used_percent, used: formatBytes(disk.used_bytes), total: formatBytes(disk.total_bytes), free: formatBytes(disk.free_bytes) }) : '—'}</Row>
+      <Row label={t('MDD reported usage (logical)')}>{project.known_total_bytes != null ? formatBytes(project.known_total_bytes) : '—'}</Row>
+      <Row label={t('Project files')}>{project.files_bytes != null ? formatBytes(project.files_bytes) : '—'}</Row>
+      {project.docker_images_bytes != null && <Row label={t('MDD Docker images (logical)')}>{formatBytes(project.docker_images_bytes)}</Row>}
+      {!!project.container_writable_bytes && <Row label={t('Container writable layers')}>{formatBytes(project.container_writable_bytes)}</Row>}
+      {project.build_cache_bytes != null && <Row label={t('Shared Docker build cache')}>{t('{total} · {unused} unused', { total: formatBytes(project.build_cache_bytes), unused: formatBytes(project.build_cache_unused_bytes) })}</Row>}
     </div>
 
     <div className="card u-panel">

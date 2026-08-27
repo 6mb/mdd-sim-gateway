@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from control.app import sysinfo
 
@@ -123,15 +124,70 @@ class AlertTests(unittest.TestCase):
 
 
 class CollectionTests(unittest.TestCase):
+    def test_disk_reports_complete_byte_totals_for_the_host_panel(self):
+        usage = SimpleNamespace(total=20 * 1024 ** 3, used=15 * 1024 ** 3,
+                                free=5 * 1024 ** 3)
+        with patch.object(sysinfo.shutil, "disk_usage", return_value=usage):
+            value = sysinfo.disk("/data")
+        self.assertEqual(value["total_bytes"], 20 * 1024 ** 3)
+        self.assertEqual(value["used_bytes"], 15 * 1024 ** 3)
+        self.assertEqual(value["free_bytes"], 5 * 1024 ** 3)
+        self.assertEqual(value["used_percent"], 75.0)
+
+    def test_project_storage_keeps_shared_builder_cache_separate(self):
+        with patch.object(sysinfo, "_project_paths", return_value=["/data", "/repo"]), \
+                patch.object(sysinfo, "_path_usage_bytes", side_effect=[100, 200]), \
+                patch.object(sysinfo, "_docker_storage", return_value={
+                    "docker_images_bytes": 300,
+                    "container_writable_bytes": 40,
+                    "build_cache_bytes": 500,
+                    "build_cache_unused_bytes": 450,
+                }):
+            value = sysinfo.project_storage("/data")
+        self.assertEqual(value["files_bytes"], 300)
+        self.assertEqual(value["known_total_bytes"], 640)
+        self.assertEqual(value["build_cache_bytes"], 500)
+        self.assertNotEqual(value["known_total_bytes"], 1140)
+
+    def test_docker_usage_counts_unique_mdd_images_and_marks_unused_cache(self):
+        report = {
+            "Images": [
+                {"Id": "mdd", "RepoTags": ["mdd-sim-gateway/engine:latest"],
+                 "Labels": {}, "Size": 100},
+                {"Id": "mdd", "RepoTags": ["mdd-sim-gateway/engine:previous"],
+                 "Labels": {}, "Size": 100},
+                {"Id": "other", "RepoTags": ["other/app:latest"],
+                 "Labels": {}, "Size": 900},
+            ],
+            "Containers": [
+                {"Id": "line", "Image": "sha256:mdd",
+                 "Labels": {"io.mdd-sim-gateway.managed": "true"}, "SizeRw": 20},
+            ],
+            "BuildCache": [
+                {"Size": 70, "InUse": False}, {"Size": 30, "InUse": True},
+            ],
+        }
+        client = Mock()
+        client.df.return_value = report
+        docker_module = SimpleNamespace(from_env=Mock(return_value=client))
+        with patch.dict("sys.modules", {"docker": docker_module}):
+            value = sysinfo._docker_storage()
+        self.assertEqual(value["docker_images_bytes"], 100)
+        self.assertEqual(value["container_writable_bytes"], 20)
+        self.assertEqual(value["build_cache_bytes"], 100)
+        self.assertEqual(value["build_cache_unused_bytes"], 70)
+        client.close.assert_called_once_with()
+
     def test_absent_platform_fields_are_omitted_rather_than_faked(self):
         with patch.object(sysinfo, "_vcgencmd", return_value=""), \
                 patch.object(sysinfo, "undervoltage_events", return_value={}), \
-                patch.object(sysinfo, "usb_devices", return_value=[]):
+                patch.object(sysinfo, "usb_devices", return_value=[]), \
+                patch.object(sysinfo, "project_storage", return_value={}):
             snapshot = sysinfo.collect("/")
         for key in ("throttling", "undervoltage", "usb_devices"):
             self.assertNotIn(key, snapshot)
         # The portable facts are still present on any Linux host.
-        for key in ("memory", "load", "disk", "network", "uptime_seconds"):
+        for key in ("memory", "load", "disk", "project_storage", "network", "uptime_seconds"):
             self.assertIn(key, snapshot)
 
     def test_a_usb_attached_nic_is_flagged(self):
