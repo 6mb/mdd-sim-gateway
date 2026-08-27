@@ -269,9 +269,24 @@ def _docker_storage() -> dict:
     all_image_ids = {str(item.get("Id") or item.get("ID") or "")
                      for item in image_items if item.get("Id") or item.get("ID")}
     all_images_are_mdd = bool(all_image_ids) and all_image_ids == image_ids
+    current_tags = {"mdd-sim-gateway/engine:latest",
+                    "mdd-sim-gateway/control:latest",
+                    "mdd-sim-gateway/engine-base:trusted"}
+    old_image_count, protected_unused = 0, False
+    for item in image_items:
+        image_id = str(item.get("Id") or item.get("ID") or "")
+        if image_id not in image_ids or int(item.get("Containers") or 0) != 0:
+            continue
+        tags = {str(tag) for tag in (item.get("RepoTags") or []) if tag}
+        if tags & current_tags:
+            protected_unused = True
+        else:
+            old_image_count += 1
     layer_bytes = max(0, int(image_usage.get("TotalSize")
                              or report.get("LayersSize") or 0))
     image_reclaimable = max(0, int(image_usage.get("Reclaimable") or 0))
+    old_image_reclaimable = (image_reclaimable
+                             if all_images_are_mdd and not protected_unused else None)
 
     cache = report.get("BuildCache") or []
     cache_usage = report.get("BuildCacheUsage") or {}
@@ -288,6 +303,8 @@ def _docker_storage() -> dict:
             "docker_image_layers_bytes": layer_bytes,
             "docker_image_reclaimable_bytes": image_reclaimable,
             "docker_images_all_managed": all_images_are_mdd,
+            "mdd_old_image_count": old_image_count,
+            "mdd_old_images_reclaimable_bytes": old_image_reclaimable,
             "container_writable_bytes": writable_bytes,
             "build_cache_bytes": cache_bytes,
             "build_cache_reclaimable_bytes": cache_reclaimable}

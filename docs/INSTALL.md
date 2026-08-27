@@ -5,7 +5,10 @@
 - 推荐 ARM64 Debian、Ubuntu 或 Armbian，systemd 可用。
 - Docker、USB、内核 TUN、pcscd；蜂窝模块还需要 ModemManager/NetworkManager。
 - 已实机验证的三体电子 SCR Prime（`04d9:c001`）提供标准 CCID 接口，但尚未进入 libccid 1.6.2 的设备表。连接该型号时执行 `sudo ./install.sh patchprime`，安装程序会从校验过的固定版本源码构建驱动并加入设备匹配；完成后支持热插拔。
-- 至少 4 GB 可用磁盘。正式源码包的全新安装和一键升级都会按主机架构下载 CI 在原生
+- 根文件系统至少 4 GiB 可用空间；建议使用 16 GB 或更大的系统盘，并在升级前保留约 6 GiB，
+  供新镜像、当前镜像和一代回滚镜像在切换期间共存。虚拟机扩展虚拟硬盘后还必须扩展根分区
+  与文件系统，以 `df -h /` 为准，不能以控制台显示的虚拟硬盘容量为准。正式源码包的全新安装
+  和一键升级都会按主机架构下载 CI 在原生
   ARM64/amd64 runner 构建的 Engine，并按校验和、架构、版本与源码指纹核验；设备不再为
   Engine 编译 Asterisk。Docker 控制面模式还会下载相同架构的 Control 镜像，原生控制面
   模式只下载 Engine。另一种架构的资产不会下载，导入后的压缩包会立即删除。同一 Engine
@@ -37,6 +40,11 @@ rootless Docker 时会停止并给出错误。切换到正式预构建镜像后�
 的构建缓存；它不删除任何镜像、容器或卷。由于旧版使用 Docker 的共享默认 builder，历史缓存
 没有项目标签，Docker 无法进一步只按 MDD 归属筛选。蜂窝与 TUN/PCSC 引擎需要系统级 Docker
 daemon，因此不支持 rootless 模式。
+
+“系统设置 → 维护”会分别显示 Docker 镜像和构建缓存的实际可回收空间。“清理构建缓存”只执行
+Docker 的保守 dangling-only 清理；“清理旧版与回滚镜像”是显式放弃一键回滚的操作，只删除
+未被任何容器使用的 MDD 历史镜像，并保留当前 Engine/Control 与可信 Engine 基础镜像。两项
+操作都不会删除容器、卷或其他项目镜像。
 
 版本检查始终使用 GitHub Release API，不读取或发送 GitHub Token。配置的仓库不可访问或尚未发布 Release 时，界面会显示尚无可用发布版本。
 

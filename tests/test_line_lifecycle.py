@@ -198,6 +198,15 @@ class BackgroundStartGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 502)
         self.assertIn("Docker refused", raised.exception.detail)
 
+    async def test_maintenance_can_drop_old_mdd_images_on_explicit_request(self):
+        with patch.object(main.operations, "prune_old_mdd_images", return_value={
+                "ok": True, "removed_images": 2, "space_reclaimed_bytes": 8192}) as prune, \
+                patch.object(main.sysinfo, "collect", return_value={"disk": {}}):
+            result = await main.api_system_maintenance({"action": "prune_old_images"})
+        self.assertEqual(result["action"], "prune_old_images")
+        self.assertEqual(result["removed_images"], 2)
+        prune.assert_called_once_with()
+
 
 class StatusActivityTests(unittest.TestCase):
     def test_frozen_status_explains_countdown_and_next_action(self):

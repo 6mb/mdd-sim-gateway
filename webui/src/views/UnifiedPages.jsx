@@ -554,6 +554,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
   if (!s) return <p>{t('Loading')}…</p>
   const tabs = [['general', t('General')], ['web', t('Web access')], ['voice', t('Calls & VoWiFi')], ['security', t('Security')], ['backup', t('Backup & updates')], ['maintenance', t('Maintenance')]]
   const buildCacheReclaimable = status?.host?.project_storage?.build_cache_reclaimable_bytes
+  const oldImagesReclaimable = status?.host?.project_storage?.mdd_old_images_reclaimable_bytes
   const save = async () => { try { const saved = await api.saveSettings(s); setS(saved); showToast(t('Saved')) } catch (e) { showToast(e.message) } }
   const action = async name => { try { const result = name === 'backup' ? await api.createBackup() : await api.maintenance(name); showToast(result.ok ? t('Operation completed') : t('Operation completed with errors')); loadStatus() } catch (e) { showToast(e.message) } }
   const pruneBuildCache = async () => {
@@ -562,6 +563,15 @@ export function SystemPage({ showToast, openUpdateDialog }) {
     try {
       const result = await api.maintenance('prune_build_cache')
       showToast(t('Build cache cleaned · {size} reclaimed', { size: formatBytes(result.space_reclaimed_bytes) }))
+      loadStatus()
+    } catch (e) { showToast(e.message) } finally { setMaintenanceBusy('') }
+  }
+  const pruneOldImages = async () => {
+    if (!window.confirm(t('Delete unused old and rollback MDD images? Current images and the trusted Engine base are kept, but one-click rollback will no longer be available.'))) return
+    setMaintenanceBusy('prune_old_images')
+    try {
+      const result = await api.maintenance('prune_old_images')
+      showToast(t('Old images cleaned · {count} removed · {size} reclaimed', { count: result.removed_images, size: formatBytes(result.space_reclaimed_bytes) }))
       loadStatus()
     } catch (e) { showToast(e.message) } finally { setMaintenanceBusy('') }
   }
@@ -621,7 +631,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
       </section>
     </div>}
     {tab === 'maintenance' && <div className="u-settings-grid u-maintenance-grid">
-      <section className="card u-panel u-settings-card"><div className="u-settings-card-head"><div><h2>{t('Routine maintenance')}</h2><p>{t('Refresh runtime state without restarting the host.')}</p></div></div><div className="u-action-list"><button className="btn btn-ghost" onClick={() => action('restart_lines')}>{t('Restart all VoWiFi lines')}</button><button className="btn btn-ghost" onClick={() => action('refresh_egress')}>{t('Refresh country exits')}</button><button className="btn btn-ghost" onClick={() => action('clear_notification_history')}>{t('Clear notification history')}</button><button className="btn btn-ghost" disabled={!!maintenanceBusy} onClick={pruneBuildCache}>{maintenanceBusy === 'prune_build_cache' ? t('Cleaning build cache…') : buildCacheReclaimable != null ? t('Clear build cache · {size} reclaimable', { size: formatBytes(buildCacheReclaimable) }) : t('Clear build cache')}</button></div><p className="u-hint">{t('Only dangling Docker builder records are removed. Images, containers, volumes and reusable cache are kept.')}</p></section>
+      <section className="card u-panel u-settings-card"><div className="u-settings-card-head"><div><h2>{t('Routine maintenance')}</h2><p>{t('Refresh runtime state without restarting the host.')}</p></div></div><div className="u-action-list"><button className="btn btn-ghost" onClick={() => action('restart_lines')}>{t('Restart all VoWiFi lines')}</button><button className="btn btn-ghost" onClick={() => action('refresh_egress')}>{t('Refresh country exits')}</button><button className="btn btn-ghost" onClick={() => action('clear_notification_history')}>{t('Clear notification history')}</button><button className="btn btn-ghost" disabled={!!maintenanceBusy} onClick={pruneOldImages}>{maintenanceBusy === 'prune_old_images' ? t('Cleaning old images…') : oldImagesReclaimable != null ? t('Clear old and rollback images · {size} reclaimable', { size: formatBytes(oldImagesReclaimable) }) : t('Clear old and rollback images')}</button><button className="btn btn-ghost" disabled={!!maintenanceBusy} onClick={pruneBuildCache}>{maintenanceBusy === 'prune_build_cache' ? t('Cleaning build cache…') : buildCacheReclaimable != null ? t('Clear build cache · {size} reclaimable', { size: formatBytes(buildCacheReclaimable) }) : t('Clear build cache')}</button></div><p className="u-hint">{t('Old-image cleanup keeps the current images, trusted Engine base and every image used by a container, but removes rollback images. Build-cache cleanup removes only dangling builder records; containers and volumes are always kept.')}</p></section>
       <section className="card u-panel u-settings-card"><div className="u-settings-card-head"><div><h2>{t('Restart')}</h2><p>{t('Ordered by how much they interrupt: the control plane can be restarted without touching a call, the host cannot.')}</p></div></div><div className="u-action-list">
           <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('control')}>{t('Restart the control plane')}</button>
           <button className="btn btn-ghost" disabled={!!restarting} onClick={() => restart('services')}>{t('Restart all gateway services')}</button>

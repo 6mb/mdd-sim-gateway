@@ -20,6 +20,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   maintenance can explicitly remove dangling builder records and reports the bytes reclaimed,
   without deleting images, containers, volumes or reusable cache.
 
+- Administrators can explicitly remove unused old and rollback MDD images when disk space matters
+  more than one-click rollback. Current images, the trusted Engine base and every image referenced
+  by a container remain protected. The product overview now states the minimum free space,
+  recommended system-disk capacity and the need to expand a VM's root partition after its disk.
+
 ### Fixed
 
 - Host storage diagnostics no longer present the sum of repeated Docker virtual image sizes as

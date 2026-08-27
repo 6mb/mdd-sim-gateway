@@ -184,10 +184,32 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(value["docker_image_layers_bytes"], 700)
         self.assertEqual(value["docker_image_reclaimable_bytes"], 250)
         self.assertFalse(value["docker_images_all_managed"])
+        self.assertEqual(value["mdd_old_image_count"], 1)
+        self.assertIsNone(value["mdd_old_images_reclaimable_bytes"])
         self.assertEqual(value["container_writable_bytes"], 20)
         self.assertEqual(value["build_cache_bytes"], 110)
         self.assertEqual(value["build_cache_reclaimable_bytes"], 10)
         client.close.assert_called_once_with()
+
+    def test_all_mdd_unused_images_publish_exact_manual_cleanup_amount(self):
+        report = {
+            "Images": [
+                {"Id": "current", "RepoTags": ["mdd-sim-gateway/engine:latest"],
+                 "Labels": {}, "Size": 100, "Containers": 2},
+                {"Id": "rollback", "RepoTags": ["mdd-sim-gateway/engine:previous"],
+                 "Labels": {}, "Size": 90, "Containers": 0},
+            ],
+            "Containers": [],
+            "ImageUsage": {"TotalSize": 150, "Reclaimable": 50},
+        }
+        client = Mock()
+        client.df.return_value = report
+        docker_module = SimpleNamespace(from_env=Mock(return_value=client))
+        with patch.dict("sys.modules", {"docker": docker_module}):
+            value = sysinfo._docker_storage()
+        self.assertTrue(value["docker_images_all_managed"])
+        self.assertEqual(value["mdd_old_image_count"], 1)
+        self.assertEqual(value["mdd_old_images_reclaimable_bytes"], 50)
 
     def test_absent_platform_fields_are_omitted_rather_than_faked(self):
         with patch.object(sysinfo, "_vcgencmd", return_value=""), \

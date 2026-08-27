@@ -4192,9 +4192,11 @@ async def api_system_backup_delete(name: str):
 @app.post("/api/system/maintenance")
 async def api_system_maintenance(body: dict):
     action = str(body.get("action") or "")
-    if action == "prune_build_cache":
+    if action in {"prune_build_cache", "prune_old_images"}:
         try:
-            result = await asyncio.to_thread(operations.prune_dangling_build_cache)
+            operation = (operations.prune_dangling_build_cache
+                         if action == "prune_build_cache" else operations.prune_old_mdd_images)
+            result = await asyncio.to_thread(operation)
         except RuntimeError as exc:
             # Keep Docker's actionable reason instead of returning a generic Internal Error.
             raise HTTPException(status_code=502, detail=str(exc)) from exc
