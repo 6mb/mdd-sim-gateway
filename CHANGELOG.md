@@ -27,6 +27,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- The update dialog no longer truncates bilingual Release notes at 4,000 characters. It retains
+  a bounded 16,000-character response so important notices, patch changes and the current feature
+  release summary remain visible together.
+
 - Host storage diagnostics no longer present the sum of repeated Docker virtual image sizes as
   physical MDD disk usage. They now show Docker's real layer-store total and independently report
   the image and build-cache bytes Docker considers reclaimable. The maintenance button displays

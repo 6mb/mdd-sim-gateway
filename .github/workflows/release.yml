@@ -179,6 +179,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes_file=".github/release-notes/${GITHUB_REF_NAME}.md"
+          test -s "$notes_file" || {
+            echo "missing bilingual Release notes: $notes_file" >&2
+            exit 1
+          }
           gh release create "${GITHUB_REF_NAME}" \
             "mdd-sim-gateway-${GITHUB_REF_NAME}.tar.gz" \
             "mdd-sim-gateway-control-${GITHUB_REF_NAME}-arm64.tar.gz" \
@@ -186,4 +191,4 @@ jobs:
             "mdd-sim-gateway-engine-${GITHUB_REF_NAME}-arm64.tar.gz" \
             "mdd-sim-gateway-engine-${GITHUB_REF_NAME}-amd64.tar.gz" \
             SHA256SUMS \
-            --verify-tag --generate-notes --title "MDD Sim Gateway ${GITHUB_REF_NAME}"
+            --verify-tag --notes-file "$notes_file" --title "MDD Sim Gateway ${GITHUB_REF_NAME}"
