@@ -336,7 +336,8 @@ class UpdaterTests(unittest.TestCase):
                 destination.write_bytes(payload)
 
             distributed = "ghcr.io/mddidd/mdd-sim-gateway-engine:v9.9.9"
-            with patch.object(mdd_update, "download", side_effect=fake_download), \
+            with patch.object(mdd_update.platform, "machine", return_value="aarch64"), \
+                    patch.object(mdd_update, "download", side_effect=fake_download), \
                     patch.object(mdd_update.shutil, "disk_usage",
                                  return_value=SimpleNamespace(free=3 * 1024 ** 3)), \
                     patch.object(mdd_update, "release_engine_fingerprints",
