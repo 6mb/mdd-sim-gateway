@@ -4193,7 +4193,11 @@ async def api_system_backup_delete(name: str):
 async def api_system_maintenance(body: dict):
     action = str(body.get("action") or "")
     if action == "prune_build_cache":
-        result = await asyncio.to_thread(operations.prune_dangling_build_cache)
+        try:
+            result = await asyncio.to_thread(operations.prune_dangling_build_cache)
+        except RuntimeError as exc:
+            # Keep Docker's actionable reason instead of returning a generic Internal Error.
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         # Refresh immediately so the button's follow-up status request shows the reclaimed
         # space. Keep alert acknowledgement semantics instead of resurrecting a cleared banner.
         previous = hub.host_snapshot or None

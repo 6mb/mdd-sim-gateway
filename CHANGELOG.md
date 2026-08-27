@@ -22,6 +22,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Host storage diagnostics no longer present the sum of repeated Docker virtual image sizes as
+  physical MDD disk usage. They now show Docker's real layer-store total and independently report
+  the image and build-cache bytes Docker considers reclaimable. The maintenance button displays
+  its conservative build-cache estimate before confirmation. Build-cache cleanup no longer sends
+  Docker's unsupported `dangling` build/prune filter, and a daemon failure is returned as an
+  actionable error instead of a generic Internal Error.
+
 - Existing amd64 Docker-control installations on v1.4.x can now complete a direct v1.5.3
   upgrade after the documented one-time mode-marker bootstrap. The target installer detects the
   live Docker control plane, imports both verified amd64 Engine and Control assets through the

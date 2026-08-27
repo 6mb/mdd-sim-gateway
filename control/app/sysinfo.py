@@ -218,10 +218,11 @@ def _project_paths(data_dir: str) -> list[str]:
 def _docker_storage() -> dict:
     """MDD image/container usage plus separately identified shared builder cache.
 
-    Image sizes are Docker's logical image sizes. Builder records created by legacy releases
-    have no project label, so assigning them to MDD would be false precision; report the daemon's
-    shared cache separately. ``InUse`` lets the UI show how much is unused, while the cleanup
-    endpoint reports the smaller amount its conservative dangling-only pass actually reclaimed.
+    Image ``Size`` values are virtual sizes and repeat shared layers. Docker's aggregate usage
+    objects carry the real layer-store total and reclaimable bytes. Builder records created by
+    legacy releases have no project label, so report the daemon's shared cache separately and
+    use Docker's own conservative-prune estimate rather than treating every ``InUse=false``
+    record as deletable.
     """
     try:
         import docker
@@ -263,22 +264,45 @@ def _docker_storage() -> dict:
             container_ids.add(container_id)
             writable_bytes += max(0, int(item.get("SizeRw") or 0))
 
+    image_usage = report.get("ImageUsage") or {}
+    image_items = image_usage.get("Items") or report.get("Images") or []
+    all_image_ids = {str(item.get("Id") or item.get("ID") or "")
+                     for item in image_items if item.get("Id") or item.get("ID")}
+    all_images_are_mdd = bool(all_image_ids) and all_image_ids == image_ids
+    layer_bytes = max(0, int(image_usage.get("TotalSize")
+                             or report.get("LayersSize") or 0))
+    image_reclaimable = max(0, int(image_usage.get("Reclaimable") or 0))
+
     cache = report.get("BuildCache") or []
-    cache_bytes = sum(max(0, int(item.get("Size") or 0)) for item in cache)
-    unused = sum(max(0, int(item.get("Size") or 0)) for item in cache
-                 if not item.get("InUse"))
+    cache_usage = report.get("BuildCacheUsage") or {}
+    cache_bytes = max(0, int(cache_usage.get("TotalSize")
+                             or sum(max(0, int(item.get("Size") or 0)) for item in cache)))
+    if "Reclaimable" in cache_usage:
+        cache_reclaimable = max(0, int(cache_usage.get("Reclaimable") or 0))
+    else:
+        # Older daemons do not publish the aggregate. Shared records are parents of reusable
+        # cache and survive the default prune; unshared, unused records are the safe estimate.
+        cache_reclaimable = sum(max(0, int(item.get("Size") or 0)) for item in cache
+                                if not item.get("InUse") and not item.get("Shared"))
     return {"docker_images_bytes": image_bytes,
+            "docker_image_layers_bytes": layer_bytes,
+            "docker_image_reclaimable_bytes": image_reclaimable,
+            "docker_images_all_managed": all_images_are_mdd,
             "container_writable_bytes": writable_bytes,
             "build_cache_bytes": cache_bytes,
-            "build_cache_unused_bytes": unused}
+            "build_cache_reclaimable_bytes": cache_reclaimable}
 
 
 def project_storage(data_dir: str) -> dict:
     files = sum(_path_usage_bytes(path) for path in _project_paths(data_dir))
     result = {"files_bytes": files}
     result.update(_docker_storage())
-    result["known_total_bytes"] = (files + result.get("docker_images_bytes", 0)
+    image_storage = (result.get("docker_image_layers_bytes", 0)
+                     if result.get("docker_images_all_managed")
+                     else result.get("docker_images_bytes", 0))
+    result["known_total_bytes"] = (files + image_storage
                                    + result.get("container_writable_bytes", 0))
+    result["known_total_is_logical"] = not bool(result.get("docker_images_all_managed"))
     return result
 
 

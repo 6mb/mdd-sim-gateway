@@ -139,7 +139,9 @@ def prune_dangling_build_cache() -> dict:
     """
     client = docker.from_env(timeout=30)
     try:
-        result = client.api.prune_builds(filters={"dangling": True}, all=False) or {}
+        # ``all=False`` is Docker's dangling-only builder prune. Unlike image prune, the
+        # build/prune API does not accept a ``dangling`` filter (Docker 28 returns HTTP 400).
+        result = client.api.prune_builds(all=False) or {}
     except docker.errors.DockerException as exc:
         raise RuntimeError(f"could not prune Docker build cache: {exc}") from exc
     finally:

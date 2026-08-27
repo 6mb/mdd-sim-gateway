@@ -139,15 +139,19 @@ class CollectionTests(unittest.TestCase):
                 patch.object(sysinfo, "_path_usage_bytes", side_effect=[100, 200]), \
                 patch.object(sysinfo, "_docker_storage", return_value={
                     "docker_images_bytes": 300,
+                    "docker_image_layers_bytes": 250,
+                    "docker_images_all_managed": True,
                     "container_writable_bytes": 40,
                     "build_cache_bytes": 500,
-                    "build_cache_unused_bytes": 450,
+                    "build_cache_reclaimable_bytes": 50,
                 }):
             value = sysinfo.project_storage("/data")
         self.assertEqual(value["files_bytes"], 300)
-        self.assertEqual(value["known_total_bytes"], 640)
+        self.assertEqual(value["known_total_bytes"], 590)
+        self.assertFalse(value["known_total_is_logical"])
         self.assertEqual(value["build_cache_bytes"], 500)
-        self.assertNotEqual(value["known_total_bytes"], 1140)
+        self.assertEqual(value["build_cache_reclaimable_bytes"], 50)
+        self.assertNotEqual(value["known_total_bytes"], 1090)
 
     def test_docker_usage_counts_unique_mdd_images_and_marks_unused_cache(self):
         report = {
@@ -164,8 +168,12 @@ class CollectionTests(unittest.TestCase):
                  "Labels": {"io.mdd-sim-gateway.managed": "true"}, "SizeRw": 20},
             ],
             "BuildCache": [
-                {"Size": 70, "InUse": False}, {"Size": 30, "InUse": True},
+                {"Size": 70, "InUse": False, "Shared": True},
+                {"Size": 30, "InUse": True, "Shared": True},
+                {"Size": 10, "InUse": False, "Shared": False},
             ],
+            "ImageUsage": {"TotalSize": 700, "Reclaimable": 250},
+            "BuildCacheUsage": {"TotalSize": 110, "Reclaimable": 10},
         }
         client = Mock()
         client.df.return_value = report
@@ -173,9 +181,12 @@ class CollectionTests(unittest.TestCase):
         with patch.dict("sys.modules", {"docker": docker_module}):
             value = sysinfo._docker_storage()
         self.assertEqual(value["docker_images_bytes"], 100)
+        self.assertEqual(value["docker_image_layers_bytes"], 700)
+        self.assertEqual(value["docker_image_reclaimable_bytes"], 250)
+        self.assertFalse(value["docker_images_all_managed"])
         self.assertEqual(value["container_writable_bytes"], 20)
-        self.assertEqual(value["build_cache_bytes"], 100)
-        self.assertEqual(value["build_cache_unused_bytes"], 70)
+        self.assertEqual(value["build_cache_bytes"], 110)
+        self.assertEqual(value["build_cache_reclaimable_bytes"], 10)
         client.close.assert_called_once_with()
 
     def test_absent_platform_fields_are_omitted_rather_than_faked(self):

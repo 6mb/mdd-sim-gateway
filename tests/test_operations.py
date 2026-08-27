@@ -23,8 +23,7 @@ class OperationsTests(unittest.TestCase):
         with patch.object(operations.docker, "from_env", return_value=client):
             result = operations.prune_dangling_build_cache()
         self.assertEqual(result, {"ok": True, "space_reclaimed_bytes": 12345})
-        client.api.prune_builds.assert_called_once_with(
-            filters={"dangling": True}, all=False)
+        client.api.prune_builds.assert_called_once_with(all=False)
         client.close.assert_called_once_with()
 
     def test_engine_sources_do_not_log_authentication_secrets(self):

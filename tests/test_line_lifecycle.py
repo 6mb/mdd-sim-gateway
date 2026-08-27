@@ -190,6 +190,14 @@ class BackgroundStartGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.hub.host_alerts, [])
         prune.assert_called_once_with()
 
+    async def test_build_cache_prune_failure_is_an_actionable_http_error(self):
+        with patch.object(main.operations, "prune_dangling_build_cache",
+                          side_effect=RuntimeError("Docker refused builder prune")):
+            with self.assertRaises(main.HTTPException) as raised:
+                await main.api_system_maintenance({"action": "prune_build_cache"})
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertIn("Docker refused", raised.exception.detail)
+
 
 class StatusActivityTests(unittest.TestCase):
     def test_frozen_status_explains_countdown_and_next_action(self):
