@@ -59,10 +59,21 @@ jobs:
         run: docker build -f control/Dockerfile -t mdd-sim-gateway/control:ci .
 
   engine-image:
-    runs-on: ubuntu-24.04-arm
+    name: Engine image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+          - arch: amd64
+            runner: ubuntu-latest
+            machine: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build and validate the native ARM64 Engine image
+      - name: Build and validate the native Engine image
         run: |
           runtime_fp=$(sh tools/engine-fingerprint.sh runtime)
           base_fp=$(sh tools/engine-fingerprint.sh base)
@@ -73,8 +84,11 @@ jobs:
             -t mdd-sim-gateway/engine:ci engine
           docker run --rm --entrypoint /bin/bash mdd-sim-gateway/engine:ci -lc '
             set -e
-            test "$(uname -m)" = aarch64
-            test "$(find /usr/lib/asterisk/modules -name "*.so" | wc -l)" -eq 334
+            actual_machine=$(uname -m)
+            module_count=$(find /usr/lib/asterisk/modules -name "*.so" | wc -l)
+            printf "Engine validation: architecture=%s modules=%s\n" "$actual_machine" "$module_count"
+            test "$actual_machine" = "${{ matrix.machine }}"
+            test "$module_count" -eq 334
             python3 -c "import Crypto, cryptography, jinja2, panoramisk, requests, serial, smartcard, socks, card"
             asterisk -V
           '

@@ -10,6 +10,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   installs from the official source archive and one-click upgrades download only the host's
   architecture, verify its checksum and image identity, and avoid compiling Asterisk or Docker
   control images on the gateway. Development checkouts retain an explicit source-build path.
+  Continuous integration now builds and validates the Engine natively on both architectures so
+  an architecture-specific packaging difference is caught before a release tag is created.
 
 - After moving an official installation to verified prebuilt images, the installer removes
   dangling legacy Docker build cache left by earlier on-device builds. It uses the conservative

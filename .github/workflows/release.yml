@@ -45,8 +45,11 @@ jobs:
             -t "$release_image" -t "$architecture_image" engine
           docker run --rm --entrypoint /bin/bash "$release_image" -lc '
             set -e
-            test "$(uname -m)" = "${{ matrix.machine }}"
-            test "$(find /usr/lib/asterisk/modules -name "*.so" | wc -l)" -eq 334
+            actual_machine=$(uname -m)
+            module_count=$(find /usr/lib/asterisk/modules -name "*.so" | wc -l)
+            printf "Engine validation: architecture=%s modules=%s\n" "$actual_machine" "$module_count"
+            test "$actual_machine" = "${{ matrix.machine }}"
+            test "$module_count" -eq 334
             python3 -c "import Crypto, cryptography, jinja2, panoramisk, requests, serial, smartcard, socks, card"
             asterisk -V
           '
