@@ -27,7 +27,7 @@ def _managed_version_ref(reference: str) -> tuple[str, str] | None:
     return repository, tag
 
 
-def prune_superseded_images(version: str) -> bool:
+def prune_superseded_images(version: str, *, prune_build_cache: bool = False) -> bool:
     """Drop obsolete MDD version tags, then remove images left dangling by the rotation.
 
     The stable aliases are deliberately outside ``MANAGED_VERSION_REPOSITORIES`` or do not use
@@ -63,14 +63,26 @@ def prune_superseded_images(version: str) -> bool:
     pruned = subprocess.run(
         ["docker", "image", "prune", "--force", "--filter", f"label={MANAGED_LABEL}"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return pruned.returncode == 0 and success
+    success = pruned.returncode == 0 and success
+    if prune_build_cache:
+        # Legacy installs used Docker's shared default builder, whose records carry no project
+        # label. Docker cannot retrospectively identify only MDD records. The conservative prune
+        # (without --all) removes dangling build cache only; it never removes images, containers,
+        # volumes, or cache records still in use.
+        cache_pruned = subprocess.run(
+            ["docker", "builder", "prune", "--force"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        success = cache_pruned.returncode == 0 and success
+    return success
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
+    parser.add_argument("--prune-build-cache", action="store_true")
     args = parser.parse_args()
-    raise SystemExit(0 if prune_superseded_images(args.version) else 1)
+    raise SystemExit(0 if prune_superseded_images(
+        args.version, prune_build_cache=args.prune_build_cache) else 1)
 
 
 if __name__ == "__main__":

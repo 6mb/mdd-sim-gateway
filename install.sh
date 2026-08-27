@@ -16,7 +16,8 @@
 #   - pcsc-lite is version-LOCKED (PCSC_VERSION) across the host + every container image so the
 #     PC/SC client/server protocol always matches (distro defaults differ -> "Failed to
 #     establish context")
-#   - the engine image is built from source with all bug-fix patches baked in (engine/patches/*)
+#   - official releases import the verified native Engine image; development checkouts build it
+#     from source with all bug-fix patches baked in (engine/patches/*)
 #
 # Usage:
 #   sudo ./install.sh install [--mode local|docker]   # full install (default mode: local)
@@ -41,6 +42,7 @@
 #   ASTERISK_REPOSITORY optional reviewed Asterisk Git repository override for a full build
 #   MDD_REUSE_WEBUI     set to 1 to reuse a prebuilt, reviewed webui/dist in an offline install
 #   MDD_REUSE_CONTROL_IMAGE set to 1 to reuse a checksummed Release control image (docker mode)
+#   MDD_BUILD_IMAGES    set to 1 to build images from source instead of using Release assets
 #   PCSC_VERSION           pinned pcsc-lite version                   (default 2.3.3)
 #   LPAC_SRC               optional path to lpac source (for build-lpac)
 #   CMAKE_FETCH_VER        Kitware cmake version if system is too old (default 3.31.12)
@@ -681,6 +683,15 @@ engine_matches_checkout() {
     [ "$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.base-fp)" = "$base_fp" ]
 }
 
+control_image_matches_checkout() {
+  docker image inspect "$CONTROL_IMAGE" >/dev/null 2>&1 || return 1
+  version=$(tr -d '\n' < "$REPO_DIR/VERSION")
+  identity=$(docker image inspect "$CONTROL_IMAGE" --format \
+    '{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.version"}}' \
+    2>/dev/null || true)
+  [ "$identity" = "$(host_arch)|$version" ]
+}
+
 handoff_release_engine() {
   have python3 || die "python3 is required to import the Release Engine asset"
   version=$(tr -d '\n' < "$REPO_DIR/VERSION")
@@ -699,8 +710,61 @@ handoff_release_engine() {
   fi
   [ -n "$distributed" ] || die "Engine Release handoff returned no image"
   MDD_ENGINE_DISTRIBUTION_IMAGE=$distributed
-  export MDD_ENGINE_DISTRIBUTION_IMAGE
+  MDD_PRUNE_BUILD_CACHE=1
+  export MDD_ENGINE_DISTRIBUTION_IMAGE MDD_PRUNE_BUILD_CACHE
   info "old updater handed off to verified Release Engine asset $distributed"
+}
+
+# An official source archive contains a CI-generated image checksum manifest. A development
+# checkout does not, so it keeps the normal source-build behavior. This makes fresh installs use
+# the same architecture-checked Release assets as one-click updates without trusting a floating
+# registry tag or silently falling back to a lengthy build after a verification failure.
+prepare_release_images() {
+  [ "${MDD_BUILD_IMAGES:-0}" != 1 ] || {
+    info "building images from source (MDD_BUILD_IMAGES=1)"
+    return
+  }
+  [ -f "$ENGINE_HANDOFF_MANIFEST" ] || return
+  have python3 || die "python3 is required to import Release image assets"
+  MDD_REUSE_WEBUI=1
+  MDD_PRUNE_BUILD_CACHE=1
+  export MDD_REUSE_WEBUI MDD_PRUNE_BUILD_CACHE
+  if engine_matches_checkout; then
+    if [ "$MODE" = local ]; then
+      info "installed Engine already matches the official release — reusing images"
+      return
+    fi
+    if control_image_matches_checkout; then
+      MDD_REUSE_CONTROL_IMAGE=1
+      export MDD_REUSE_CONTROL_IMAGE
+      info "installed Engine and Control already match the official release — reusing images"
+      return
+    fi
+  fi
+  version=$(tr -d '\n' < "$REPO_DIR/VERSION")
+  repository=${MDD_UPDATE_REPOSITORY:-MddIdd/mdd-sim-gateway}
+  network_file="$MDD_DATA_DIR/update/network.json"
+  info "downloading verified $(host_arch) Release images for a fresh install…"
+  if [ -f "$network_file" ]; then
+    distributed=$(python3 "$REPO_DIR/host/mdd_update.py" \
+      --repo "$REPO_DIR" --data "$MDD_DATA_DIR" --version "$version" \
+      --repository "$repository" --network-config "$network_file" \
+      --install-images --install-mode "$MODE") || \
+      die "could not import Release images; set MDD_BUILD_IMAGES=1 to build from source"
+  else
+    distributed=$(python3 "$REPO_DIR/host/mdd_update.py" \
+      --repo "$REPO_DIR" --data "$MDD_DATA_DIR" --version "$version" \
+      --repository "$repository" --install-images --install-mode "$MODE") || \
+      die "could not import Release images; set MDD_BUILD_IMAGES=1 to build from source"
+  fi
+  [ -n "$distributed" ] || die "Release image importer returned no Engine image"
+  MDD_ENGINE_DISTRIBUTION_IMAGE=$distributed
+  export MDD_ENGINE_DISTRIBUTION_IMAGE MDD_REUSE_WEBUI MDD_PRUNE_BUILD_CACHE
+  if [ "$MODE" = docker ]; then
+    MDD_REUSE_CONTROL_IMAGE=1
+    export MDD_REUSE_CONTROL_IMAGE
+  fi
+  info "using verified Release images for $(host_arch)"
 }
 
 # Overlay the runtime-owned files onto $1 and retag the result as the engine image. Needs no
@@ -1084,21 +1148,33 @@ restart_control_plane() {
   fi
 }
 
+cleanup_release_artifacts() {
+  set -- python3 "$REPO_DIR/host/mdd_image_cleanup.py" \
+    --version "$(tr -d '\n' < "$REPO_DIR/VERSION")"
+  [ "${MDD_PRUNE_BUILD_CACHE:-0}" != 1 ] || set -- "$@" --prune-build-cache
+  if "$@"; then
+    if [ "${MDD_PRUNE_BUILD_CACHE:-0}" = 1 ]; then
+      info "removed superseded MDD images and dangling legacy build cache"
+    else
+      info "removed superseded MDD image tags and dangling images"
+    fi
+  else
+    warn "could not remove every superseded MDD image or cache record; services remain healthy"
+  fi
+}
+
 # ------------------------------------------------------------------ subcommands
 cmd_install() {
   need_root
-  # Release assets carry this one-transition marker only so v1.3.4 can hand off safely.
-  # It is not product configuration and must not remain in the installed source tree.
   rm -f "$REPO_DIR/EDITION"
   resolve_mode
   info "MDD Sim Gateway install — repo: $REPO_DIR  (mode: ${B}$MODE${N})"
-  # The engine image compiles Asterisk + pcsc-lite + the Python SWu tunnel deps from source. On
-  # low-power ARM boards (Raspberry Pi, Armbian SBCs) this first build can take 20-30 minutes —
-  # only once, since later installs reuse the built image. Warn up front so a long, quiet build
-  # isn't mistaken for a hang.
+  # Development checkouts have no CI-generated asset manifest and therefore compile from source.
+  # Warn only on that path; official release archives import the matching native image instead.
   ensure_docker
   docker_preflight
-  if ! docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1; then
+  if ! docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 \
+      && { [ ! -f "$ENGINE_HANDOFF_MANIFEST" ] || [ "${MDD_BUILD_IMAGES:-0}" = 1 ]; }; then
     warn "the engine image builds from source (Asterisk + pcsc-lite + SWu tunnel deps). On low-power ARM"
     warn "machines this can take 20-30 minutes — this is normal, please be patient. It runs only once;"
     warn "later installs/reloads reuse the built image."
@@ -1112,6 +1188,7 @@ cmd_install() {
   else
     info "lpac already installed at $MDD_DATA_DIR/lpac/lpac"
   fi
+  prepare_release_images
   ensure_engine_image
   persist_mode "$MODE"
   if [ "$MODE" = docker ]; then
@@ -1125,7 +1202,7 @@ cmd_install() {
     run_control_local
   fi
   run_orchestrator
-  rm -f "$ENGINE_HANDOFF_MANIFEST"
+  cleanup_release_artifacts
   DATA_ABS=$(data_dir_abs)
   LAN_IP="${MDD_ADVERTISE_ADDR:-$(detect_lan_ip)}"
   printf '\n'
@@ -1143,7 +1220,6 @@ cmd_install() {
 
 cmd_reload() {
   need_root
-  # See cmd_install: remove the compatibility marker after the old updater applies the archive.
   rm -f "$REPO_DIR/EDITION"
   resolve_mode
   RECREATE_ENGINES=0
@@ -1166,15 +1242,10 @@ cmd_reload() {
   ensure_xray
   ensure_cellular_tools
   ENGINE_IMAGE_CHANGED=0
-  if [ "$PRESERVE_ENGINES" = 1 ] && [ -f "$ENGINE_HANDOFF_MANIFEST" ]; then
+  if [ "$PRESERVE_ENGINES" = 1 ] && [ -f "$ENGINE_HANDOFF_MANIFEST" ] \
+      && [ -f "$MDD_DATA_DIR/update/network.json" ]; then
     if engine_matches_checkout; then
       info "installed engine already matches the release handoff — preserving it"
-    elif [ "$(host_arch)" != arm64 ]; then
-      # Release image assets are ARM64-only. The old updater still passes --no-engines on
-      # amd64, so explicitly release that preservation request and let the normal native
-      # overlay/build path refresh the Engine instead of importing an incompatible archive.
-      info "no distributed Engine asset for $(host_arch) — refreshing the native image locally"
-      PRESERVE_ENGINES=0
     else
       handoff_release_engine
       PRESERVE_ENGINES=0
@@ -1224,18 +1295,12 @@ cmd_reload() {
       fi
     fi
   fi
-  rm -f "$ENGINE_HANDOFF_MANIFEST"
   # Run cleanup from the newly applied checkout, not from the updater's staged runner.  An
   # upgrade launched on an older version keeps executing that old runner after apply_tree, while
   # this installer is already the target version.  Keeping cleanup here makes the first upgrade
   # into a fixed release reclaim old images too.  Failure is best-effort: a healthy reload must
   # not be reported as failed only because optional disk cleanup could not run.
-  if python3 "$REPO_DIR/host/mdd_image_cleanup.py" \
-      --version "$(tr -d '\n' < "$REPO_DIR/VERSION")"; then
-    info "removed superseded MDD image tags and dangling images"
-  else
-    warn "could not remove every superseded MDD image; services remain updated"
-  fi
+  cleanup_release_artifacts
   info "reload complete (data preserved)"
 }
 
@@ -1795,7 +1860,7 @@ usage() {
 ${B}MDD Sim Gateway installer${N}
 
   $0                      auto: install if absent, else show status + control menu
-  $0 install [--mode local|docker]   build + run (default mode: local)
+  $0 install [--mode local|docker]   install + run (Release assets when available)
   $0 reload  [--mode local|docker] [--no-cache] [--engines]   rebuild + restart (keep data)
   $0 start | stop | restart          control-plane lifecycle (systemd or docker per mode)
   $0 enable-autostart     start on boot
@@ -1823,6 +1888,7 @@ ${B}Modes:${N}
 
 Env: MDD_MODE(=local) MDD_PORT(=$MDD_PORT) MDD_DATA_DIR(=$MDD_DATA_DIR)
      MDD_ADVERTISE_ADDR(auto) MDD_BIND(=$MDD_BIND) PCSC_VERSION(=$PCSC_VERSION)
+     MDD_BUILD_IMAGES(=0; set 1 to force source builds)
 EOF
 }
 

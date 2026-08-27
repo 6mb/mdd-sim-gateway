@@ -89,12 +89,12 @@ class EngineImageRefreshTests(unittest.TestCase):
         self.assertIn('PRESERVE_ENGINES=1', reload_body)
         handoff_gate = reload_body.index(
             '[ "$PRESERVE_ENGINES" = 1 ] && [ -f "$ENGINE_HANDOFF_MANIFEST" ]')
+        self.assertIn('[ -f "$MDD_DATA_DIR/update/network.json" ]',
+                      reload_body[handoff_gate:])
         handoff = reload_body.index("handoff_release_engine", handoff_gate)
         preserve = reload_body.index('if [ "$PRESERVE_ENGINES" = 1 ]; then', handoff)
         self.assertIn("PRESERVE_ENGINES=0", reload_body[handoff:preserve])
-        self.assertIn('elif [ "$(host_arch)" != arm64 ]; then', reload_body[handoff_gate:preserve])
-        self.assertLess(reload_body.index("refreshing the native image locally", handoff_gate),
-                        handoff)
+        self.assertNotIn("refreshing the native image locally", reload_body[handoff_gate:preserve])
         self.assertLess(preserve, reload_body.index('[ "$ENGINE_IMAGE_CHANGED" = 1 ]'))
 
     def test_release_handoff_reuses_the_old_updaters_private_route_file(self):
@@ -102,6 +102,20 @@ class EngineImageRefreshTests(unittest.TestCase):
         self.assertIn('network_file="$MDD_DATA_DIR/update/network.json"', handoff)
         self.assertIn('--network-config "$network_file" --engine-handoff', handoff)
         self.assertIn("MDD_ENGINE_DISTRIBUTION_IMAGE=$distributed", handoff)
+        self.assertIn("MDD_PRUNE_BUILD_CACHE=1", handoff)
+
+    def test_official_fresh_install_imports_release_images_before_engine_setup(self):
+        install_body = _body("cmd_install")
+        self.assertLess(install_body.index("prepare_release_images"),
+                        install_body.index("ensure_engine_image"))
+        prepare = _body("prepare_release_images")
+        self.assertIn('[ -f "$ENGINE_HANDOFF_MANIFEST" ] || return', prepare)
+        self.assertIn('--install-images --install-mode "$MODE"', prepare)
+        self.assertIn("MDD_BUILD_IMAGES=1", prepare)
+        self.assertIn("MDD_REUSE_WEBUI=1", prepare)
+        self.assertIn("MDD_REUSE_CONTROL_IMAGE=1", prepare)
+        self.assertIn("engine_matches_checkout", prepare)
+        self.assertIn("control_image_matches_checkout", prepare)
 
 
 if __name__ == "__main__":

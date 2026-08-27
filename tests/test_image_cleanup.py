@@ -59,6 +59,21 @@ class ImageCleanupTests(unittest.TestCase):
                          ["docker", "image", "prune", "--force", "--filter",
                           "label=io.mdd-sim-gateway.managed=true"])
 
+    def test_release_transition_prunes_only_default_dangling_build_cache(self):
+        completed = [
+            SimpleNamespace(returncode=0, stdout=""),
+            SimpleNamespace(returncode=0, stdout=""),
+            SimpleNamespace(returncode=0, stdout=""),
+        ]
+        with patch.object(mdd_image_cleanup.subprocess, "run",
+                          side_effect=completed) as run:
+            self.assertTrue(mdd_image_cleanup.prune_superseded_images(
+                "1.5.3", prune_build_cache=True))
+        self.assertEqual(run.call_args_list[-1], call(
+            ["docker", "builder", "prune", "--force"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        self.assertNotIn("--all", run.call_args_list[-1].args[0])
+
     def test_listing_failure_aborts_without_removing_anything(self):
         with patch.object(mdd_image_cleanup.subprocess, "run",
                           return_value=SimpleNamespace(returncode=1, stdout="")) as run:
@@ -76,9 +91,12 @@ class ImageCleanupTests(unittest.TestCase):
         start = installer.index("cmd_reload() {")
         end = installer.index("\n}\n", start)
         reload_body = installer[start:end]
-        cleanup = reload_body.index('host/mdd_image_cleanup.py')
-        self.assertLess(reload_body.index('rm -f "$ENGINE_HANDOFF_MANIFEST"'), cleanup)
+        cleanup = reload_body.index("cleanup_release_artifacts")
         self.assertLess(cleanup, reload_body.index('info "reload complete (data preserved)"'))
+        helper_start = installer.index("cleanup_release_artifacts() {")
+        helper_end = installer.index("\n}\n", helper_start)
+        helper = installer[helper_start:helper_end]
+        self.assertIn("--prune-build-cache", helper)
 
 
 if __name__ == "__main__":

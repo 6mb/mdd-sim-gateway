@@ -2,7 +2,18 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
-## [1.5.3] - 2026-08-26
+## [1.5.3] - 2026-08-27
+
+### Changed
+
+- Official releases now provide native ARM64 and amd64 Engine and Control image assets. Fresh
+  installs from the official source archive and one-click upgrades download only the host's
+  architecture, verify its checksum and image identity, and avoid compiling Asterisk or Docker
+  control images on the gateway. Development checkouts retain an explicit source-build path.
+
+- After moving an official installation to verified prebuilt images, the installer removes
+  dangling legacy Docker build cache left by earlier on-device builds. It uses the conservative
+  builder prune mode without `--all` and does not remove images, containers, or volumes.
 
 ### Fixed
 
