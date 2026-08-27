@@ -22,6 +22,17 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Existing amd64 Docker-control installations on v1.4.x can now complete a direct v1.5.3
+  upgrade after the documented one-time mode-marker bootstrap. The target installer detects the
+  live Docker control plane, imports both verified amd64 Engine and Control assets through the
+  old updater's selected route, and restores the persisted Docker mode only after reload succeeds.
+  The bootstrap remains necessary because the immutable v1.4.x updater otherwise requests its
+  hard-coded ARM64 Control asset before any v1.5.3 code can run.
+
+- The navigation sidebar now follows Safari's dynamic viewport and provides native momentum
+  touch scrolling with bottom safe-area padding, so iPad users can reach version, repository and
+  sign-out controls instead of having the lower sidebar clipped behind browser chrome.
+
 - [Issue #17](https://github.com/MddIdd/mdd-sim-gateway/issues/17): cellular SMS sending
   relied on an `mmcli` text-file option that is absent from ModemManager 1.20 on Ubuntu 22.04.
   SMS objects are now created through ModemManager's stable D-Bus interface, preserving message

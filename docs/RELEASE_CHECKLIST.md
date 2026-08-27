@@ -22,9 +22,15 @@
 - 在 amd64 设备分别验证正式源码包全新安装和一键升级：只下载 `amd64` Engine，Docker
   控制面模式再下载 `amd64` Control；安装日志不得出现 Asterisk 或 Control 镜像源码构建，
   导入后归档被删除，旧 dangling build cache 被回收。抽查原生控制面模式不下载 Control。
-- 必须另从仍运行 `v1.4.1` 旧升级器的设备直接升级到本版本，确认源码包内的一次性 Engine
-  接力清单生效：不要求先安装桥接版本，不直连 GHCR，也不能因旧升级器的 `--no-engines`
-  参数留下旧镜像。
+- 必须另从仍运行 `v1.4.1` 旧升级器的 ARM64 设备直接升级到本版本，确认源码包内的一次性
+  镜像接力清单生效：不要求先安装桥接版本，不直连 GHCR，也不能因旧升级器的
+  `--no-engines` 参数留下旧 Engine。
+- 在 amd64 + Docker 控制面的 `v1.4.x` 设备按安装文档执行一次模式标记引导后直接升级，确认
+  旧升级器不再请求 ARM64 Control；目标安装器必须从在位容器识别 Docker 模式，沿原升级线路
+  导入 amd64 Engine 与 Control，且成功后 `install-mode` 恢复为 `docker`。另验证接管前失败时
+  可从 `install-mode.pre-v1.5.3` 恢复，不得宣称此类旧安装无需引导即可全自动跨级。
+- 在 iPad Safari 横屏下打开菜单较多的管理面，确认左栏可触摸滚动到底部，版本、仓库操作和
+  退出按钮均可见；浏览器工具栏伸缩及安全区变化后不得再次截断。
 - 全新安装与重复安装均成功，断电重启后管理面自动启动。
 - ModemManager/NetworkManager、pcscd、sing-box、lpac 状态符合预期。
 - 已有 Docker 与外部容器保持不变；MDD 容器均带归属标签，端口冲突会安全中止。

@@ -91,18 +91,30 @@ class EngineImageRefreshTests(unittest.TestCase):
             '[ "$PRESERVE_ENGINES" = 1 ] && [ -f "$ENGINE_HANDOFF_MANIFEST" ]')
         self.assertIn('[ -f "$MDD_DATA_DIR/update/network.json" ]',
                       reload_body[handoff_gate:])
-        handoff = reload_body.index("handoff_release_engine", handoff_gate)
+        handoff = reload_body.index("handoff_release_images", handoff_gate)
         preserve = reload_body.index('if [ "$PRESERVE_ENGINES" = 1 ]; then', handoff)
         self.assertIn("PRESERVE_ENGINES=0", reload_body[handoff:preserve])
         self.assertNotIn("refreshing the native image locally", reload_body[handoff_gate:preserve])
         self.assertLess(preserve, reload_body.index('[ "$ENGINE_IMAGE_CHANGED" = 1 ]'))
 
-    def test_release_handoff_reuses_the_old_updaters_private_route_file(self):
-        handoff = _body("handoff_release_engine")
+    def test_release_handoff_reuses_route_and_imports_images_for_actual_mode(self):
+        handoff = _body("handoff_release_images")
         self.assertIn('network_file="$MDD_DATA_DIR/update/network.json"', handoff)
-        self.assertIn('--network-config "$network_file" --engine-handoff', handoff)
+        self.assertIn('--network-config "$network_file"', handoff)
+        self.assertIn('--install-images --install-mode "$MODE"', handoff)
         self.assertIn("MDD_ENGINE_DISTRIBUTION_IMAGE=$distributed", handoff)
+        self.assertIn('if [ "$MODE" = docker ]', handoff)
+        self.assertIn("MDD_REUSE_CONTROL_IMAGE=1", handoff)
         self.assertIn("MDD_PRUNE_BUILD_CACHE=1", handoff)
+
+    def test_docker_handoff_requires_both_release_images_and_restores_mode(self):
+        reload_body = _body("cmd_reload")
+        match = reload_body.index("engine_matches_checkout")
+        handoff = reload_body.index("handoff_release_images", match)
+        self.assertIn("control_image_matches_checkout", reload_body[match:handoff])
+        persist = reload_body.index('persist_mode "$MODE"', handoff)
+        self.assertLess(reload_body.index("run_orchestrator", handoff), persist)
+        self.assertLess(persist, reload_body.index("cleanup_release_artifacts", persist))
 
     def test_official_fresh_install_imports_release_images_before_engine_setup(self):
         install_body = _body("cmd_install")

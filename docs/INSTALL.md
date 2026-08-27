@@ -50,12 +50,29 @@ daemon，因此不支持 rootless 模式。
 控制面不依赖浏览器登录，每 6 小时检查一次 Release。提示更新模式会通过已启用的 Webhook、Telegram 或 PushPlus 通道发送一次去重通知；选择“仅主版本”时，只处理在 `update-policy.json` 中明确标记为 `main` 的 Release，不从版本号位数推断。
 正式 Release 归档包内含 CI 预构建的 `webui/dist`，一键升级校验整个归档后直接复用，因此不需要在树莓派上下载 Node 镜像或编译前端。GitHub `main` 与其 Release 是唯一支持的更新通道。
 
-`v1.4.1` 的升级器早于 Engine Release 资产，完成源码校验后会调用新版本安装器并要求保留旧
-Engine。为允许用户直接跨级，正式源码包额外携带 Engine 校验清单；新安装器会读取旧升级任务
-尚未删除的私有线路文件，以相同的直连和代理候选下载、校验并导入与主机架构匹配的
-Engine。从 v1.5.3 起 ARM64 与 amd64 都会取得各自的预构建 Engine。接力只在旧升级任务的
-私有网络文件仍存在时触发，不改变日常手工执行 `--no-engines` 的含义，也不要求先安装桥接
-版本；校验清单作为正式包元数据保留，供重复安装继续使用预构建资产。
+`v1.4.1` 的升级器早于多架构 Release 资产，完成源码校验后会调用新版本安装器并要求保留旧
+Engine。为允许用户直接跨级，正式源码包额外携带镜像校验清单；新安装器会读取旧升级任务
+尚未删除的私有线路文件，以相同的直连和代理候选下载、校验并导入与主机架构、实际安装模式
+匹配的 Engine 与 Control。从 v1.5.3 起 ARM64 与 amd64 都会取得各自的预构建镜像。接力只在
+旧升级任务的私有网络文件仍存在时触发，不改变日常手工执行 `--no-engines` 的含义；校验清单
+作为正式包元数据保留，供重复安装继续使用预构建资产。
+
+已经安装的 **amd64 + Docker 控制面 v1.4.x** 还有一个旧升级器自身无法由目标版本修补的
+前置问题：它会在覆盖新源码之前固定下载 ARM64 Control 资产并中止。此类设备升级到 v1.5.3
+前需执行一次以下引导，让旧升级器跳过这一步；这不会停止或迁移当前 Docker 控制面：
+
+```bash
+MDD_DATA_DIR=$(sudo sed -n '1p' /etc/mdd-sim-gateway/data-dir)
+test -n "$MDD_DATA_DIR" && test -d "$MDD_DATA_DIR"
+sudo cp -p "$MDD_DATA_DIR/install-mode" "$MDD_DATA_DIR/install-mode.pre-v1.5.3"
+printf 'local\n' | sudo tee "$MDD_DATA_DIR/install-mode" >/dev/null
+```
+
+随后从 WebUI 正常执行更新。v1.5.3 安装器会从仍在运行的 Control 容器识别真实 Docker 模式，
+下载 amd64 Engine 与 Control，并在服务成功恢复后把 `install-mode` 自动写回 `docker`。若更新
+在新源码接管前失败，可用
+`sudo cp "$MDD_DATA_DIR/install-mode.pre-v1.5.3" "$MDD_DATA_DIR/install-mode"` 恢复标记后排查。
+ARM64 Docker、原生控制面以及已进入 v1.5.x 的安装不需要这一步，也不需要先安装其他桥接版本。
 
 也可以随时在主机上手动更新：备份并用受信任来源更新源码后执行：
 

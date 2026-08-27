@@ -692,27 +692,32 @@ control_image_matches_checkout() {
   [ "$identity" = "$(host_arch)|$version" ]
 }
 
-handoff_release_engine() {
-  have python3 || die "python3 is required to import the Release Engine asset"
+handoff_release_images() {
+  have python3 || die "python3 is required to import the Release image assets"
   version=$(tr -d '\n' < "$REPO_DIR/VERSION")
   repository=${MDD_UPDATE_REPOSITORY:-MddIdd/mdd-sim-gateway}
   network_file="$MDD_DATA_DIR/update/network.json"
   if [ -f "$network_file" ]; then
     distributed=$(python3 "$REPO_DIR/host/mdd_update.py" \
       --repo "$REPO_DIR" --data "$MDD_DATA_DIR" --version "$version" \
-      --repository "$repository" --network-config "$network_file" --engine-handoff) || \
-      die "could not import the Engine Release asset"
+      --repository "$repository" --network-config "$network_file" \
+      --install-images --install-mode "$MODE") || \
+      die "could not import the Release image assets"
   else
     distributed=$(python3 "$REPO_DIR/host/mdd_update.py" \
       --repo "$REPO_DIR" --data "$MDD_DATA_DIR" --version "$version" \
-      --repository "$repository" --engine-handoff) || \
-      die "could not import the Engine Release asset"
+      --repository "$repository" --install-images --install-mode "$MODE") || \
+      die "could not import the Release image assets"
   fi
-  [ -n "$distributed" ] || die "Engine Release handoff returned no image"
+  [ -n "$distributed" ] || die "Release image handoff returned no Engine image"
   MDD_ENGINE_DISTRIBUTION_IMAGE=$distributed
   MDD_PRUNE_BUILD_CACHE=1
   export MDD_ENGINE_DISTRIBUTION_IMAGE MDD_PRUNE_BUILD_CACHE
-  info "old updater handed off to verified Release Engine asset $distributed"
+  if [ "$MODE" = docker ]; then
+    MDD_REUSE_CONTROL_IMAGE=1
+    export MDD_REUSE_CONTROL_IMAGE
+  fi
+  info "old updater handed off to verified $(host_arch) Release images"
 }
 
 # An official source archive contains a CI-generated image checksum manifest. A development
@@ -1246,10 +1251,11 @@ cmd_reload() {
   ENGINE_IMAGE_CHANGED=0
   if [ "$PRESERVE_ENGINES" = 1 ] && [ -f "$ENGINE_HANDOFF_MANIFEST" ] \
       && [ -f "$MDD_DATA_DIR/update/network.json" ]; then
-    if engine_matches_checkout; then
-      info "installed engine already matches the release handoff — preserving it"
+    if engine_matches_checkout \
+        && { [ "$MODE" = local ] || control_image_matches_checkout; }; then
+      info "installed release images already match the handoff — preserving them"
     else
-      handoff_release_engine
+      handoff_release_images
       PRESERVE_ENGINES=0
     fi
   fi
@@ -1297,6 +1303,10 @@ cmd_reload() {
       fi
     fi
   fi
+  # An amd64 Docker v1.4.x bootstrap temporarily writes "local" so its immutable old updater
+  # skips the ARM64-only Control asset. resolve_mode has already selected the real Docker
+  # installation from its live container; restore that authoritative mode only after reload.
+  persist_mode "$MODE"
   # Run cleanup from the newly applied checkout, not from the updater's staged runner.  An
   # upgrade launched on an older version keeps executing that old runner after apply_tree, while
   # this installer is already the target version.  Keeping cleanup here makes the first upgrade
