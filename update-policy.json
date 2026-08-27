@@ -7,5 +7,15 @@
   "auto_update": {
     "version": "1.5.3",
     "not_before": "2026-08-27T06:56:12Z"
+  },
+  "channels": {
+    "all": {
+      "version": "1.5.3",
+      "not_before": "2026-08-27T06:56:12Z"
+    },
+    "main": {
+      "version": "1.5.0",
+      "not_before": "2026-08-27T06:56:12Z"
+    }
   }
 }
