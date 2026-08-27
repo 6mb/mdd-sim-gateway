@@ -5,7 +5,7 @@
     "kind": "patch"
   },
   "auto_update": {
-    "version": "",
-    "not_before": ""
+    "version": "1.5.3",
+    "not_before": "2026-08-27T06:56:12Z"
   }
 }
