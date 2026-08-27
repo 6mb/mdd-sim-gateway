@@ -810,25 +810,23 @@ async def _auto_start_hotplugged_line(iid: str) -> None:
                           and str(item.get("iccid") or "") == str(inst.get("iccid") or "")), None)
         if not card_info:
             return
-        device_id, device_type = _device_for_card(card_info, cards)
-        desired = device_state.desired()
-        wanted = ((desired.get("devices") or {}).get(device_id)
-                  or desired.get("defaults") or {})
-        if not wanted.get("vowifi_enabled", True):
-            return
 
-        # A newly-seen SIM is intentionally persisted as a stopped draft while the card
-        # monitor is still learning its identity. Once the settled hotplug snapshot has all
-        # mandatory values, promote that same line automatically. This makes inserting a
-        # modem/SIM a complete operation instead of leaving the user to discover and submit
-        # the manual provisioning form. Only drafts are promoted here: a ready line that the
-        # user explicitly disabled remains disabled.
+        # Completing a newly discovered line describes the SIM and its hardware; it does not
+        # start VoWiFi. Do this before consulting the device switch so a deliberately disabled
+        # modem still gets a usable line record whose switch can be enabled later in the UI.
         if inst.get("provisioning_state") == "draft":
             inst = await asyncio.to_thread(_auto_promote_card_draft, inst, card_info, cards)
             if inst.get("provisioning_state") == "draft":
                 log.info("hotplug draft %s awaiting: %s", iid,
                          ", ".join(inst.get("auto_provision_missing") or []))
                 return
+
+        device_id, device_type = _device_for_card(card_info, cards)
+        desired = device_state.desired()
+        wanted = ((desired.get("devices") or {}).get(device_id)
+                  or desired.get("defaults") or {})
+        if not wanted.get("vowifi_enabled", True):
+            return
         if not inst.get("enabled", True):
             return
         await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),

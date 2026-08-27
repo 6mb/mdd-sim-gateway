@@ -15,6 +15,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   hexadecimal portion of an ICCID in uppercase while the saved PC/SC identity is lowercase.
   Cellular SMS modem lookup and receive mapping now compare canonical case-insensitive ICCIDs.
 
+- [Issue #19](https://github.com/MddIdd/mdd-sim-gateway/issues/19): inserting a new SIM while
+  VoWiFi was disabled left its automatically discovered line permanently in draft state and
+  disabled the UI switch needed to recover it. Complete drafts are now promoted to usable line
+  records before the VoWiFi start policy is evaluated; the engine remains stopped until enabled.
+
 - [Issue #15](https://github.com/MddIdd/mdd-sim-gateway/issues/15): the v1.5.2 image cleanup
   ran in the updater process copied from the installed version, so the first upgrade from an
   older release could not execute the newly added cleanup. Cleanup now runs from the target
