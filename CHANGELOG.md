@@ -6,6 +6,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- [Issue #17](https://github.com/MddIdd/mdd-sim-gateway/issues/17): cellular SMS sending
+  relied on an `mmcli` text-file option that is absent from ModemManager 1.20 on Ubuntu 22.04.
+  SMS objects are now created through ModemManager's stable D-Bus interface, preserving message
+  punctuation and Unicode without requiring a newer command-line client.
+
+- [Issue #18](https://github.com/MddIdd/mdd-sim-gateway/issues/18): ModemManager can report the
+  hexadecimal portion of an ICCID in uppercase while the saved PC/SC identity is lowercase.
+  Cellular SMS modem lookup and receive mapping now compare canonical case-insensitive ICCIDs.
+
 - [Issue #15](https://github.com/MddIdd/mdd-sim-gateway/issues/15): the v1.5.2 image cleanup
   ran in the updater process copied from the installed version, so the first upgrade from an
   older release could not execute the newly added cleanup. Cleanup now runs from the target
