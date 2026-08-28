@@ -2,6 +2,21 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- Public Issue triage now analyzes a new Issue only once, accepts reruns only from the maintainer,
+  caps each Issue at three attempts, preserves the last successful analysis when a later attempt
+  fails, and manages only AI-prefixed labels so human decisions are never removed automatically.
+
+### Added
+
+- New public Issues and maintainer-approved reruns can receive a bounded, read-only Codex triage comment that is
+  refreshed when reporters add information. Automated labels expose the inferred category,
+  priority, missing-information state and need for maintainer review; the workflow cannot change
+  code, merge, deploy, close an Issue or expose its API credential to the model's command process.
+
 ## [1.5.4] - 2026-08-28
 
 ### Fixed
