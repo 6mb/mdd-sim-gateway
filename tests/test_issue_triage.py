@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / ".github" / "scripts" / "issue_triage.py"
+WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "issue-triage.yml"
 SPEC = importlib.util.spec_from_file_location("issue_triage", SCRIPT)
 issue_triage = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -146,6 +147,14 @@ class IssueTriageTests(unittest.TestCase):
         self.assertIn(issue_triage.MARKER, comment)
         self.assertIn(issue_triage.ATTEMPT_MARKER.format(attempt=2), comment)
         self.assertNotIn(issue_triage.FAILURE_MARKER, comment)
+
+    def test_failure_notice_does_not_depend_on_outputs_from_failed_job(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        failure_job = workflow.split("\n  report-failure:\n", 1)[1]
+
+        self.assertIn("if: needs.analyze.result == 'failure'", failure_job)
+        self.assertNotIn("needs.analyze.outputs.attempt", failure_job)
+        self.assertIn("Math.max(0, ...attempts) + 1", failure_job)
 
     def test_invalid_enum_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Invalid category"):
