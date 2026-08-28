@@ -2,17 +2,14 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
-## [1.5.4] - 2026-08-27
-
-### Changed
-
-- Automatic and notify-only update scopes now converge on independent policy targets. “All
-  versions” follows the approved latest Release, while “main versions only” can install the
-  configured stable main Release by tag even after a newer patch exists. The legacy promotion
-  field remains available during the transition so gateways older than v1.5.4 can still receive
-  the latest approved patch.
+## [1.5.4] - 2026-08-28
 
 ### Fixed
+
+- Fixed update-scope selection so “all versions” follows the approved latest Release while
+  “main versions only” can still install its independently configured stable Release by tag after
+  newer patches are published. The legacy promotion field remains synchronized so gateways older
+  than v1.5.4 can receive the approved patch.
 
 - [Issue #21](https://github.com/MddIdd/mdd-sim-gateway/issues/21): a VoWiFi health rebuild
   could remove its failed container, sample the reader while its card identity was briefly
