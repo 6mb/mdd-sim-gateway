@@ -21,6 +21,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Failed Issue analyses now leave a separate bounded notice even when the failed model Job cannot
+  expose its step outputs, while preserving the last successful analysis comment.
+
 - Fixed update-scope selection so “all versions” follows the approved latest Release while
   “main versions only” can still install its independently configured stable Release by tag after
   newer patches are published. The legacy promotion field remains synchronized so gateways older
