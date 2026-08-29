@@ -295,8 +295,8 @@ class BridgeIdentityTests(unittest.TestCase):
     bridge rebuild verification time out (issue #26).
     """
 
-    CARD_ICCID = "8986112345678901234"
-    STALE_AT_ICCID = "8999999999999999999"
+    CARD_ICCID = "8900000000000000001"
+    STALE_AT_ICCID = "8900000000000000002"
 
     def _card(self, csim_responses):
         card = object.__new__(vpcd_modem_bridge.ModemCard)
