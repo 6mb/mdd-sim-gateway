@@ -4,6 +4,41 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Incoming VoWiFi calls now remain available for the configured answer window while the browser
+  is closed. After a call notification, signing in opens a global Answer/Decline overlay from any
+  WebUI page and automatically registers every enabled line; voicemail still begins at the same
+  configured deadline when nobody answers.
+
+- Testing an individual node now returns a redacted summary of how the gateway parsed the
+  link — protocol, transport, TLS/Reality, SNI, ALPN, obfuscation, UDP capability and which
+  engine carries it, with no address or secret — so a node that works in another client can
+  be compared field by field.
+
+- New public Issues and maintainer-approved reruns can receive a bounded, read-only Codex triage comment that is
+  refreshed when reporters add information. Automated labels expose the inferred category,
+  priority, missing-information state and need for maintainer review; the workflow cannot change
+  code, merge, deploy, close an Issue or expose its API credential to the model's command process.
+
+### Changed
+
+- VLESS REALITY nodes now run on the bundled Xray-core instead of sing-box, over the same
+  loopback bridge XHTTP already used. REALITY's wire details move with Xray, so a server on a
+  newer Xray build could answer Xray clients while sing-box failed the handshake with
+  "reality verification failed" — a version skew the gateway no longer sits in the middle of.
+  Nodes sing-box handles correctly are untouched. The pinned Xray version stays on the newest
+  release upstream marks stable; `MDD_XRAY_VERSION` may now be overridden together with
+  `MDD_XRAY_SHA256_AMD64`/`_ARM64` for an operator who must match a prerelease server.
+
+- Public Issue triage now separates confirmed evidence from at most two likely causes, includes
+  recent reports by the same author for duplicate detection, asks only for blocking information,
+  and publishes a shorter action-oriented maintainer handoff instead of a general system analysis.
+
+- Public Issue triage now analyzes a new Issue only once, accepts reruns only from the maintainer,
+  caps each Issue at three attempts, preserves the last successful analysis when a later attempt
+  fails, and manages only AI-prefixed labels so human decisions are never removed automatically.
+
 ### Fixed
 
 - [Issue #26](https://github.com/MddIdd/mdd-sim-gateway/issues/26): a physical-eSIM profile
@@ -31,39 +66,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   as themselves rather than as an unhealthy node pool. An exit whose sing-box refused to start
   is no longer published as ready, and the node test surfaces what sing-box/Xray-core reported
   instead of discarding it.
-
-### Changed
-
-- VLESS REALITY nodes now run on the bundled Xray-core instead of sing-box, over the same
-  loopback bridge XHTTP already used. REALITY's wire details move with Xray, so a server on a
-  newer Xray build could answer Xray clients while sing-box failed the handshake with
-  "reality verification failed" — a version skew the gateway no longer sits in the middle of.
-  Nodes sing-box handles correctly are untouched. The pinned Xray version stays on the newest
-  release upstream marks stable; `MDD_XRAY_VERSION` may now be overridden together with
-  `MDD_XRAY_SHA256_AMD64`/`_ARM64` for an operator who must match a prerelease server.
-
-### Added
-
-- Testing an individual node now returns a redacted summary of how the gateway parsed the
-  link — protocol, transport, TLS/Reality, SNI, ALPN, obfuscation, UDP capability and which engine carries it, with no
-  address or secret — so a node that works in another client can be compared field by field.
-
-### Changed
-
-- Public Issue triage now separates confirmed evidence from at most two likely causes, includes
-  recent reports by the same author for duplicate detection, asks only for blocking information,
-  and publishes a shorter action-oriented maintainer handoff instead of a general system analysis.
-
-- Public Issue triage now analyzes a new Issue only once, accepts reruns only from the maintainer,
-  caps each Issue at three attempts, preserves the last successful analysis when a later attempt
-  fails, and manages only AI-prefixed labels so human decisions are never removed automatically.
-
-### Added
-
-- New public Issues and maintainer-approved reruns can receive a bounded, read-only Codex triage comment that is
-  refreshed when reporters add information. Automated labels expose the inferred category,
-  priority, missing-information state and need for maintainer review; the workflow cannot change
-  code, merge, deploy, close an Issue or expose its API credential to the model's command process.
 
 ## [1.5.4] - 2026-08-28
 

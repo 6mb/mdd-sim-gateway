@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api, connectWs, setCsrf } from './api.js'
 import Softphone from './views/Softphone.jsx'
+import GlobalSoftphone from './GlobalSoftphone.jsx'
 import Messages from './views/Messages.jsx'
 import Esim from './views/Esim.jsx'
 import Keepalive from './views/Keepalive.jsx'
@@ -221,6 +222,7 @@ export default function App() {
   }[view]
   const issueUrl = `${(systemMeta.repository_url || 'https://github.com/MddIdd/mdd-sim-gateway').replace(/\/$/, '')}/issues/new/choose`
   return <div className="u-shell">
+    <GlobalSoftphone instances={instances} excludedId={view === 'calls' ? sel?.id : null} showToast={showToast} />
     <aside className={`u-sidebar ${menuOpen?'open':''}`}>
       <div className="u-brand"><img src="/logo.svg" alt="" /><div>MDD Sim Gateway<small>{t('4G + VoWiFi unified')}</small></div></div>
       <nav>{NAV.map(([key,label,icon])=><button key={key} className={view===key?'active':''} onClick={()=>{setView(key);setMenuOpen(false)}}><span>{icon}</span>{t(label)}{key==='diagnostics'&&!!systemMeta.host_alerts?.length&&<i className={`u-nav-dot ${systemMeta.host_alerts.some(a=>a.severity==='critical')?'critical':'warning'}`} title={t('The gateway host needs attention')}/>}{key==='calls'&&!!systemMeta.unheard_voicemails&&<i className="u-nav-dot critical" title={t('There are voicemails you have not played')}/>}</button>)}</nav>
