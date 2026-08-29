@@ -57,6 +57,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   connection state until registration produces real evidence, and device/SIM cards stay on the
   discovery placeholder until the control plane finishes its first hardware scan.
 
+- Asynchronous WebUI data now consistently distinguishes loading, confirmed empty state and
+  request failure. First sign-in, line/device switches, call history, logs, allowance, keeping,
+  eSIM capability, proxy status, notification delivery and system settings no longer flash a
+  false “none”, “off”, “not connected” or default configuration while their APIs are pending.
+
 - [Issue #22](https://github.com/MddIdd/mdd-sim-gateway/issues/22): switching to another
   device while a VoWiFi, cellular-data or flight-mode request was still pending could carry
   the first device's temporary “starting/stopping” display into the second device. Capability

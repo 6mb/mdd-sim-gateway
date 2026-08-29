@@ -50,7 +50,7 @@ const zh = {
   'Activated at': '激活时间', 'Configure to enable reminders': '配置后通知',
   Updated: '更新时间', 'Carrier SMS': '运营商短信', Edit: '编辑',
   'Query allowance': '查询余量', 'Query settings': '查询设置', 'Working…': '处理中…',
-  'Could not load allowance data': '无法读取余额与余量', 'Allowance data saved': '余额与余量已保存', 'Save failed': '保存失败',
+  'Could not load allowance data': '无法读取余额与余量', 'Loading failed': '加载失败，请稍后重试', 'Allowance data saved': '余额与余量已保存', 'Save failed': '保存失败',
   'Allowance reply received and cached': '已收到运营商回复并缓存余量',
   'The query method for this carrier is unknown. Configure it below.': '不知道当前运营商的查询方式，请在下方设置。',
   'Send “{body}” to {recipient} to query the allowance? SMS charges may apply.': '将向 {recipient} 发送“{body}”查询余量，可能产生短信费用。是否继续？',

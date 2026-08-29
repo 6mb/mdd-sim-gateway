@@ -124,7 +124,7 @@ function RoundBtn({ icon, label, color, bg, onClick, active }) {
   )
 }
 
-export default function Softphone({ selected, subscribe, instances, cards, devices, setSelected, showToast }) {
+export default function Softphone({ selected, subscribe, instances, cards, devices, setSelected, showToast, initialLoading, loadErrors }) {
   const { t } = useI18n()
   const id = selected?.id
   const [prov, setProv] = useState(null)
@@ -144,6 +144,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   // Keyed by voicemail id. The <audio> is only created once the user asks to play, so a log
   // full of messages does not open a fetch per row.
   const [voicemails, setVoicemails] = useState({})
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [vmOpen, setVmOpen] = useState(null)
   const phone = useRef(null)
   // JsSIP can emit `unregistered` while a freshly-created UA is still opening its websocket.
@@ -169,10 +170,12 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   // return out of order: an older one landing last would put a stale list back on screen and
   // the verdict would flip back to "waiting". Only the newest request may write.
   const loadSeq = useRef(0)
-  const loadCalls = useCallback(() => {
+  const loadCalls = useCallback((showLoading = false) => {
     if (!id) return
     const seq = ++loadSeq.current
+    if (showLoading) setHistoryLoading(true)
     api.calls(id).then((r) => { if (seq === loadSeq.current) setCalls(r.calls || []) }).catch(() => {})
+      .finally(() => { if (seq === loadSeq.current) setHistoryLoading(false) })
   }, [id])
   const markHeard = (vid) => {
     if (voicemails[vid]?.listened) return
@@ -193,7 +196,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       .then((r) => setVoicemails(Object.fromEntries((r.voicemails || []).map((v) => [v.id, v]))))
       .catch(() => {})
   }, [id])
-  useEffect(() => { loadCalls(); loadVoicemails() }, [loadCalls, loadVoicemails])
+  useEffect(() => { loadCalls(true); loadVoicemails() }, [loadCalls, loadVoicemails])
   useEffect(() => { setCallSelMode(false); setCallSel(new Set()); setCallTransport('vowifi') }, [id])
   useEffect(() => {
     if (!cellularReady && callTransport === 'cellular') setCallTransport('vowifi')
@@ -528,6 +531,8 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
     } else { const ok = await phone.current.startRecording(); setRecording(ok) }
   }
 
+  if (initialLoading && !id) return <p role="status">{t('Loading')}…</p>
+  if (loadErrors?.instances && !id) return <p className="u-error">{t('Loading failed')}</p>
   if (!id) return (
     <div>
       <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
@@ -801,7 +806,8 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
           )}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minHeight: 0, overflow: 'auto' }}>
-          {calls.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-mute)' }}>{t('No calls yet.')}</div>}
+          {historyLoading && calls.length === 0 && <div role="status" style={{ fontSize: 13, color: 'var(--text-mute)' }}>{t('Loading')}…</div>}
+          {!historyLoading && calls.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-mute)' }}>{t('No calls yet.')}</div>}
           {calls.map((c) => {
             const s = (c.status || '').toLowerCase()
             const color = s === 'answered' ? GREEN : (s === 'rejected' || s === 'busy' || s === 'failed') ? RED
