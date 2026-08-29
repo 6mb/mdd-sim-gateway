@@ -8,6 +8,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Webhook, Telegram and PushPlus notifications can now override title and content per event,
+  with a shared field-only `{{variable}}` syntax, an in-page preview, per-event test delivery
+  and one-click restore. Empty templates preserve the existing wording. Standard webhooks now
+  also include rendered `title` and `content` fields, while custom webhook payloads can keep
+  using those fields inside their JSON/form/raw templates. Unknown events, properties and
+  variables are rejected when settings are saved; templates cannot evaluate expressions or run
+  code. PushPlus's existing HTML/text/Markdown/JSON selector is now labelled “content format”
+  so it is not confused with the new message templates.
+
 - Incoming VoWiFi calls now remain available for the configured answer window while the browser
   is closed. After a call notification, signing in opens a global Answer/Decline overlay from any
   WebUI page and automatically registers every enabled line; voicemail still begins at the same

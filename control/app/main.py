@@ -4005,6 +4005,11 @@ def api_put_settings(body: dict):
             raise HTTPException(400, "invalid new-device defaults")
         if any(not isinstance(value, bool) for value in defaults.values()):
             raise HTTPException(400, "new-device defaults must be boolean")
+    for channel in ("webhook", "telegram", "pushplus"):
+        try:
+            notify_push.validate_message_templates(body.get(channel) or {})
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid {channel} configuration: {exc}") from exc
     webhook = body.get("webhook") or {}
     if webhook.get("enabled"):
         try:
@@ -4152,17 +4157,25 @@ async def api_egress_test(country: str):
     return await _test_egress_country(country)
 
 
-def _test_push_payload() -> dict:
+def _test_push_payload(event: str = notify_push.EV_INCOMING_SMS) -> dict:
+    if event not in notify_push.NOTIFICATION_EVENTS:
+        raise ValueError("unknown notification test event")
     return notify_push.build_payload(
-        notify_push.EV_INCOMING_SMS,
+        event,
         {"id": "test", "name": "Gateway test", "iccid": "", "msisdn": ""},
         "+10000000000", "MDD Sim Gateway notification test")
+
+
+def _notification_test_event(body: dict) -> str:
+    return str(body.pop("_test_event", notify_push.EV_INCOMING_SMS) or
+               notify_push.EV_INCOMING_SMS)
 
 
 @app.post("/api/notifications/webhook/test")
 async def api_webhook_test(body: dict):
     try:
-        return await asyncio.to_thread(notify_push.send_webhook, body, _test_push_payload())
+        event = _notification_test_event(body)
+        return await asyncio.to_thread(notify_push.send_webhook, body, _test_push_payload(event))
     except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
         raise HTTPException(400 if isinstance(exc, (ValueError, json.JSONDecodeError)) else 502,
                             str(exc)) from exc
@@ -4171,7 +4184,8 @@ async def api_webhook_test(body: dict):
 @app.post("/api/notifications/telegram/test")
 async def api_telegram_test(body: dict):
     try:
-        return await asyncio.to_thread(notify_push.send_telegram, body, _test_push_payload())
+        event = _notification_test_event(body)
+        return await asyncio.to_thread(notify_push.send_telegram, body, _test_push_payload(event))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
@@ -4181,7 +4195,8 @@ async def api_telegram_test(body: dict):
 @app.post("/api/notifications/pushplus/test")
 async def api_pushplus_test(body: dict):
     try:
-        return await asyncio.to_thread(notify_push.send_pushplus, body, _test_push_payload())
+        event = _notification_test_event(body)
+        return await asyncio.to_thread(notify_push.send_pushplus, body, _test_push_payload(event))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
