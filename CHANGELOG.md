@@ -27,11 +27,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   engine carries it, with no address or secret — so a node that works in another client can
   be compared field by field.
 
-- New public Issues and maintainer-approved reruns can receive a bounded, read-only Codex triage comment that is
-  refreshed when reporters add information. Automated labels expose the inferred category,
-  priority, missing-information state and need for maintainer review; the workflow cannot change
-  code, merge, deploy, close an Issue or expose its API credential to the model's command process.
-
 ### Changed
 
 - VLESS REALITY nodes now run on the bundled Xray-core instead of sing-box, over the same
@@ -41,14 +36,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   Nodes sing-box handles correctly are untouched. The pinned Xray version stays on the newest
   release upstream marks stable; `MDD_XRAY_VERSION` may now be overridden together with
   `MDD_XRAY_SHA256_AMD64`/`_ARM64` for an operator who must match a prerelease server.
-
-- Public Issue triage now separates confirmed evidence from at most two likely causes, includes
-  recent reports by the same author for duplicate detection, asks only for blocking information,
-  and publishes a shorter action-oriented maintainer handoff instead of a general system analysis.
-
-- Public Issue triage now analyzes a new Issue only once, accepts reruns only from the maintainer,
-  caps each Issue at three attempts, preserves the last successful analysis when a later attempt
-  fails, and manages only AI-prefixed labels so human decisions are never removed automatically.
 
 ### Fixed
 
