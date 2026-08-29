@@ -43,6 +43,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- [Issue #22](https://github.com/MddIdd/mdd-sim-gateway/issues/22): switching to another
+  device while a VoWiFi, cellular-data or flight-mode request was still pending could carry
+  the first device's temporary “starting/stopping” display into the second device. Capability
+  operation state is now keyed by both device and capability; the request still completes on
+  its original device, while every other device continues to show its own live state.
+
 - [Issue #26](https://github.com/MddIdd/mdd-sim-gateway/issues/26): a physical-eSIM profile
   switch could report failure — and leave the page and device state on the previous SIM —
   even though the eUICC had already switched. The modem bridge published the baseband's
