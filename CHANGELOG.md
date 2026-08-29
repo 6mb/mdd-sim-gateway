@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-29
+
 ### Added
 
 - Incoming VoWiFi calls now remain available for the configured answer window while the browser
