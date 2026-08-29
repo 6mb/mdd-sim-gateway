@@ -246,7 +246,9 @@ function Discovering({ t }) {
 
 export function UnifiedOverview({ devices, discovering, refreshDevices, setView, showToast, instances, setSelectedDeviceId, setSelected, subscribe }) {
   const { t } = useI18n()
-  const pending = discovering && !devices.length
+  // The backend may already know the physical devices while its first card scan is still in
+  // progress. Do not render those partial rows as authoritative "No SIM" results.
+  const pending = discovering
   const counts = useMemo(() => ({
     devices: devices.length,
     cellular: devices.filter(d => capability(d, 'cellular').actual === 'on').length,
@@ -274,6 +276,7 @@ export function DevicesPage({ devices, discovering, refreshDevices, instances, c
   useEffect(() => { if (active && active !== selectedDeviceId) setSelectedDeviceId(active) }, [active, selectedDeviceId, setSelectedDeviceId])
   const d = devices.find(x => x.id === active)
   useEffect(() => { if (d && !supportsCellular(d) && tab === 'cellular') setTab('status') }, [d, tab])
+  if (discovering) return <Discovering t={t} />
   if (!d) return discovering ? <Discovering t={t} /> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} />
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')]]
   return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.present === false ? 'error' : capability(x,'vowifi').actual} /></span></button>)}</aside>

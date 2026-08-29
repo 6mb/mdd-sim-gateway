@@ -52,6 +52,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Opening the Calls or Devices page during its first refresh no longer briefly claims that a
+  line is unregistered or that a known device has no SIM. The softphone now keeps its initial
+  connection state until registration produces real evidence, and device/SIM cards stay on the
+  discovery placeholder until the control plane finishes its first hardware scan.
+
 - [Issue #22](https://github.com/MddIdd/mdd-sim-gateway/issues/22): switching to another
   device while a VoWiFi, cellular-data or flight-mode request was still pending could carry
   the first device's temporary “starting/stopping” display into the second device. Capability

@@ -75,7 +75,7 @@ const WEBRTC_AVAILABLE = typeof RTCPeerConnection === 'function'
 
 // SIP registration states reported by the JsSIP wrapper.
 const REG_LABEL = {
-  idle: 'Idle', connecting: 'Connecting', registered: 'Registered',
+  loading: 'Loading…', idle: 'Idle', connecting: 'Connecting', registered: 'Registered',
   unregistered: 'Unregistered', disconnected: 'Disconnected', failed: 'Registration failed',
 }
 
@@ -128,7 +128,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   const { t } = useI18n()
   const id = selected?.id
   const [prov, setProv] = useState(null)
-  const [reg, setReg] = useState('idle')
+  const [reg, setReg] = useState('loading')
   const [call, setCall] = useState(null)     // {dir, number, state, startedAt, endCause}
   const [callTransport, setCallTransport] = useState('vowifi')
   const [cellularBusy, setCellularBusy] = useState(false)
@@ -146,6 +146,9 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   const [voicemails, setVoicemails] = useState({})
   const [vmOpen, setVmOpen] = useState(null)
   const phone = useRef(null)
+  // JsSIP can emit `unregistered` while a freshly-created UA is still opening its websocket.
+  // That is an initial condition, not evidence that a working registration was lost.
+  const registeredOnce = useRef(false)
   // Persistent, DOM-rendered <audio> sink. One stable element (primed on the first click via
   // unlockAudio) is what makes remote WebRTC audio play under Chrome/Edge autoplay policy.
   const audioRef = useRef(null)
@@ -265,8 +268,13 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   useEffect(() => {
     if (!id) return
     let alive = true
-    setReg('idle'); setCall(null)
-    api.softphone(id).then((p) => { if (alive) setProv(p) }).catch(() => {})
+    registeredOnce.current = false
+    setProv(null); setReg('loading'); setCall(null)
+    api.softphone(id).then((p) => {
+      if (!alive) return
+      setProv(p)
+      if (!p?.enabled) setReg('idle')
+    }).catch(() => { if (alive) setReg('failed') })
     return () => { alive = false; if (phone.current) { phone.current.stop(); phone.current = null } }
   }, [id])
 
@@ -324,7 +332,12 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   const connect = useCallback(() => {
     if (!prov || !prov.enabled || phone.current) return
     const ph = new Phone((type, data) => {
-      if (type === 'registered') setReg(data ? 'registered' : 'unregistered')
+      if (type === 'registered' && data) {
+        registeredOnce.current = true
+        setReg('registered')
+      } else if (type === 'registered') {
+        setReg(registeredOnce.current ? 'unregistered' : 'connecting')
+      }
       else if (type === 'ws') setReg((r) => data === 'connected' ? (r === 'registered' ? r : 'connecting') : 'disconnected')
       else if (type === 'regfail') setReg('failed')
       else if (type === 'incoming') setCall({ dir: 'in', number: data.from || 'Unknown', state: 'incoming', transport: 'vowifi' })
@@ -598,7 +611,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
             {t('This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.')}
           </div>
         )}
-        {callTransport === 'vowifi' && !prov?.enabled && (
+        {callTransport === 'vowifi' && prov && !prov.enabled && (
           <div style={{ color: '#f97316', fontSize: 13, margin: '12px 0' }}>
             {t('WebRTC is disabled for this SIM. Enable it in SIM Config (needs HTTPS/TLS) to use the browser phone.')}
           </div>
