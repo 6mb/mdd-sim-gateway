@@ -1,10 +1,11 @@
 """
 notify_push.py - Outbound push notifications for incoming events (SMS / calls).
 
-Three independent, separately-configurable channels, all driven from global settings:
+Four independent, separately-configurable channels, all driven from global settings:
   - webhook : GET or POST standard/custom fields to a user-supplied URL.
   - telegram: send a formatted message to a chat/channel via a Telegram bot.
   - pushplus: send through the official PushPlus HTTP API.
+  - feishu  : send text notifications through a Feishu/Lark custom bot webhook.
 
 Both fire on the SAME internal events (incoming_sms, incoming_call) and carry the same
 core fields (SIM ICCID, the line's own MSISDN, the event's source number, the event type,
@@ -15,6 +16,9 @@ failing/slow endpoint only logs a warning.
 from __future__ import annotations
 
 import collections
+import base64
+import hashlib
+import hmac
 import logging
 import json
 import os
@@ -172,7 +176,7 @@ def _events_enabled(chan: dict) -> dict:
 def has_enabled_channel(settings: dict, event: str) -> bool:
     return any(bool((settings.get(key) or {}).get("enabled"))
                and bool(_events_enabled(settings.get(key) or {}).get(event))
-               for key in ("webhook", "telegram", "pushplus"))
+               for key in ("webhook", "telegram", "pushplus", "feishu"))
 
 
 def build_payload(event: str, instance: dict, source: str, text: str | None) -> dict:
@@ -445,6 +449,73 @@ def send_pushplus(cfg: dict, payload: dict) -> dict:
     return {"ok": True, "status_code": response.status_code}
 
 
+def feishu_signature(timestamp: int | str, secret: str) -> str:
+    """Return the signature required by Feishu/Lark custom bots.
+
+    The platform defines the HMAC key as ``<timestamp>\n<secret>`` and signs an empty
+    message. Keeping this in a small pure function makes the slightly unusual contract
+    explicit and gives callers a deterministic unit-test target.
+    """
+    key = f"{timestamp}\n{secret}".encode("utf-8")
+    digest = hmac.new(key, b"", digestmod=hashlib.sha256).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def _feishu_text(payload: dict, cfg: dict | None = None) -> str:
+    message = build_notification_message(payload, cfg or {})
+    return "\n\n".join(part for part in (message["title"], message["content"]) if part)
+
+
+def validate_feishu_url(url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        raise ValueError("Feishu webhook URL is required")
+    if not re.fullmatch(
+            r"https://(?:open\.feishu\.cn|open\.larksuite\.com)/open-apis/bot/v2/hook/[^/?#]+",
+            value, re.IGNORECASE):
+        raise ValueError("Feishu webhook URL is invalid")
+    return value
+
+
+def send_feishu(cfg: dict, payload: dict) -> dict:
+    """Send one Feishu/Lark custom-bot text message and validate its JSON result.
+
+    Feishu commonly returns HTTP 200 even when it rejects a payload, so transport success
+    alone is insufficient. Both Feishu's ``code`` response and Lark-compatible
+    ``StatusCode``/``status`` variants are accepted only when they explicitly report success.
+    """
+    url = validate_feishu_url(cfg.get("url"))
+    body: dict[str, Any] = {
+        "msg_type": "text",
+        "content": {"text": _feishu_text(payload, cfg)},
+    }
+    secret = str(cfg.get("secret") or "").strip()
+    if secret:
+        timestamp = int(time.time())
+        body.update({"timestamp": str(timestamp), "sign": feishu_signature(timestamp, secret)})
+    try:
+        response = requests.post(url, json=body, timeout=_TIMEOUT)
+        response.raise_for_status()
+        result = response.json()
+    except requests.RequestException:
+        # Never include the exception: its URL contains the bot token.
+        raise RuntimeError("Feishu request failed") from None
+    except ValueError:
+        raise RuntimeError("Feishu returned an invalid response") from None
+    if not isinstance(result, dict):
+        raise RuntimeError("Feishu returned an invalid response")
+    success = False
+    if "code" in result:
+        success = str(result.get("code")) == "0"
+    elif "StatusCode" in result:
+        success = str(result.get("StatusCode")) == "0"
+    elif "status" in result:
+        success = str(result.get("status")).lower() in {"ok", "success"}
+    if not success:
+        raise RuntimeError("Feishu rejected the message")
+    return {"ok": True, "status_code": response.status_code}
+
+
 def _telegram_headline(icon: str, text: str) -> str:
     """Telegram's own first line. The icon stays leftmost — it is what makes the event type
     scannable in a chat list — and the brand follows it, for the same reason the titles carry
@@ -624,5 +695,8 @@ def dispatch(settings: dict, event: str, instance: dict, source: str, text: str 
         pp = settings.get("pushplus") or {}
         if pp.get("enabled") and _events_enabled(pp).get(event):
             _deliver_with_retry("pushplus", send_pushplus, pp, payload)
+        fs = settings.get("feishu") or {}
+        if fs.get("enabled") and _events_enabled(fs).get(event):
+            _deliver_with_retry("feishu", send_feishu, fs, payload)
     except Exception as e:  # noqa
         log.warning("push dispatch error: %r", e)
