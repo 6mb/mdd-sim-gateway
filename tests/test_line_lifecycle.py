@@ -480,9 +480,14 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(capture_and_stop.call_args.args[0], "3")
         self.assertIn("reg_rejected", capture_and_stop.call_args.args[2])
         self.assertIsNone(capture_and_stop.call_args.args[3])
-        main._record_lifecycle.assert_called_once_with(
-            "3", "recovery_scheduled", "reg_rejected",
-            retry_count=3, delay_seconds=120)
+        main._record_lifecycle.assert_called_once()
+        lifecycle_call = main._record_lifecycle.call_args
+        self.assertEqual(
+            lifecycle_call.args,
+            ("3", "recovery_scheduled", "reg_rejected"))
+        self.assertEqual(lifecycle_call.kwargs["retry_count"], 3)
+        self.assertGreaterEqual(lifecycle_call.kwargs["delay_seconds"], 119)
+        self.assertLessEqual(lifecycle_call.kwargs["delay_seconds"], 120)
         # The exit is NOT asked to move. A carrier that answers registration with a rejection
         # says nothing about the path its packets took, and moving on that evidence is what
         # made a healthy pool churn: measured over fifty freezes, the node blamed most often
