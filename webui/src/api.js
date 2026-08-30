@@ -87,6 +87,7 @@ export const api = {
   testWebhook: (config) => j('POST', '/api/notifications/webhook/test', config || {}),
   testTelegram: (config) => j('POST', '/api/notifications/telegram/test', config || {}),
   testPushPlus: (config) => j('POST', '/api/notifications/pushplus/test', config || {}),
+  testFeishu: (config) => j('POST', '/api/notifications/feishu/test', config || {}),
   notificationDeliveries: (limit = 100) => j('GET', `/api/notifications/deliveries?limit=${limit}`),
   clearNotificationDeliveries: () => j('DELETE', '/api/notifications/deliveries'),
   systemStatus: () => j('GET', '/api/system/status'),
