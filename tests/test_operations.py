@@ -182,6 +182,10 @@ class OperationsTests(unittest.TestCase):
             "telegram": {"bot_token": "secret"},
             "proxy": {"subscription_url": "https://example.test/sub?token=url-secret"},
             "webhook": {"headers_json": '{"Authorization":"Bearer header-secret"}'},
+            "feishu": {
+                "url": "https://open.feishu.cn/open-apis/bot/v2/hook/private-token",
+                "secret": "feishu-signing-secret",
+            },
         }
         with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp), patch.object(
                 config, "get_settings", return_value=settings_value):
@@ -195,7 +199,10 @@ class OperationsTests(unittest.TestCase):
                 settings = archive.read("settings-redacted.yaml").decode()
                 status = json.loads(archive.read("status-redacted.json"))
                 log = archive.read("logs/sim1-charon.log").decode()
-            self.assertNotIn("secret", settings)
+            self.assertNotIn("feishu-signing-secret", settings)
+            self.assertNotIn("private-token", settings)
+            self.assertNotIn("header-secret", settings)
+            self.assertNotIn("url-secret", settings)
             self.assertNotIn("001122", log)
             self.assertEqual(status["imei"], "<redacted>")
 
