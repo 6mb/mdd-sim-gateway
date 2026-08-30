@@ -4,6 +4,35 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-08-30
+
+### Fixed
+
+- [Issue #30](https://github.com/MddIdd/mdd-sim-gateway/issues/30): a modem bridge identity
+  refresh that temporarily failed to read IMEI could replace the already verified hardware
+  identity with an empty value. If health recovery later rebuilt the line, the restart was
+  blocked by `hardware_imei_required` and VoWiFi stayed off. A bridge now retains its verified
+  immutable IMEI across incomplete refreshes. Recovery no longer accepts a line-saved modem
+  IMEI when the live bridge cannot verify it, because modems without USB serial numbers reuse
+  the same port-derived id after a physical module swap.
+
+- Reopened [Issue #21](https://github.com/MddIdd/mdd-sim-gateway/issues/21): automatic recovery
+  decisions now survive a later VoWiFi toggle in a separate bounded lifecycle log. Redacted
+  support bundles record structured scheduling, blocking, cancellation, start failure and success
+  events without exception text or subscriber/hardware identifiers, so the final reason a rebuild
+  did not happen remains diagnosable.
+
+- Support bundles now report per-file coverage and truncation, retain both the beginning and end
+  of bounded IKE segments, expose only boolean bridge identity/channel health plus metadata age,
+  and enforce a 10 MiB archive ceiling with deterministic low-priority log omission. New lifecycle
+  and bridge fields have explicit redaction and archive-content regression coverage. Unbounded
+  call history is counted but only its latest 20,000 lines are parsed for safe call evidence.
+
+- Lifecycle writes no longer block the asyncio control loop or contend with multi-megabyte
+  diagnostic rewrites. Cancellation is recorded centrally for manual starts/stops, configuration
+  restarts, eSIM switches, card removal and disabled lines; repeated identical no-card blocks are
+  coalesced so they cannot evict the useful failure history.
+
 ## [1.6.0] - 2026-08-29
 
 ### Added

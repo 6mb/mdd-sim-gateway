@@ -30,6 +30,15 @@ log = logging.getLogger("mdd.engine")
 # Bounded so a line that rebuilds every two minutes cannot fill a Pi's SD card. Only the
 # recent tail is diagnostically useful.
 DIAGNOSTIC_RECORDS = 200
+LIFECYCLE_RECORDS = 500
+LIFECYCLE_EVENTS = {
+    "recovery_scheduled", "recovery_blocked", "recovery_started", "recovery_failed",
+    "recovery_succeeded", "recovery_cancelled", "vowifi_disabled",
+}
+_LIFECYCLE_REASON = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_LIFECYCLE_INSTANCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_diagnostic_jsonl_lock = threading.Lock()
+_lifecycle_jsonl_lock = threading.Lock()
 # Asterisk writes colour escapes even when captured to a file; strip them so the stored
 # record stays greppable.
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -235,14 +244,64 @@ def _host_evidence() -> dict:
         return {}
 
 
+def _append_bounded_jsonl(path: str, record: dict, limit: int,
+                          lock: threading.Lock, *, create_parent: bool = True) -> None:
+    """Atomically append one record while retaining only a bounded tail."""
+    if create_parent:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    with lock:
+        keep = max(0, int(limit) - 1)
+        lines = _tail_lines(path, keep) if keep else []
+        lines.append(json.dumps(record, ensure_ascii=False, sort_keys=True))
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        os.replace(tmp, path)
+
+
 def _append_diagnostic(base: str, record: dict):
-    path = os.path.join(base, "logs", "diagnostics.jsonl")
-    lines = _tail_lines(path, DIAGNOSTIC_RECORDS - 1)
-    lines.append(json.dumps(record, ensure_ascii=False, sort_keys=True))
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(lines) + "\n")
-    os.replace(tmp, path)
+    _append_bounded_jsonl(
+        os.path.join(base, "logs", "diagnostics.jsonl"), record, DIAGNOSTIC_RECORDS,
+        _diagnostic_jsonl_lock)
+
+
+def valid_lifecycle_reason(value: object) -> bool:
+    """One shared validator for producers and the persistence boundary."""
+    return bool(_LIFECYCLE_REASON.fullmatch(str(value or "")))
+
+
+def record_lifecycle(iid: str, event: str, *, reason_code: str = "", **facts) -> None:
+    """Persist one recovery decision without exporting identifiers or exception text.
+
+    This is intentionally a closed schema.  Free-form exception strings, paths, hardware ids
+    and subscriber identifiers must never enter a file intended for public support bundles.
+    """
+    event = str(event or "")
+    reason_code = str(reason_code or "")
+    iid = str(iid or "")
+    if event not in LIFECYCLE_EVENTS:
+        raise ValueError("invalid lifecycle event")
+    if not _LIFECYCLE_INSTANCE.fullmatch(iid):
+        raise ValueError("invalid lifecycle instance")
+    if reason_code and not valid_lifecycle_reason(reason_code):
+        raise ValueError("invalid lifecycle reason code")
+    record = {"ts": int(time.time()), "instance": iid, "event": event}
+    if reason_code:
+        record["reason_code"] = reason_code
+    for key in ("retry_count", "delay_seconds"):
+        if key in facts and facts[key] is not None:
+            record[key] = max(0, int(facts[key]))
+    for key in ("card_present", "imei_valid", "imei_source_matches"):
+        if key in facts and facts[key] is not None:
+            record[key] = bool(facts[key])
+    base = os.path.join(DATA_DIR, "instances", iid)
+    # A lifecycle record may only extend an existing line directory.  Creating it here would
+    # resurrect deleted/unknown ids and violate the API's "delete history" guarantee.
+    if not os.path.isdir(base):
+        return
+    _append_bounded_jsonl(
+        os.path.join(base, "logs", "lifecycle.jsonl"), record, LIFECYCLE_RECORDS,
+        _lifecycle_jsonl_lock, create_parent=False)
 
 
 def capture_diagnostics(iid: str, inst: dict, base: str, reason: str):

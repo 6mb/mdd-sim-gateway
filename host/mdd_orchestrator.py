@@ -1328,9 +1328,32 @@ class Orchestrator:
         run commands. Fields are drawn from state this cycle already computed; nothing is
         collected merely to fill the file.
         """
+        now = int(time.time())
+
+        def bridge_identity_health(hwid: str) -> dict:
+            metadata = read_json(self.data / "modems" / f"{hwid}.json")
+            imei = re.sub(r"\D", "", str(metadata.get("imei") or ""))
+            iccid = re.sub(r"\D", "", str(metadata.get("iccid") or ""))
+            def nonnegative_int(value) -> int:
+                try:
+                    return max(0, int(value or 0))
+                except (TypeError, ValueError, OverflowError):
+                    return 0
+
+            updated_at = nonnegative_int(metadata.get("updated_at"))
+            requested = nonnegative_int(metadata.get("channel_requested"))
+            allocated = nonnegative_int(metadata.get("channel_allocated"))
+            return {
+                "metadata_age_seconds": max(0, now - updated_at) if updated_at else None,
+                "imei_valid": len(imei) == 15,
+                "iccid_valid": iccid.startswith("89") and 19 <= len(iccid) <= 22,
+                "channels_ready": (metadata.get("channel_status") == "ready"
+                                   and requested > 0 and allocated == requested),
+            }
+
         atomic_json(self.host_diagnostics_path, {
             "version": 1,
-            "updated_at": int(time.time()),
+            "updated_at": now,
             "virtualization": self.virtualization(),
             "modem_backend": "serial" if self._serial_mode else "auto",
             "modemmanager": {
@@ -1349,7 +1372,8 @@ class Orchestrator:
             "assignments": assignments,
             "bridges": {hwid: {"pid": proc.pid, "running": proc.poll() is None,
                                "command": self._bridge_commands.get(hwid) or [],
-                               "log_tail": self._bridge_log_tail(hwid)}
+                               "log_tail": self._bridge_log_tail(hwid),
+                               **bridge_identity_health(hwid)}
                         for hwid, proc in self.bridges.items()},
             # Which of the assigned VPCD ports pcscd is actually listening on, read from
             # /proc/net/tcp — a probe connection could hijack a reader slot, a file cannot.
