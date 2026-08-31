@@ -366,9 +366,14 @@ export function EgressPage({ showToast }) {
   const [revealSensitive, setRevealSensitive] = useState(false)
   const [saving, setSaving] = useState(false)
   const [profileTests, setProfileTests] = useState({})
+  const [exitTests, setExitTests] = useState({})
+  // The exit test measures what the orchestrator is actually running, which is the saved
+  // configuration — never the edits still sitting in this form. Tracking the saved proxy
+  // settings lets the button say so instead of quietly testing the previous node.
+  const [savedProxy, setSavedProxy] = useState(null)
   const loadLive = () => api.egressStatus().then(value => { setLive(value); setLiveLoading(false) }).catch(() => setLiveLoading(false))
   useEffect(() => {
-    api.settings().then(value => { setS(value); setLoadError(false) }).catch(() => setLoadError(true))
+    api.settings().then(value => { setS(value); setSavedProxy(JSON.stringify(value.proxy || {})); setLoadError(false) }).catch(() => setLoadError(true))
     loadLive()
     // The exit node changes on its own when a line fails, so a snapshot taken at mount goes
     // stale with nothing on screen admitting it — the page would still show the node that
@@ -450,9 +455,26 @@ export function EgressPage({ showToast }) {
     if (parsed.engine) parts.push(parsed.engine)
     return parts.filter(Boolean).join(' · ')
   }
+  const proxyDirty = savedProxy !== null && JSON.stringify(s.proxy || {}) !== savedProxy
+  const testExit = async country => {
+    setExitTests(x => ({ ...x, [country]: { busy: true } }))
+    try {
+      const result = await api.testEgress(country)
+      await loadLive()
+      // Name the node that answered: the exit may be running something other than the
+      // selection on screen, and a bare "succeeded" hides which one was measured.
+      showToast(result.node
+        ? t('Exit test passed via {node} · {latency} ms', { node: result.node, latency: result.latency_ms })
+        : t('Exit test passed · {latency} ms', { latency: result.latency_ms }))
+    } catch (e) {
+      showToast(e.message)
+    } finally {
+      setExitTests(x => ({ ...x, [country]: { busy: false } }))
+    }
+  }
   const addExit = () => { if (!newCountry) return; patchExit(newCountry, { enabled: true, profile_id: '', keywords: countryKeywords(newCountry) }); setNewCountry('') }
   const available = COUNTRY_CODES.filter(code => !proxy.exits?.[code]).sort((a, b) => countryLabel(a, language).localeCompare(countryLabel(b, language)))
-  const save = async () => { setSaving(true); try { await api.saveSettings(s); await api.refreshEgress(); showToast(t('Saved')); setTimeout(loadLive, 1000) } catch (e) { showToast(`${t('Error')}: ${e.message}`) } finally { setSaving(false) } }
+  const save = async () => { setSaving(true); try { await api.saveSettings(s); setSavedProxy(JSON.stringify(s.proxy || {})); await api.refreshEgress(); showToast(t('Saved')); setTimeout(loadLive, 1000) } catch (e) { showToast(`${t('Error')}: ${e.message}`) } finally { setSaving(false) } }
   return <div className="u-page">
     <div className="card u-panel u-routing-policy"><div className="u-card-head"><div><h2>{t('Country proxy routing')}</h2><p>{t('When enabled, VoWiFi uses the proxy assigned to its SIM country and never falls back to the default network if that exit fails.')}</p></div><div className="u-head-actions"><Badge state={proxy.enabled && live ? 'on' : 'off'}>{proxy.enabled ? (liveLoading ? `${t('Loading')}…` : live ? t('Enabled') : t('Status unavailable')) : t('Disabled')}</Badge><label className="u-title-toggle"><span>{t('Enable country proxy exits')}</span><input type="checkbox" className="u-toggle" checked={!!proxy.enabled} onChange={e => patch({ enabled: e.target.checked })} /></label></div></div><p className="u-routing-impact">{proxy.enabled ? t('On: each line uses its country exit. If the proxy or UDP validation fails, only that line’s VoWiFi stops; it will not leak through the host’s default network.') : t('Off: country exits are bypassed and VoWiFi uses the host’s default network. Country assignments and proxy settings are kept for later.')}</p>{Object.values(profiles).some(profile => profile.type === 'existing') && <><label>{t('Existing sing-box config')}</label><input className="mono" value={proxy.existing_singbox_config || ''} onChange={e => patch({ existing_singbox_config: e.target.value })} placeholder="/etc/sing-box/config.json" /></>}</div>
     <div className="u-section-title u-proxy-library-head"><div><h2>{t('Proxy library')}</h2><p>{t('Add reusable subscriptions, individual nodes, or SOCKS5 proxies, then assign them to country exits below.')}</p></div><div className="u-proxy-toolbar"><button className="u-icon-button" type="button" aria-pressed={revealSensitive} onClick={() => setRevealSensitive(x => !x)} title={t(revealSensitive ? 'Hide sensitive information' : 'Show sensitive information')}><EyeIcon open={revealSensitive}/><span>{t('Sensitive information')}</span></button><button className="btn btn-primary" onClick={openAddProfile}>{t('+ Add proxy')}</button></div></div>
@@ -522,7 +544,7 @@ export function EgressPage({ showToast }) {
                 : t('Preferred: a failing line moves to another node, and returns to this one the next time the exit has to change anyway.')}</p></>}</>
           : <div className="u-detail"><span>{t('Current node')}</span><b className="u-proxy-node-text"><ProxyNodeName text={st?.node || '—'} /></b></div>}
         {st?.error && <p className="u-error">{st.error}</p>}
-        <div className="u-inline"><button className="btn btn-ghost" onClick={async () => { try { await api.testEgress(country); await loadLive(); showToast(t('Test succeeded')) } catch (e) { showToast(e.message) } }}>{t('Test UDP')}</button><button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
+        <div className="u-inline"><button className="btn btn-ghost" disabled={exitTests[country]?.busy || proxyDirty} title={proxyDirty ? t('This tests the running exit, so save and apply the change first.') : ''} onClick={() => testExit(country)}>{t(exitTests[country]?.busy ? 'Testing…' : 'Test UDP')}</button>{proxyDirty && <small className="u-test-parsed">{t('This tests the running exit, so save and apply the change first.')}</small>}<button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
       </div>
     })}</div>}
     <button className="btn btn-primary" disabled={saving} onClick={save}>{t('Save and apply')}</button>
