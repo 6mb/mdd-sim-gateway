@@ -4368,6 +4368,12 @@ async def api_system_update_check(force: bool = False):
     return await asyncio.to_thread(update_check.check, force)
 
 
+@app.get("/api/system/update/releases")
+async def api_system_update_releases(force: bool = False):
+    """Published stable/test versions available for an explicit manual channel switch."""
+    return await asyncio.to_thread(update_check.releases, force)
+
+
 @app.get("/api/system/repository/stars")
 async def api_system_repository_stars(force: bool = False):
     """Repository metadata is retried independently of the slower release poll."""
@@ -4375,10 +4381,11 @@ async def api_system_repository_stars(force: bool = False):
 
 
 @app.post("/api/system/update/apply")
-async def api_system_update_apply():
+async def api_system_update_apply(body: dict):
     """One-click update: publish a request for the host orchestrator, which runs the detached
     updater (host/mdd_update.py). Responds immediately; progress is polled separately."""
-    return await asyncio.to_thread(update_check.request_apply)
+    version = body.get("version")
+    return await asyncio.to_thread(update_check.request_apply, version=version)
 
 
 @app.get("/api/system/update/progress")

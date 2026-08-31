@@ -75,6 +75,24 @@ class RequestApplyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertFalse(os.path.exists(self.request_path))
 
+    def test_selected_test_version_is_resolved_before_request_is_published(self):
+        selected = {**_AVAILABLE, "latest": "9.9.9-rc1", "prerelease": True,
+                    "network": {"proxy_mode": "direct", "proxy_profile_id": ""}}
+        with patch.object(update_check, "check_release", return_value=selected) as lookup:
+            result = update_check.request_apply(version="9.9.9-rc1")
+        self.assertTrue(result["ok"])
+        lookup.assert_called_once_with("9.9.9-rc1", allow_prerelease=True,
+                                       allow_older=True)
+        with open(self.request_path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["version"], "9.9.9-rc1")
+
+    def test_invalid_selected_version_is_rejected_without_lookup(self):
+        with patch.object(update_check, "check_release") as lookup:
+            result = update_check.request_apply(version="../../main")
+        self.assertEqual(result["error_code"], "update.error.invalid_version")
+        lookup.assert_not_called()
+        self.assertFalse(os.path.exists(self.request_path))
+
     def test_running_update_is_not_requested_twice(self):
         os.makedirs(os.path.dirname(self.status_path))
         with open(self.status_path, "w", encoding="utf-8") as handle:

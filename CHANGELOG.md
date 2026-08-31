@@ -4,6 +4,21 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- System Settings can now list published test Releases alongside the latest normal Release,
+  install an explicitly selected test version, and switch a test installation back to the
+  normal version without using the host command line. Drafts stay hidden, automatic updates
+  remain on the stable promotion policy, and the server resolves the selected tag again before
+  publishing the verified host update request. The page also retains the last background or
+  manual check time instead of returning to “Not checked” when it is opened.
+
+### Fixed
+
+- A release candidate now recognizes the final Release with the same numeric version as newer
+  (for example, `1.6.1-rc2` → `1.6.1`), so promotion-gated automatic updates can move test
+  installations back onto the normal release line.
+
 ## [1.6.1] - 2026-08-30
 
 ### Fixed

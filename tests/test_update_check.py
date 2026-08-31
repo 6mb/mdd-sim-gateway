@@ -24,6 +24,7 @@ class _Response:
 class UpdateCheckTests(unittest.TestCase):
     def setUp(self):
         update_check._cache = None
+        update_check._releases_cache = None
         update_check._stars_cache = None
         update_check._stars_checked_at = 0
         direct = patch.object(update_check, "_network_selection", return_value={
@@ -68,6 +69,18 @@ class UpdateCheckTests(unittest.TestCase):
 
     def test_semantic_comparison(self):
         self.assertGreater(update_check._version_tuple("v1.10.0"), update_check._version_tuple("1.9.9"))
+
+    def test_final_release_is_newer_than_rc_with_the_same_core_version(self):
+        self.assertGreater(update_check._version_key("1.6.1"),
+                           update_check._version_key("1.6.1-rc2"))
+        self.assertGreater(update_check._version_key("1.6.1-rc10"),
+                           update_check._version_key("1.6.1-rc2"))
+        payload = {"tag_name": "v1.6.1", "prerelease": False}
+        with patch.object(update_check, "VERSION", "1.6.1-rc2"), \
+                patch("control.app.update_check.requests.Session.get",
+                      return_value=_Response(payload)):
+            result = update_check.check(True)
+        self.assertTrue(result["update_available"])
 
     def test_update_network_defaults_to_auto_and_requires_a_library_entry(self):
         self.assertEqual(update_check.validate_network_settings(None)["proxy_mode"], "auto")
@@ -154,6 +167,42 @@ class UpdateCheckTests(unittest.TestCase):
             result = update_check.check_release("1.6.0")
         self.assertFalse(result["ok"])
         self.assertFalse(result["update_available"])
+
+    def test_manual_release_list_exposes_latest_stable_and_published_tests(self):
+        payload = [
+            {"tag_name": "v1.7.0-rc2", "prerelease": True, "body": "test two"},
+            {"tag_name": "v1.7.0-rc1", "prerelease": True, "body": "test one"},
+            {"tag_name": "v1.6.0", "prerelease": False, "body": "stable"},
+            {"tag_name": "v1.5.0", "prerelease": False, "body": "old stable"},
+            {"tag_name": "v1.8.0-dev", "prerelease": True, "draft": True},
+        ]
+        with patch("control.app.update_check.requests.Session.get",
+                   return_value=_Response(payload)):
+            result = update_check.releases(True)
+        self.assertTrue(result["ok"])
+        self.assertEqual([item["latest"] for item in result["releases"]],
+                         ["1.7.0-rc2", "1.7.0-rc1", "1.6.0"])
+        self.assertTrue(result["releases"][0]["prerelease"])
+        self.assertFalse(result["releases"][-1]["prerelease"])
+
+    def test_explicit_manual_lookup_allows_a_test_release_and_older_stable(self):
+        session = MagicMock()
+        session.get.side_effect = [
+            _Response({"tag_name": "v1.7.0-rc1", "prerelease": True}),
+            _Response({"tag_name": "v1.5.0", "prerelease": False}),
+        ]
+        with patch.object(update_check, "_network_candidates", return_value=[{
+                "proxy_mode": "direct", "proxy_profile_id": ""}]), \
+                patch.object(update_check, "_session", return_value=session), \
+                patch.object(update_check, "VERSION", "1.6.1-rc1"):
+            test = update_check.check_release(
+                "1.7.0-rc1", allow_prerelease=True, allow_older=True)
+            stable = update_check.check_release(
+                "1.5.0", allow_prerelease=True, allow_older=True)
+        self.assertTrue(test["update_available"])
+        self.assertTrue(test["prerelease"])
+        self.assertTrue(stable["update_available"])
+        self.assertFalse(stable["prerelease"])
 
     def test_unpromoted_release_cannot_auto_update(self):
         info = {"update_available": True, "latest": "1.5.0",
@@ -306,6 +355,18 @@ class UpdateAutomationTests(unittest.TestCase):
             result = update_check.automation_cycle()
         self.assertFalse(result["auto_update_requested"])
         apply.assert_not_called()
+
+    def test_background_and_manual_checks_share_one_last_check_time(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(config, "DATA_DIR", temp), \
+                patch.object(update_check, "check", return_value={
+                    "ok": False, "checked_at": 900, "update_available": False}), \
+                patch.object(update_check.time, "time", return_value=1000):
+            update_check.automation_cycle()
+            background = update_check._with_automation_check({"checked_at": 900})
+            manual = update_check._with_automation_check({"checked_at": 1100})
+        self.assertEqual(background["last_check_at"], 1000)
+        self.assertEqual(manual["last_check_at"], 1100)
 
     def test_promoted_release_is_requested_silently_only_once(self):
         with tempfile.TemporaryDirectory() as temp, \
