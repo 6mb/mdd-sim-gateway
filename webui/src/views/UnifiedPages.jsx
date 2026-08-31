@@ -440,9 +440,10 @@ export function EgressPage({ showToast }) {
     const parts = [parsed.protocol]
     if (parsed.transport) parts.push(parsed.transport)
     if (parsed.tls) parts.push(parsed.reality ? 'reality' : 'tls')
-    if (parsed.sni) parts.push(`sni=${parsed.sni}`)
+    if (parsed.sni) parts.push(`sni=${revealSensitive ? parsed.sni : '••••'}`)
     if (parsed.alpn?.length) parts.push(`alpn=${parsed.alpn.join(',')}`)
     if (parsed.obfs) parts.push(`obfs=${parsed.obfs}${parsed.obfs_password_set ? '+pw' : ''}`)
+    if (parsed.encryption) parts.push(`encryption=${parsed.encryption}`)
     if (parsed.flow) parts.push(`flow=${parsed.flow}`)
     if (parsed.skip_cert_verify) parts.push('insecure')
     parts.push(parsed.udp_capable ? 'UDP ✓' : 'UDP ✗')
@@ -467,14 +468,25 @@ export function EgressPage({ showToast }) {
         </div>
         <div className="u-proxy-secondary">
           {profile.type === 'subscription' && <><label>{t('Refresh interval')}</label><div className="u-number-suffix"><input type="number" min="1" value={profile.refresh_minutes || 30} onChange={e => patchProfile(id, { refresh_minutes: +e.target.value })} /><span>{t('minutes')}</span></div></>}
-          {profile.type === 'node' && <small>{t('Reality/XHTTP and common share-link protocols')}</small>}
+          {profile.type === 'node' && <small className="u-proxy-hint">{t('Reality/XHTTP and common share-link protocols')}</small>}
           {profile.type === 'socks5' && <><label>{t('Port')}</label><input type="number" min="1" max="65535" value={profile.port || 1080} onChange={e => patchProfile(id, { port: +e.target.value })} /></>}
           {profile.type === 'existing' && <small>{t('Compatibility entry')}</small>}
         </div>
         {profile.type === 'socks5' && <div className="u-proxy-auth"><div><label>{t('Username')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.username || ''} onChange={e => patchProfile(id, { username: e.target.value })} /></div><div><label>{t('Password')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="new-password" value={profile.password || ''} onChange={e => patchProfile(id, { password: e.target.value })} /></div></div>}
-        <div className="u-proxy-actions">{['node', 'socks5'].includes(profile.type) && <><button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test UDP')}</button>{profileTests[id]?.ok && <small className="u-test-ok">{t('Passed')} · {profileTests[id].latency} ms</small>}{profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && <small className="u-test-error">{t('Failed')}</small>}{!profileTests[id]?.busy && parsedSummary(profileTests[id]?.parsed) && <small className="u-test-parsed" title={t('How this gateway read the link')}>{parsedSummary(profileTests[id].parsed)}</small>}</>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
-        {profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && profileTests[id].error
-          && <div className="u-test-detail">{profileTests[id].error}</div>}
+        <div className="u-proxy-actions">{['node', 'socks5'].includes(profile.type) && <button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test UDP')}</button>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
+        {/* A verdict and the parsed link are two different things and neither is short. Sharing
+            one crowded row truncated both — the summary that explains a failure was the part
+            that got cut. They get their own full-width line under the node instead. */}
+        {['node', 'socks5'].includes(profile.type) && profileTests[id] && !profileTests[id].busy
+          && <div className={`u-test-row ${profileTests[id].ok ? 'is-ok' : 'is-error'}`}>
+            <span className="u-test-verdict">
+              {profileTests[id].ok ? `${t('Passed')} · ${profileTests[id].latency} ms` : t('Failed')}
+            </span>
+            {parsedSummary(profileTests[id].parsed)
+              && <span className="u-test-parsed" title={t('How this gateway read the link')}>{parsedSummary(profileTests[id].parsed)}</span>}
+            {!profileTests[id].ok && profileTests[id].error
+              && <span className="u-test-detail">{profileTests[id].error}</span>}
+          </div>}
       </div>
     })}</div>}
     <div className="u-section-title"><div><h2>{t('Country exits')}</h2><p>{t('If no healthy UDP exit exists, only that SIM’s VoWiFi stops; 4G remains available.')}</p></div><div className="u-inline u-add-exit"><select value={newCountry} onChange={e => setNewCountry(e.target.value)}><option value="">{t('Select a country/region…')}</option>{available.map(code => <option key={code} value={code}>{countryLabel(code, language)}</option>)}</select><button className="btn btn-primary" disabled={!newCountry} onClick={addExit}>{t('+ Add')}</button></div></div>

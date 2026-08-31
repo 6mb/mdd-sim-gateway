@@ -310,6 +310,9 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-proxy-identity input { min-width:0; padding:3px 0; border:0; border-bottom:1px solid transparent; border-radius:0; background:transparent; color:var(--text); font-size:14px; font-weight:750; }
 .u-proxy-identity input:hover,.u-proxy-identity input:focus { border-bottom-color:var(--border-strong); box-shadow:none; }
 .u-proxy-identity small,.u-proxy-secondary small { overflow:hidden; color:var(--text-mute); font-size:11px; line-height:1.4; text-overflow:ellipsis; white-space:nowrap; }
+/* The protocol hint is a sentence, not a label: clipping it to "Reality/XHTTP …" hid
+   the half that says which protocols actually work here. It wraps within its column. */
+.u-proxy-secondary small.u-proxy-hint { white-space:normal; overflow:visible; text-overflow:clip; }
 .u-proxy-kind { justify-self:start; padding:3px 7px; border-radius:999px; background:var(--hover); color:var(--text-dim); font-size:10px; font-weight:700; letter-spacing:.02em; }
 .u-proxy-primary,.u-proxy-secondary { min-width:0; }
 .u-proxy-secondary { display:grid; align-content:end; min-height:38px; }
@@ -319,11 +322,16 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-proxy-auth { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; min-width:0; }
 .u-proxy-actions { display:flex; align-items:center; justify-content:flex-end; gap:7px; min-width:max-content; }
 .u-proxy-actions .btn { min-height:38px; white-space:nowrap; }
-.u-test-ok,.u-test-error { font-size:10px; white-space:nowrap; }.u-test-ok { color:var(--state-up); }.u-test-error { color:var(--state-down); }
-.u-test-parsed { font-size:10px; color:var(--text-mute); font-family:ui-monospace,monospace; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+.u-test-row { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 10px;
+  margin-top:2px; padding-top:10px; border-top:1px solid var(--border); }
+.u-test-verdict { font-size:11px; font-weight:600; white-space:nowrap; }
+.u-test-row.is-ok .u-test-verdict { color:var(--state-up); }
+.u-test-row.is-error .u-test-verdict { color:var(--state-down); }
+.u-test-parsed { font-size:10px; color:var(--text-mute); font-family:ui-monospace,monospace;
+  white-space:normal; word-break:break-word; }
 /* The reason a test failed belongs on screen, not behind a hover: a truncated toast was
    all an operator could screenshot, which cost real days of back-and-forth diagnosing. */
-.u-test-detail { margin-top:6px; padding:8px 10px; border-radius:8px; font-size:11px;
+.u-test-detail { flex-basis:100%; padding:8px 10px; border-radius:8px; font-size:11px;
   line-height:1.5; color:var(--state-down); background:color-mix(in srgb, var(--state-down) 8%, var(--panel));
   border:1px solid color-mix(in srgb, var(--state-down) 25%, transparent);
   font-family:ui-monospace,monospace; word-break:break-word; white-space:pre-wrap; }
