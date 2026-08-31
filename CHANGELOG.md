@@ -4,23 +4,7 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
-### Fixed
-
-- [Issue #33](https://github.com/MddIdd/mdd-sim-gateway/issues/33): a giffgaff/O2 UK VoWiFi
-  line dropped like clockwork every ~2h50m. The carrier silently invalidates its SWu session
-  just before a 3-hour lifetime without sending any IKE message, and the engine's proactive
-  IKE-SA rekey — the mechanism that resets that carrier clock — defaulted to 600 minutes and
-  could not be configured, so it never fired in time. The IKE rekey period is now a real
-  setting (System Settings → Calls & VoWiFi, with a per-line `ike_rekey_minutes` override)
-  and defaults to 150 minutes, which preempts every carrier clock observed so far (giffgaff
-  ~2h50m, EE ~12h). The 30-minute ESP rekey is unchanged and unrelated.
-
-- A `reg_rejected` freeze now records the SIP response code that condemned the line (for
-  example 403) in both the lifecycle record and the frozen diagnostics snapshot. The #33
-  support bundle reached us after every log line holding that code had rotated away, so the
-  bundle could prove the registration was rejected but not why.
-
-## [1.7.0] - 2026-08-31
+## [1.7.0] - 2026-09-01
 
 ### Added
 
@@ -44,6 +28,46 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   proxies migrate into the shared library and legacy country selections stay pinned.
 
 ### Fixed
+
+- [Issue #33](https://github.com/MddIdd/mdd-sim-gateway/issues/33): a giffgaff/O2 UK VoWiFi
+  line dropped like clockwork every ~2h50m. The carrier silently invalidates its SWu session
+  just before a 3-hour lifetime without sending any IKE message, and the engine's proactive
+  IKE-SA rekey — the mechanism that resets that carrier clock — defaulted to 600 minutes and
+  could not be configured, so it never fired in time. The IKE rekey period is now a real
+  setting (System Settings → Calls & VoWiFi, with a per-line `ike_rekey_minutes` override)
+  and defaults to 150 minutes, which preempts every carrier clock observed so far (giffgaff
+  ~2h50m, EE ~12h). The 30-minute ESP rekey is unchanged and unrelated.
+
+- A `reg_rejected` freeze now records the SIP response code that condemned the line (for
+  example 403) in both the lifecycle record and the frozen diagnostics snapshot. The #33
+  support bundle reached us after every log line holding that code had rotated away, so the
+  bundle could prove the registration was rejected but not why.
+
+- [Issue #30](https://github.com/MddIdd/mdd-sim-gateway/issues/30): a modem bridge identity
+  refresh that temporarily failed to read IMEI could replace the already verified hardware
+  identity with an empty value. If health recovery later rebuilt the line, the restart was
+  blocked by `hardware_imei_required` and VoWiFi stayed off. A bridge now retains its verified
+  immutable IMEI across incomplete refreshes. Recovery no longer accepts a line-saved modem
+  IMEI when the live bridge cannot verify it, because modems without USB serial numbers reuse
+  the same port-derived id after a physical module swap.
+
+- Reopened [Issue #21](https://github.com/MddIdd/mdd-sim-gateway/issues/21): automatic recovery
+  decisions now survive a later VoWiFi toggle in a separate bounded lifecycle log. Redacted
+  support bundles record structured scheduling, blocking, cancellation, start failure and success
+  events without exception text or subscriber/hardware identifiers, so the final reason a rebuild
+  did not happen remains diagnosable. An enabled native-reader line also remains eligible for
+  recovery when the default for newly detected devices has VoWiFi disabled.
+
+- Support bundles now report per-file coverage and truncation, retain both the beginning and end
+  of bounded IKE segments, expose only boolean bridge identity/channel health plus metadata age,
+  and enforce a 10 MiB archive ceiling with deterministic low-priority log omission. New lifecycle
+  and bridge fields have explicit redaction and archive-content regression coverage. Unbounded
+  call history is counted but only its latest 20,000 lines are parsed for safe call evidence.
+
+- Lifecycle writes no longer block the asyncio control loop or contend with multi-megabyte
+  diagnostic rewrites. Cancellation is recorded centrally for manual starts/stops, configuration
+  restarts, eSIM switches, card removal and disabled lines; repeated identical no-card blocks are
+  coalesced so they cannot evict the useful failure history.
 
 - [Issue #27](https://github.com/MddIdd/mdd-sim-gateway/issues/27): a VLESS node using
   Xray 26.7+ VLESS Encryption could never connect. The share link's `encryption` parameter was
@@ -74,42 +98,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   sensitive-information switch, since that line names the operator's own server and is the part
   people screenshot into public issues.
 
-- Notification event switches now collapse like the message-template editor. Update-network
-  guidance is shown beneath the network selection, while release-range guidance is shown beneath
-  the update method and version range instead of the two descriptions appearing swapped.
+- Notification event switches now collapse like the message-template editor, and channel test
+  buttons show a disabled testing state while their request is running. Update-network guidance
+  is shown beneath the network selection, while release-range guidance is shown beneath the
+  update method and version range instead of the two descriptions appearing swapped.
+
+- Telegram and software-update proxy pickers no longer offer subscription profiles as if they
+  were a single route. Subscriptions remain available through explicit country exits, automatic
+  update fallback skips them, and a previously selected subscription migrates to its first
+  enabled assigned country exit so an upgrade keeps the route it used before.
 
 - A release candidate now recognizes the final Release with the same numeric version as newer
   (for example, `1.6.1-rc2` → `1.6.1`), so promotion-gated automatic updates can move test
   installations back onto the normal release line.
-
-## [1.6.1] - 2026-08-30
-
-### Fixed
-
-- [Issue #30](https://github.com/MddIdd/mdd-sim-gateway/issues/30): a modem bridge identity
-  refresh that temporarily failed to read IMEI could replace the already verified hardware
-  identity with an empty value. If health recovery later rebuilt the line, the restart was
-  blocked by `hardware_imei_required` and VoWiFi stayed off. A bridge now retains its verified
-  immutable IMEI across incomplete refreshes. Recovery no longer accepts a line-saved modem
-  IMEI when the live bridge cannot verify it, because modems without USB serial numbers reuse
-  the same port-derived id after a physical module swap.
-
-- Reopened [Issue #21](https://github.com/MddIdd/mdd-sim-gateway/issues/21): automatic recovery
-  decisions now survive a later VoWiFi toggle in a separate bounded lifecycle log. Redacted
-  support bundles record structured scheduling, blocking, cancellation, start failure and success
-  events without exception text or subscriber/hardware identifiers, so the final reason a rebuild
-  did not happen remains diagnosable.
-
-- Support bundles now report per-file coverage and truncation, retain both the beginning and end
-  of bounded IKE segments, expose only boolean bridge identity/channel health plus metadata age,
-  and enforce a 10 MiB archive ceiling with deterministic low-priority log omission. New lifecycle
-  and bridge fields have explicit redaction and archive-content regression coverage. Unbounded
-  call history is counted but only its latest 20,000 lines are parsed for safe call evidence.
-
-- Lifecycle writes no longer block the asyncio control loop or contend with multi-megabyte
-  diagnostic rewrites. Cancellation is recorded centrally for manual starts/stops, configuration
-  restarts, eSIM switches, card removal and disabled lines; repeated identical no-card blocks are
-  coalesced so they cannot evict the useful failure history.
 
 ## [1.6.0] - 2026-08-29
 

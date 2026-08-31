@@ -112,7 +112,8 @@ def _network_candidates() -> list[dict]:
     profiles = ((cfg.get_settings().get("proxy") or {}).get("profiles") or {})
     return [{"proxy_mode": "direct", "proxy_profile_id": ""}] + [
         {"proxy_mode": "library", "proxy_profile_id": str(profile_id)}
-        for profile_id in profiles
+        for profile_id, profile in profiles.items()
+        if isinstance(profile, dict) and profile.get("type") != "subscription"
         if re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(profile_id))
     ]
 

@@ -383,6 +383,28 @@ def load() -> dict:
         proxy["schema_version"] = 2
         proxy["profiles"] = profiles
         proxy["exits"] = exits
+        # A subscription names a collection of nodes, not one deterministic HTTP route.  Older
+        # builds nevertheless allowed Telegram and the updater to select it from the shared
+        # library, then silently reused the first ready country exit backed by that subscription.
+        # Preserve that effective route by making the country explicit on load.  Prefer an
+        # enabled exit, while retaining the first assigned exit as a fallback for configurations
+        # whose country routing is temporarily disabled.
+        def subscription_country(profile_id: str) -> str:
+            assigned = [(str(country).lower(), exit_cfg)
+                        for country, exit_cfg in exits.items()
+                        if re.fullmatch(r"[a-zA-Z]{2}", str(country))
+                        and isinstance(exit_cfg, dict)
+                        and exit_cfg.get("profile_id") == profile_id]
+            return next((country for country, exit_cfg in assigned if exit_cfg.get("enabled")),
+                        assigned[0][0] if assigned else "")
+
+        telegram = out["settings"]["telegram"]
+        telegram_profile_id = str(telegram.get("proxy_profile_id") or "")
+        if str(telegram.get("proxy_mode") or "direct").lower() == "library" \
+                and (profiles.get(telegram_profile_id) or {}).get("type") == "subscription":
+            country = subscription_country(telegram_profile_id)
+            if country:
+                telegram.update(proxy_mode="country", proxy_profile_id="", proxy_country=country)
         # Import legacy updater proxy definitions into the shared library without changing the
         # route the operator selected. Manual SOCKS settings become a private library entry;
         # an existing country selection remains pinned to that country.
@@ -406,7 +428,13 @@ def load() -> dict:
                     "password": urllib.parse.unquote(parsed.password or ""),
                 })
         elif update_mode == "library" and str(updates.get("proxy_profile_id") or "") in profiles:
-            update_profile_id = str(updates["proxy_profile_id"])
+            selected_profile_id = str(updates["proxy_profile_id"])
+            if (profiles.get(selected_profile_id) or {}).get("type") == "subscription":
+                update_country = subscription_country(selected_profile_id)
+                if update_country:
+                    update_mode = "country"
+            else:
+                update_profile_id = selected_profile_id
         normalized_update_mode = "country" if update_mode == "country" and update_country \
             else "library" if update_mode in {"library", "manual"} and update_profile_id \
             else (update_mode if update_mode in {"auto", "direct"} else "auto")

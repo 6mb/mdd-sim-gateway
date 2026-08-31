@@ -21,12 +21,22 @@ class NotificationTemplateUiTests(unittest.TestCase):
             self.assertIn(f"api.{method}({{", SOURCE)
         self.assertGreaterEqual(SOURCE.count("_test_event: event"), 4)
 
+    def test_channel_test_buttons_show_and_lock_the_pending_state(self):
+        self.assertIn("const [channelTesting, setChannelTesting] = useState('')", SOURCE)
+        self.assertIn("disabled={!!channelTesting}", SOURCE)
+        self.assertIn("channelTesting === key ? 'Testing…' : 'Test'", SOURCE)
+        self.assertEqual(SOURCE.count("{testButton("), 4)
+
     def test_event_forwarding_options_are_collapsed_like_template_editors(self):
         self.assertIn('<details className="u-event-options"><summary>', SOURCE)
 
     def test_telegram_and_updates_offer_library_and_country_routes(self):
         self.assertIn("tg.proxy_mode === 'library'", SOURCE)
         self.assertIn("s.updates?.proxy_mode === 'country'", SOURCE)
+
+    def test_subscription_profiles_are_filtered_from_generic_proxy_pickers(self):
+        self.assertIn("profile?.type !== 'subscription'", SOURCE)
+        self.assertEqual(SOURCE.count("selectableProxyProfiles(s).map"), 2)
 
     def test_network_and_version_notes_follow_their_own_controls(self):
         network_note = SOURCE.index("SOCKS5 entries connect directly")

@@ -527,6 +527,43 @@ updates:
         self.assertEqual((profile["server"], profile["port"], profile["username"]),
                          ("proxy.example", 1081, "alice"))
 
+    def test_subscription_update_proxy_becomes_its_first_enabled_country_exit(self):
+        settings = self._load("""proxy:
+  profiles:
+    shared: {name: Shared, type: subscription, url: 'https://example.test/sub'}
+  exits:
+    gb: {enabled: true, profile_id: shared}
+    us: {enabled: true, profile_id: shared}
+updates: {proxy_mode: library, proxy_profile_id: shared}""")
+        self.assertEqual(settings["updates"]["proxy_mode"], "country")
+        self.assertEqual(settings["updates"]["proxy_country"], "gb")
+        self.assertEqual(settings["updates"]["proxy_profile_id"], "")
+
+    def test_subscription_telegram_proxy_becomes_its_first_enabled_country_exit(self):
+        settings = self._load("""proxy:
+  profiles:
+    shared: {name: Shared, type: subscription, url: 'https://example.test/sub'}
+  exits:
+    gb: {enabled: false, profile_id: shared}
+    us: {enabled: true, profile_id: shared}
+telegram: {proxy_mode: library, proxy_profile_id: shared}""")
+        self.assertEqual(settings["telegram"]["proxy_mode"], "country")
+        self.assertEqual(settings["telegram"]["proxy_country"], "us")
+        self.assertEqual(settings["telegram"]["proxy_profile_id"], "")
+
+    def test_automatic_update_candidates_skip_subscriptions(self):
+        settings = {"proxy": {"profiles": {
+            "shared": {"name": "Shared", "type": "subscription"},
+            "node": {"name": "Node", "type": "node"},
+            "socks": {"name": "SOCKS", "type": "socks5"},
+        }}}
+        with patch.object(config, "get_settings", return_value=settings):
+            self.assertEqual(update_check._network_candidates(), [
+                {"proxy_mode": "direct", "proxy_profile_id": ""},
+                {"proxy_mode": "library", "proxy_profile_id": "node"},
+                {"proxy_mode": "library", "proxy_profile_id": "socks"},
+            ])
+
     def test_previous_auto_update_opt_out_becomes_notify_all(self):
         settings = self._load("""proxy: {}
 updates: {proxy_mode: auto, notification_mode: all, auto_update: false}""")

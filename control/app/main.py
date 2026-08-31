@@ -4140,9 +4140,13 @@ def api_put_settings(body: dict):
         raise HTTPException(400, "invalid Telegram proxy mode")
     effective_proxy = (body.get("proxy") if isinstance(body.get("proxy"), dict)
                        else cfg.get_settings().get("proxy")) or {}
-    if telegram_mode == "library" and str(telegram.get("proxy_profile_id") or "") \
-            not in (effective_proxy.get("profiles") or {}):
-        raise HTTPException(400, "Telegram proxy references an unknown proxy library entry")
+    if telegram_mode == "library":
+        telegram_profile = (effective_proxy.get("profiles") or {}).get(
+            str(telegram.get("proxy_profile_id") or "")) or {}
+        if not telegram_profile:
+            raise HTTPException(400, "Telegram proxy references an unknown proxy library entry")
+        if telegram_profile.get("type") == "subscription":
+            raise HTTPException(400, "Telegram cannot select a subscription; use a country exit")
     if telegram_mode == "country" and egress.normalize_country(telegram.get("proxy_country")) \
             not in (effective_proxy.get("exits") or {}):
         raise HTTPException(400, "Telegram proxy references an unknown country exit")
@@ -4173,8 +4177,12 @@ def api_put_settings(body: dict):
         if body["updates"]["proxy_mode"] == "library":
             effective_proxy = (body.get("proxy") if isinstance(body.get("proxy"), dict)
                                else cfg.get_settings().get("proxy")) or {}
-            if body["updates"]["proxy_profile_id"] not in (effective_proxy.get("profiles") or {}):
+            update_profile = (effective_proxy.get("profiles") or {}).get(
+                body["updates"]["proxy_profile_id"]) or {}
+            if not update_profile:
                 raise HTTPException(400, "update proxy references an unknown proxy library entry")
+            if update_profile.get("type") == "subscription":
+                raise HTTPException(400, "updates cannot select a subscription; use a country exit")
         elif body["updates"]["proxy_mode"] == "country":
             effective_proxy = (body.get("proxy") if isinstance(body.get("proxy"), dict)
                                else cfg.get_settings().get("proxy")) or {}
