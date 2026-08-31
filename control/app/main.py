@@ -4133,7 +4133,19 @@ def api_put_settings(body: dict):
             raise HTTPException(400, f"invalid webhook configuration: {exc}")
     # Telegram is notification-only. Ignore stale clients that
     # still submit a remote command configuration.
-    (body.get("telegram") or {}).pop("commands", None)
+    telegram = body.get("telegram") or {}
+    telegram.pop("commands", None)
+    telegram_mode = str(telegram.get("proxy_mode") or "direct").lower()
+    if telegram_mode not in {"direct", "library", "country", "manual"}:
+        raise HTTPException(400, "invalid Telegram proxy mode")
+    effective_proxy = (body.get("proxy") if isinstance(body.get("proxy"), dict)
+                       else cfg.get_settings().get("proxy")) or {}
+    if telegram_mode == "library" and str(telegram.get("proxy_profile_id") or "") \
+            not in (effective_proxy.get("profiles") or {}):
+        raise HTTPException(400, "Telegram proxy references an unknown proxy library entry")
+    if telegram_mode == "country" and egress.normalize_country(telegram.get("proxy_country")) \
+            not in (effective_proxy.get("exits") or {}):
+        raise HTTPException(400, "Telegram proxy references an unknown country exit")
     pushplus = body.get("pushplus") or {}
     if pushplus.get("enabled"):
         if not str(pushplus.get("token") or "").strip():
@@ -4163,6 +4175,11 @@ def api_put_settings(body: dict):
                                else cfg.get_settings().get("proxy")) or {}
             if body["updates"]["proxy_profile_id"] not in (effective_proxy.get("profiles") or {}):
                 raise HTTPException(400, "update proxy references an unknown proxy library entry")
+        elif body["updates"]["proxy_mode"] == "country":
+            effective_proxy = (body.get("proxy") if isinstance(body.get("proxy"), dict)
+                               else cfg.get_settings().get("proxy")) or {}
+            if body["updates"]["proxy_country"] not in (effective_proxy.get("exits") or {}):
+                raise HTTPException(400, "update proxy references an unknown country exit")
     hardware = body.get("hardware")
     if hardware is not None:
         if not isinstance(hardware, dict):

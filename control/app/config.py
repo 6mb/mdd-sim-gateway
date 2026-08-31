@@ -126,6 +126,7 @@ DEFAULTS = {
             "bot_token": "",
             "chat_id": "",
             "proxy_mode": "direct",
+            "proxy_profile_id": "",
             "proxy_url": "",
             "proxy_country": "",
             "message_templates": {},
@@ -170,6 +171,7 @@ DEFAULTS = {
         "updates": {
             "proxy_mode": "auto",
             "proxy_profile_id": "",
+            "proxy_country": "",
             # Automatic and notify-only are mutually exclusive. New installations track stable
             # releases explicitly classified as main automatically; every automatic install
             # still requires an exact
@@ -381,17 +383,17 @@ def load() -> dict:
         proxy["schema_version"] = 2
         proxy["profiles"] = profiles
         proxy["exits"] = exits
-        # Import legacy updater proxy definitions into the shared library. Old proxy-only
-        # policies become Auto so upgraded systems also get direct-first fallback; a library
-        # choice made by a current client remains pinned.
+        # Import legacy updater proxy definitions into the shared library without changing the
+        # route the operator selected. Manual SOCKS settings become a private library entry;
+        # an existing country selection remains pinned to that country.
         updates = out["settings"].get("updates") or {}
         update_mode = str(updates.get("proxy_mode") or "auto").lower()
         update_profile_id = ""
+        update_country = ""
         if update_mode == "country":
             country = str(updates.get("proxy_country") or "").strip().lower()
-            candidate = exits.get(country) if isinstance(exits.get(country), dict) else {}
-            if candidate.get("enabled") and candidate.get("profile_id") in profiles:
-                update_profile_id = str(candidate["profile_id"])
+            if re.fullmatch(r"[a-z]{2}", country) and isinstance(exits.get(country), dict):
+                update_country = country
         elif update_mode == "manual":
             raw = str(updates.get("proxy_url") or "").strip()
             parsed = urllib.parse.urlsplit(raw)
@@ -405,7 +407,8 @@ def load() -> dict:
                 })
         elif update_mode == "library" and str(updates.get("proxy_profile_id") or "") in profiles:
             update_profile_id = str(updates["proxy_profile_id"])
-        normalized_update_mode = "library" if update_mode == "library" and update_profile_id \
+        normalized_update_mode = "country" if update_mode == "country" and update_country \
+            else "library" if update_mode in {"library", "manual"} and update_profile_id \
             else (update_mode if update_mode in {"auto", "direct"} else "auto")
         raw_updates = data.get("settings", {}).get("updates", {}) or {}
         update_mode = str(raw_updates.get("update_mode") or "").lower()
@@ -427,6 +430,7 @@ def load() -> dict:
         out["settings"]["updates"] = {
             "proxy_mode": normalized_update_mode,
             "proxy_profile_id": update_profile_id if normalized_update_mode == "library" else "",
+            "proxy_country": update_country if normalized_update_mode == "country" else "",
             "update_mode": update_mode,
             "version_scope": version_scope,
         }

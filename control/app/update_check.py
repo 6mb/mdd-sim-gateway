@@ -43,16 +43,21 @@ def validate_network_settings(value: dict | None) -> dict:
     """Validate and normalize the persisted update networking selection."""
     value = value or {}
     mode = str(value.get("proxy_mode") or "auto").strip().lower()
-    if mode in {"manual", "country"}:
+    if mode == "manual":
         mode = "auto"
-    if mode not in {"auto", "direct", "library"}:
-        raise UpdateNetworkError("update proxy mode must be auto, direct or library")
+    if mode not in {"auto", "direct", "library", "country"}:
+        raise UpdateNetworkError("update proxy mode must be auto, direct, library or country")
     result = {"proxy_mode": mode, "proxy_profile_id": ""}
     if mode == "library":
         profile_id = str(value.get("proxy_profile_id") or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", profile_id):
             raise UpdateNetworkError("select a proxy from the proxy library for software updates")
         result["proxy_profile_id"] = profile_id
+    elif mode == "country":
+        country = str(value.get("proxy_country") or "").strip().lower()
+        if not re.fullmatch(r"[a-z]{2}", country):
+            raise UpdateNetworkError("select a country exit for software updates")
+        result["proxy_country"] = country
     return result
 
 
@@ -92,6 +97,10 @@ def _network_selection() -> dict:
         profiles = (settings.get("proxy") or {}).get("profiles") or {}
         if selection["proxy_profile_id"] not in profiles:
             raise UpdateNetworkError("selected update proxy is no longer in the proxy library")
+    elif selection["proxy_mode"] == "country":
+        exits = (settings.get("proxy") or {}).get("exits") or {}
+        if selection["proxy_country"] not in exits:
+            raise UpdateNetworkError("selected update country exit is no longer configured")
     return selection
 
 
@@ -138,6 +147,19 @@ def _proxy_url(selection: dict) -> str:
         return ""
     from . import config as cfg, egress
     settings = cfg.get_settings()
+    if mode == "country":
+        country = selection["proxy_country"]
+        exit_cfg = ((settings.get("proxy") or {}).get("exits") or {}).get(country) or {}
+        state = (egress.status().get("exits") or {}).get(country) or {}
+        try:
+            port = int(state.get("proxy_port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        host = str(state.get("proxy_host") or "").strip()
+        if not exit_cfg.get("enabled") or not state.get("ready") \
+                or not host or not 1 <= port <= 65535:
+            raise UpdateNetworkError("selected country exit is not ready")
+        return f"socks5h://{host}:{port}"
     profile_id = selection["proxy_profile_id"]
     profile = ((settings.get("proxy") or {}).get("profiles") or {}).get(profile_id) or {}
     if profile.get("type") == "socks5":

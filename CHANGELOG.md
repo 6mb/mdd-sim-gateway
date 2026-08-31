@@ -38,6 +38,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   publishing the verified host update request. The page also retains the last background or
   manual check time instead of returning to “Not checked” when it is opened.
 
+- Telegram delivery and software updates can now explicitly use a proxy-library entry or a
+  configured country exit, in addition to direct networking (and automatic fallback for
+  updates). Existing Telegram manual-proxy settings remain usable, while legacy updater manual
+  proxies migrate into the shared library and legacy country selections stay pinned.
+
 ### Fixed
 
 - [Issue #27](https://github.com/MddIdd/mdd-sim-gateway/issues/27): a VLESS node using
@@ -68,6 +73,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   all an operator could screenshot. The parsed summary keeps the SNI behind the
   sensitive-information switch, since that line names the operator's own server and is the part
   people screenshot into public issues.
+
+- Notification event switches now collapse like the message-template editor. Update-network
+  guidance is shown beneath the network selection, while release-range guidance is shown beneath
+  the update method and version range instead of the two descriptions appearing swapped.
 
 - A release candidate now recognizes the final Release with the same numeric version as newer
   (for example, `1.6.1-rc2` → `1.6.1`), so promotion-gated automatic updates can move test

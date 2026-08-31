@@ -805,6 +805,21 @@ class Orchestrator:
             mode = str(selection.get("proxy_mode") or "direct").lower()
             if mode == "direct":
                 return {"proxy_url": "", "route": "direct", "route_name": ""}
+            if mode == "country":
+                country = str(selection.get("proxy_country") or "").strip().lower()
+                exit_cfg = (proxy.get("exits") or {}).get(country) or {}
+                state = live.get(country) or {}
+                try:
+                    proxy_port = int(state.get("proxy_port") or 0)
+                except (TypeError, ValueError):
+                    proxy_port = 0
+                proxy_host = str(state.get("proxy_host") or "").strip()
+                if (not re.fullmatch(r"[a-z]{2}", country) or not exit_cfg.get("enabled")
+                        or not state.get("ready") or proxy_host != COUNTRY_PROXY_LISTEN
+                        or not 1 <= proxy_port <= 65535):
+                    raise ValueError("selected update country exit is not ready")
+                return {"proxy_url": f"socks5h://{proxy_host}:{proxy_port}",
+                        "route": "country", "route_name": country.upper()}
             if mode != "library":
                 raise ValueError("invalid update proxy mode")
             profile_id = str(selection.get("proxy_profile_id") or "").strip()

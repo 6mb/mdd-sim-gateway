@@ -660,6 +660,33 @@ class UpdaterTests(unittest.TestCase):
 
 
 class OrchestratorUpdateTests(unittest.TestCase):
+    def test_country_exit_is_resolved_as_a_named_update_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            root = data / "orchestrator"
+            root.mkdir()
+            (root / "update-request.json").write_text(json.dumps({
+                "version": "9.9.9", "repository": "MddIdd/mdd-sim-gateway",
+                "network": {"proxy_mode": "country", "proxy_country": "us"},
+            }), encoding="utf-8")
+            (root / "desired.json").write_text(json.dumps({"proxy": {
+                "profiles": {"primary": {"name": "Primary", "type": "node"}},
+                "exits": {"us": {"enabled": True, "profile_id": "primary"}},
+            }}), encoding="utf-8")
+            (root / "proxy-status.json").write_text(json.dumps({"exits": {"us": {
+                "ready": True, "proxy_host": mdd_orchestrator.COUNTRY_PROXY_LISTEN,
+                "proxy_port": 22538,
+            }}}), encoding="utf-8")
+            app = mdd_orchestrator.Orchestrator(data, Path(__file__).resolve().parent.parent)
+            completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            with patch.object(app, "service_active", return_value=False), \
+                    patch.object(mdd_orchestrator, "run", return_value=completed):
+                app.process_update_request()
+            route = json.loads((data / "update/network.json").read_text())
+        self.assertEqual(route["proxy_url"],
+                         f"socks5h://{mdd_orchestrator.COUNTRY_PROXY_LISTEN}:22538")
+        self.assertEqual((route["route"], route["route_name"]), ("country", "US"))
+
     def test_library_proxy_is_resolved_into_private_file_not_command_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp)

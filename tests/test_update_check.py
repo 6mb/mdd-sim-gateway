@@ -82,13 +82,17 @@ class UpdateCheckTests(unittest.TestCase):
             result = update_check.check(True)
         self.assertTrue(result["update_available"])
 
-    def test_update_network_defaults_to_auto_and_requires_a_library_entry(self):
+    def test_update_network_accepts_library_and_country_selections(self):
         self.assertEqual(update_check.validate_network_settings(None)["proxy_mode"], "auto")
         with self.assertRaises(update_check.UpdateNetworkError):
             update_check.validate_network_settings({"proxy_mode": "library",
                                                      "proxy_profile_id": ""})
         self.assertEqual(update_check.validate_network_settings({
-            "proxy_mode": "country", "proxy_country": "us"})["proxy_mode"], "auto")
+            "proxy_mode": "country", "proxy_country": "US"}), {
+                "proxy_mode": "country", "proxy_profile_id": "", "proxy_country": "us"})
+        with self.assertRaises(update_check.UpdateNetworkError):
+            update_check.validate_network_settings({"proxy_mode": "country",
+                                                     "proxy_country": ""})
 
     def test_complete_update_settings_defaults_to_automatic_main_releases(self):
         self.assertEqual(update_check.validate_update_settings(None), {
@@ -276,6 +280,19 @@ class UpdateCheckTests(unittest.TestCase):
             "server": "proxy.example", "port": 1080,
             "username": "a@b", "password": "p:/w",
         }), "socks5h://a%40b:p%3A%2Fw@proxy.example:1080")
+
+    def test_selected_country_exit_is_used_directly(self):
+        settings = {"proxy": {
+            "profiles": {"primary": {"name": "Primary", "type": "node"}},
+            "exits": {"us": {"enabled": True, "profile_id": "primary"}},
+        }}
+        live = {"exits": {"us": {"ready": True, "proxy_host": "172.17.0.1",
+                                     "proxy_port": 22538}}}
+        with patch.object(config, "get_settings", return_value=settings), \
+                patch("control.app.egress.status", return_value=live):
+            self.assertEqual(update_check._proxy_url({
+                "proxy_mode": "country", "proxy_profile_id": "", "proxy_country": "us",
+            }), "socks5h://172.17.0.1:22538")
 
     def test_auto_falls_back_to_library_and_records_the_working_route(self):
         direct = MagicMock()
@@ -485,7 +502,7 @@ class UpdateProxyMigrationTests(unittest.TestCase):
                 + "\ninstances: {}\n", encoding="utf-8")
             return config.load()["settings"]
 
-    def test_old_country_selection_migrates_to_auto_and_keeps_library_profile(self):
+    def test_old_country_selection_remains_pinned_to_that_country(self):
         settings = self._load("""proxy:
   profiles:
     primary: {name: Primary, type: node, value: 'vless://example'}
@@ -493,7 +510,7 @@ class UpdateProxyMigrationTests(unittest.TestCase):
     us: {enabled: true, profile_id: primary}
 updates: {proxy_mode: country, proxy_country: us}""")
         self.assertEqual(settings["updates"], {
-            "proxy_mode": "auto", "proxy_profile_id": "",
+            "proxy_mode": "country", "proxy_profile_id": "", "proxy_country": "us",
             "update_mode": "automatic", "version_scope": "main"})
         self.assertIn("primary", settings["proxy"]["profiles"])
 
@@ -503,7 +520,8 @@ updates:
   proxy_mode: manual
   proxy_url: 'socks5h://alice:secret@proxy.example:1081'""")
         self.assertEqual(settings["updates"], {
-            "proxy_mode": "auto", "proxy_profile_id": "",
+            "proxy_mode": "library", "proxy_profile_id": "legacy-update-proxy",
+            "proxy_country": "",
             "update_mode": "automatic", "version_scope": "main"})
         profile = settings["proxy"]["profiles"]["legacy-update-proxy"]
         self.assertEqual((profile["server"], profile["port"], profile["username"]),
@@ -513,7 +531,7 @@ updates:
         settings = self._load("""proxy: {}
 updates: {proxy_mode: auto, notification_mode: all, auto_update: false}""")
         self.assertEqual(settings["updates"], {
-            "proxy_mode": "auto", "proxy_profile_id": "",
+            "proxy_mode": "auto", "proxy_profile_id": "", "proxy_country": "",
             "update_mode": "notify", "version_scope": "all"})
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -584,9 +585,46 @@ def telegram_session(cfg: dict) -> requests.Session:
     session = requests.Session()
     session.trust_env = False
     if mode == "manual":
+        # Kept for configurations saved before the shared proxy library was introduced.
         proxy = str(cfg.get("proxy_url") or "").strip()
         if not re.match(r"^(?:https?|socks5h?)://", proxy, re.IGNORECASE):
             raise ValueError("Telegram proxy must be an HTTP(S) or SOCKS5 URL")
+        session.proxies.update({"http": proxy, "https": proxy})
+    elif mode == "library":
+        from . import config as settings_config
+        settings = settings_config.get_settings()
+        profile_id = str(cfg.get("proxy_profile_id") or "").strip()
+        profile = ((settings.get("proxy") or {}).get("profiles") or {}).get(profile_id) or {}
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", profile_id) or not profile:
+            raise RuntimeError("selected Telegram proxy is no longer in the proxy library")
+        if profile.get("type") == "socks5":
+            host = str(profile.get("server") or "").strip()
+            try:
+                port = int(profile.get("port") or 1080)
+            except (TypeError, ValueError):
+                port = 0
+            if not host or not 1 <= port <= 65535 or any(ch in host for ch in "\r\n/@"):
+                raise RuntimeError("selected Telegram SOCKS5 proxy is invalid")
+            username = str(profile.get("username") or "")
+            password = str(profile.get("password") or "")
+            auth = f"{quote(username, safe='')}:{quote(password, safe='')}@" \
+                if username or password else ""
+            proxy = f"socks5h://{auth}{host}:{port}"
+        else:
+            exits = (settings.get("proxy") or {}).get("exits") or {}
+            live = egress.status().get("exits") or {}
+            state = next((live.get(country) or {} for country, exit_cfg in exits.items()
+                          if isinstance(exit_cfg, dict) and exit_cfg.get("enabled")
+                          and exit_cfg.get("profile_id") == profile_id
+                          and (live.get(country) or {}).get("ready")), {})
+            try:
+                port = int(state.get("proxy_port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            host = str(state.get("proxy_host") or "").strip()
+            if not host or not 1 <= port <= 65535:
+                raise RuntimeError("selected Telegram proxy has no ready country exit")
+            proxy = f"socks5h://{host}:{port}"
         session.proxies.update({"http": proxy, "https": proxy})
     elif mode == "country":
         country = egress.normalize_country(cfg.get("proxy_country"))
@@ -610,7 +648,7 @@ def telegram_session(cfg: dict) -> requests.Session:
         proxy = f"socks5h://{proxy_host}:{proxy_port}"
         session.proxies.update({"http": proxy, "https": proxy})
     elif mode != "direct":
-        raise ValueError("Telegram proxy mode must be direct, manual or country")
+        raise ValueError("Telegram proxy mode must be direct, library, country or legacy manual")
     return session
 
 

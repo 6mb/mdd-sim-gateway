@@ -256,6 +256,37 @@ class NotificationChannelTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_telegram_uses_a_socks5_entry_from_the_shared_proxy_library(self):
+        settings = {"proxy": {"profiles": {"primary": {
+            "name": "Primary", "type": "socks5", "server": "proxy.example",
+            "port": 1081, "username": "a@b", "password": "p:/w",
+        }}}}
+        with patch.object(config, "get_settings", return_value=settings):
+            session = telegram_session({"proxy_mode": "library",
+                                        "proxy_profile_id": "primary"})
+        try:
+            expected = "socks5h://a%40b:p%3A%2Fw@proxy.example:1081"
+            self.assertEqual(session.proxies["http"], expected)
+            self.assertEqual(session.proxies["https"], expected)
+        finally:
+            session.close()
+
+    def test_telegram_library_node_reuses_its_ready_country_exit(self):
+        settings = {"proxy": {
+            "profiles": {"primary": {"name": "Primary", "type": "node"}},
+            "exits": {"gb": {"enabled": True, "profile_id": "primary"}},
+        }}
+        live = {"exits": {"gb": {"ready": True, "proxy_host": "172.17.0.1",
+                                     "proxy_port": 22027}}}
+        with patch.object(config, "get_settings", return_value=settings), \
+                patch("control.app.notify_push.egress.status", return_value=live):
+            session = telegram_session({"proxy_mode": "library",
+                                        "proxy_profile_id": "primary"})
+        try:
+            self.assertEqual(session.proxies["https"], "socks5h://172.17.0.1:22027")
+        finally:
+            session.close()
+
     def test_country_telegram_proxy_uses_remote_dns_through_verified_exit(self):
         with patch("control.app.notify_push.egress.status", return_value={"exits": {
                 "gb": {"ready": True, "interface": "mdd-gb",
