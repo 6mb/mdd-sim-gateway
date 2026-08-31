@@ -301,7 +301,12 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-routing-policy .u-card-head { margin:-18px -18px 0; }
 .u-routing-policy .u-card-head p { max-width:680px; line-height:1.5; }
 .u-routing-impact { margin:16px 0 0; padding:12px 14px; border-radius:10px; color:var(--text-dim); background:var(--hover); font-size:12px; line-height:1.55; }
-.u-proxy-list { display:grid; gap:10px; }
+/* A row that outgrows the page drags the whole list wider with it, so the proxy cards
+   stopped lining up with every other card on the page. Nothing in here may push past
+   the container: long values wrap or ellipsize inside their own column instead. */
+.u-proxy-list { display:grid; gap:10px; min-width:0; }
+.u-proxy-row { min-width:0; max-width:100%; }
+.u-proxy-row > * { min-width:0; }
 .u-proxy-row { display:grid; grid-template-columns:minmax(170px,220px) minmax(260px,1fr) minmax(120px,170px) auto; align-items:end; gap:14px; padding:14px 16px; }
 .u-proxy-row:has(.u-proxy-auth) { grid-template-columns:minmax(160px,200px) minmax(180px,1fr) 90px minmax(230px,300px) auto; }
 .u-proxy-row label { margin:0 0 5px; font-size:11px; }
@@ -320,7 +325,7 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-number-suffix input { width:76px; }
 .u-number-suffix span { color:var(--text-mute); font-size:11px; }
 .u-proxy-auth { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; min-width:0; }
-.u-proxy-actions { display:flex; align-items:center; justify-content:flex-end; gap:7px; min-width:max-content; }
+.u-proxy-actions { display:flex; align-items:center; justify-content:flex-end; gap:7px; flex-wrap:wrap; }
 .u-proxy-actions .btn { min-height:38px; white-space:nowrap; }
 .u-test-row { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 10px;
   margin-top:2px; padding-top:10px; border-top:1px solid var(--border); }
