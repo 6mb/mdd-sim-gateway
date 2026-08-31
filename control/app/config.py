@@ -142,6 +142,16 @@ DEFAULTS = {
                        "keepalive_result": True, "balance_low": True,
                        "software_update": True},
         },
+        "feishu": {
+            "enabled": False,
+            "url": "",
+            "secret": "",
+            "message_templates": {},
+            "events": {"incoming_sms": True, "incoming_call": True,
+                       "missed_call": True, "voicemail_received": True,
+                       "keepalive_result": True, "balance_low": True,
+                       "software_update": True},
+        },
         "security": {
             "https_only": True,
             "trusted_proxies": [],
@@ -283,7 +293,7 @@ def load() -> dict:
                                     **(data.get("settings", {}).get("debug", {}))}
         # notification channels: merge one level deep (like tls/retry) so a saved config that
         # predates these keys — or omits the nested `events` map — still gets full defaults.
-        for key in ("webhook", "telegram", "pushplus"):
+        for key in ("webhook", "telegram", "pushplus", "feishu"):
             saved = data.get("settings", {}).get(key, {}) or {}
             merged = {**DEFAULTS["settings"][key], **saved}
             merged["events"] = {**DEFAULTS["settings"][key]["events"],

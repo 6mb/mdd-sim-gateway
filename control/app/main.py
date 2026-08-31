@@ -4102,7 +4102,7 @@ def api_put_settings(body: dict):
             raise HTTPException(400, "invalid new-device defaults")
         if any(not isinstance(value, bool) for value in defaults.values()):
             raise HTTPException(400, "new-device defaults must be boolean")
-    for channel in ("webhook", "telegram", "pushplus"):
+    for channel in ("webhook", "telegram", "pushplus", "feishu"):
         try:
             notify_push.validate_message_templates(body.get(channel) or {})
         except ValueError as exc:
@@ -4126,6 +4126,19 @@ def api_put_settings(body: dict):
             raise HTTPException(400, "PushPlus token is required")
         if str(pushplus.get("template") or "html") not in {"html", "txt", "markdown", "json"}:
             raise HTTPException(400, "unsupported PushPlus template")
+    feishu = body.get("feishu") or {}
+    if feishu.get("enabled"):
+        try:
+            sample = notify_push.build_payload(
+                notify_push.EV_INCOMING_SMS,
+                {"id": "preview", "name": "SIM", "iccid": "", "msisdn": ""},
+                "+10000000000", "123456")
+            # Validation happens before the HTTP request inside send_feishu. Use a local copy
+            # of the same checks here so saving settings never sends a notification.
+            notify_push.validate_feishu_url(feishu.get("url"))
+            notify_push.build_notification_message(sample, feishu)
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid Feishu configuration: {exc}") from exc
     if "updates" in body:
         try:
             body["updates"] = update_check.validate_update_settings(body.get("updates"))
@@ -4294,6 +4307,17 @@ async def api_pushplus_test(body: dict):
     try:
         event = _notification_test_event(body)
         return await asyncio.to_thread(notify_push.send_pushplus, body, _test_push_payload(event))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/notifications/feishu/test")
+async def api_feishu_test(body: dict):
+    try:
+        event = _notification_test_event(body)
+        return await asyncio.to_thread(notify_push.send_feishu, body, _test_push_payload(event))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
@@ -6223,7 +6247,9 @@ def _dispatch_push(event: str, iid: str, source: str, text: str | None = None):
     wh = settings.get("webhook") or {}
     tg = settings.get("telegram") or {}
     pp = settings.get("pushplus") or {}
-    if not (wh.get("enabled") or tg.get("enabled") or pp.get("enabled")):
+    fs = settings.get("feishu") or {}
+    if not (wh.get("enabled") or tg.get("enabled") or pp.get("enabled")
+            or fs.get("enabled")):
         return
     asyncio.create_task(
         asyncio.to_thread(notify_push.dispatch, settings, event, inst, source, text))
