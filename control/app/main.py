@@ -2275,16 +2275,22 @@ def apply_health(iid, inst, st, container_id: str | None = None):
             # every few minutes) the line re-tests its exit on a slow cadence and registers
             # by itself when the outside world comes back.
             h["next_retry_at"] = now + failover.EXHAUSTED_RETRY_SECONDS
+        # The SIP code that condemned a reg_rejected line (403 vs 5xx points at completely
+        # different fixes) is only in the status detail at this moment; issue #33 shipped a
+        # bundle where it had already rotated out of every log, so persist it with the record.
+        frozen_sip_status = (st.get("detail") or {}).get("sip_status")
         if h.get("next_retry_at") is not None:
             _record_lifecycle(
                 iid, "recovery_scheduled", h.get("frozen_code") or "unhealthy",
                 retry_count=h.get("retry_count"),
-                delay_seconds=max(0, int(h["next_retry_at"] - now)))
+                delay_seconds=max(0, int(h["next_retry_at"] - now)),
+                sip_status=frozen_sip_status)
         else:
             _record_lifecycle(
                 iid, "recovery_cancelled", "exit_give_up" if exit_gave_up else
                 (h.get("frozen_code") or "unhealthy"),
-                retry_count=h.get("retry_count"))
+                retry_count=h.get("retry_count"),
+                sip_status=frozen_sip_status)
         asyncio.create_task(hub.drop_ami(str(iid)))
         return _frozen(h, st, rmax)
     st["retry"] = {"count": count, "max": rmax}
@@ -3744,7 +3750,9 @@ async def _unified_devices() -> list[dict]:
             "vowifi": {"epdg": (line_status or {}).get("detail") or "",
                        "ims": (line_status or {}).get("label") or "",
                        "rekey_minutes": (inst or {}).get("rekey_minutes",
-                           (cfg.get_settings().get("rekey") or {}).get("minutes", 30))},
+                           (cfg.get_settings().get("rekey") or {}).get("minutes", 30)),
+                       "ike_rekey_minutes": (inst or {}).get("ike_rekey_minutes",
+                           (cfg.get_settings().get("rekey") or {}).get("ike_minutes", 150))},
             "egress": {"node": (egress.status().get("lines") or {}).get(
                 str(inst["id"]) if inst else "", {}).get("node") or "",
                 # The picker lives on the settings page, so without these the device page shows

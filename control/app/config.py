@@ -62,7 +62,11 @@ DEFAULTS = {
         # configured value, else an implementation value). We rekey the CHILD (ESP) SA every
         # `minutes` from its establishment. 0 disables proactive rekey (passive only — the SA
         # is only refreshed if the ePDG initiates a rekey). Default 30 min.
-        "rekey": {"minutes": 30},
+        # `ike_minutes` is the same local policy for the IKE SA itself. The engine only rekeys
+        # the IKE SA as initiator, so this must fire before the carrier's own session clock:
+        # giffgaff/O2 UK silently invalidates a SWu session at ~2h50m (issue #33), EE at ~12h.
+        # 150 min preempts every observed clock; 0 disables proactive IKE rekey.
+        "rekey": {"minutes": 30, "ike_minutes": 150},
         # Outbound ring timeout (s): how long Asterisk lets an outgoing call ring before it
         # gives up and CANCELs. 35 covers a normal answer window; most carriers roll to
         # voicemail by ~30s. Shorter = the callee is re-alerted fewer times when unanswered.
@@ -822,12 +826,12 @@ def imeisv_from_imei(imei: str, imeisv: str = "", svn: str = "00") -> str:
     return base14 + svn2
 
 
-def _clamp_rekey(v) -> int:
+def _clamp_rekey(v, default: int = 30) -> int:
     """0 disables proactive rekey; otherwise clamp to 1..1440 minutes."""
     try:
         m = int(v)
     except (TypeError, ValueError):
-        return 30
+        return default
     if m <= 0:
         return 0
     return max(1, min(1440, m))
@@ -1063,6 +1067,13 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         # (off) or a sane 1..1440 window so a typo can't set an absurd sub-minute rekey storm.
         "rekey_minutes": _clamp_rekey(inst.get("rekey_minutes",
                                                (settings.get("rekey", {}) or {}).get("minutes", 30))),
+        # Proactive IKE-SA rekey period in minutes (0 = disabled). Same override order. The
+        # engine refuses the responder role for an IKE rekey, so a period longer than the
+        # carrier's own session clock means periodic teardowns (giffgaff/O2: ~2h50m, #33).
+        "ike_rekey_minutes": _clamp_rekey(
+            inst.get("ike_rekey_minutes",
+                     (settings.get("rekey", {}) or {}).get("ike_minutes", 150)),
+            default=150),
         # Accept an ePDG-initiated ESP rekey in place rather than refusing it and rebuilding the
         # tunnel. Per-line, and off unless asked for: the responder-side key direction it relies
         # on can only be proven against a carrier that actually initiates a rekey.

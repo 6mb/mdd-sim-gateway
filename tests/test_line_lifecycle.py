@@ -71,6 +71,28 @@ class DeletedCardSuppressionTests(unittest.TestCase):
         self.assertEqual(set(records[-1]), {
             "ts", "instance", "event", "reason_code", "retry_count", "card_present"})
 
+    def test_lifecycle_keeps_the_sip_status_that_condemned_the_line(self):
+        # Issue #33: a reg_rejected freeze reached the support bundle without the SIP code
+        # that caused it, because every log holding it had already rotated.
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(engine, "DATA_DIR", temp), \
+                patch.object(engine, "HOST_DATA_DIR", temp):
+            Path(temp, "instances", "line-1", "logs").mkdir(parents=True)
+            engine.record_lifecycle(
+                "line-1", "recovery_scheduled", reason_code="reg_rejected",
+                delay_seconds=120, sip_status=403)
+            engine.record_lifecycle(
+                "line-1", "recovery_scheduled", reason_code="reg_rejected",
+                delay_seconds=120, sip_status=None)
+            engine.record_lifecycle(
+                "line-1", "recovery_scheduled", reason_code="reg_rejected",
+                delay_seconds=120, sip_status=12345)
+            path = Path(temp, "instances", "line-1", "logs", "lifecycle.jsonl")
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(records[0]["sip_status"], 403)
+        self.assertNotIn("sip_status", records[1])
+        self.assertEqual(records[2]["sip_status"], 999)
+
     def test_lifecycle_never_recreates_a_deleted_instance_directory(self):
         with tempfile.TemporaryDirectory() as temp, \
                 patch.object(engine, "DATA_DIR", temp), \

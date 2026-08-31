@@ -112,6 +112,17 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(value["iccid"], "<redacted>")
         self.assertEqual(value["nested"]["imei_valid"], "<redacted>")
 
+    def test_redaction_preserves_registration_failure_evidence(self):
+        # The classified reg-failure verdict is digits and enum words only; losing it would
+        # re-open the #33 gap where a bundle could not say WHY registration was rejected.
+        value = operations.redact({
+            "registration_evidence": {"kind": "rejected", "sip_status": 403},
+            "sip_status": 403,
+        })
+        self.assertEqual(value["registration_evidence"],
+                         {"kind": "rejected", "sip_status": 403})
+        self.assertEqual(value["sip_status"], 403)
+
     def test_redaction_preserves_non_secret_eap_aka_diagnostics(self):
         diagnostic = (
             "IKE_AUTH rejected with AUTHENTICATION_FAILED before any EAP-AKA challenge "

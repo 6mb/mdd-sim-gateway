@@ -4,6 +4,22 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- [Issue #33](https://github.com/MddIdd/mdd-sim-gateway/issues/33): a giffgaff/O2 UK VoWiFi
+  line dropped like clockwork every ~2h50m. The carrier silently invalidates its SWu session
+  just before a 3-hour lifetime without sending any IKE message, and the engine's proactive
+  IKE-SA rekey — the mechanism that resets that carrier clock — defaulted to 600 minutes and
+  could not be configured, so it never fired in time. The IKE rekey period is now a real
+  setting (System Settings → Calls & VoWiFi, with a per-line `ike_rekey_minutes` override)
+  and defaults to 150 minutes, which preempts every carrier clock observed so far (giffgaff
+  ~2h50m, EE ~12h). The 30-minute ESP rekey is unchanged and unrelated.
+
+- A `reg_rejected` freeze now records the SIP response code that condemned the line (for
+  example 403) in both the lifecycle record and the frozen diagnostics snapshot. The #33
+  support bundle reached us after every log line holding that code had rotated away, so the
+  bundle could prove the registration was rejected but not why.
+
 ## [1.7.0] - 2026-08-31
 
 ### Added

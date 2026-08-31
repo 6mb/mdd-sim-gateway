@@ -202,6 +202,30 @@ def ike_evidence(iid: str) -> dict:
     return _charon_evidence(base)
 
 
+def registration_failure_evidence(log_tail: str) -> dict:
+    """Classify the newest concrete REGISTER failure and retain its SIP response code.
+
+    Asterisk reports both as "Rejected", but they are different events: a "Fatal response
+    '403'" is the IMS refusing this line, while "No response received" is the IMS no longer
+    hearing it — on this gateway almost always an ESP session the carrier aged out while
+    the IKE side still answered keepalives. The newest marker in the log decides.
+    """
+    for line in reversed(log_tail.splitlines()):
+        low = line.lower()
+        # The real Asterisk message says "on registration attempt", not "on REGISTER
+        # attempt".  ``registration`` does not contain the substring ``register``, so the
+        # old extra guard made this production path unreachable.  This exact marker is emitted
+        # by outbound registration's timeout path and is already the evidence retained by
+        # _SIP_EVIDENCE.  A Docker log read failure is returned as "error: ...", which
+        # deliberately does not match and therefore remains on the conservative slow path.
+        if "no response received" in low:
+            return {"kind": "unanswered"}
+        match = re.search(r"fatal response '(\d+)'", low)
+        if match:
+            return {"kind": "rejected", "sip_status": int(match.group(1))}
+    return {"kind": "unknown"}
+
+
 def _sip_evidence(raw: str) -> list[str]:
     """Keep the SIP protocol lines and registration failures from a container log."""
     kept = []
@@ -291,6 +315,10 @@ def record_lifecycle(iid: str, event: str, *, reason_code: str = "", **facts) ->
     for key in ("retry_count", "delay_seconds"):
         if key in facts and facts[key] is not None:
             record[key] = max(0, int(facts[key]))
+    # The SIP response code behind a reg_rejected freeze (e.g. 403). A bare code is
+    # support-safe and is exactly what distinguishes a carrier refusal from a dead tunnel.
+    if facts.get("sip_status") is not None:
+        record["sip_status"] = max(0, min(999, int(facts["sip_status"])))
     for key in ("card_present", "imei_valid", "imei_source_matches"):
         if key in facts and facts[key] is not None:
             record[key] = bool(facts[key])
@@ -325,7 +353,12 @@ def capture_diagnostics(iid: str, inst: dict, base: str, reason: str):
                   "host": _host_evidence()}
         for name in ("swu_status.json", "usim_status.json", "pin_status.json"):
             record[name[:-5]] = read_run_json(iid, name) or {}
-        record["sip"] = _sip_evidence(logs(iid, 600))
+        tail = logs(iid, 600)
+        record["sip"] = _sip_evidence(tail)
+        # The bare "Rejected" registration string cannot say WHY (issue #33 shipped a bundle
+        # whose SIP response code was already rotated away); keep the classified verdict and
+        # its numeric status code beside it. Digits-only, so redaction passes it through.
+        record["registration_evidence"] = registration_failure_evidence(tail)
         _append_diagnostic(base, record)
     except Exception as exc:  # noqa
         log.warning("diagnostic capture failed for instance %s: %s", iid, exc)
