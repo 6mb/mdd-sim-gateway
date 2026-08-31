@@ -234,16 +234,25 @@ def _write_private_json(path: Path, value: dict):
 
 
 def _process_detail(process: subprocess.Popen | None, limit: int = 300) -> str:
-    """Whatever the test proxy printed before giving up, trimmed to one readable line."""
-    if not process or not process.stderr:
+    """Whatever the test proxy printed before giving up, trimmed to one readable line.
+
+    Both streams are drained: sing-box reports on stderr while Xray-core writes its log to
+    stdout, so reading only one of them left whichever engine actually failed unquoted.
+    Call this only after the process has been stopped — these reads run to EOF.
+    """
+    if not process:
         return ""
-    try:
-        text = process.stderr.read() or ""
-    except (OSError, ValueError):
-        return ""
-    if isinstance(text, bytes):
-        text = text.decode("utf-8", "replace")
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines: list[str] = []
+    for stream in (process.stdout, process.stderr):
+        if not stream:
+            continue
+        try:
+            text = stream.read() or ""
+        except (OSError, ValueError):
+            continue
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", "replace")
+        lines += [line.strip() for line in text.splitlines() if line.strip()]
     return " | ".join(lines[-3:])[:limit]
 
 
@@ -421,22 +430,27 @@ def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
                     raise EgressError(
                         _config_error("Xray node configuration is invalid", xcheck))
                 xray_process = subprocess.Popen([xray, "run", "-config", str(xray_path)],
-                                                stdout=subprocess.DEVNULL,
+                                                stdout=subprocess.PIPE,
                                                 stderr=subprocess.PIPE, text=True)
                 _wait_tcp(bridge_port, xray_process, what="Xray-core")
             sing_process = subprocess.Popen([singbox, "run", "-c", str(sing_path)],
-                                            stdout=subprocess.DEVNULL,
+                                            stdout=subprocess.PIPE,
                                             stderr=subprocess.PIPE, text=True)
             _wait_tcp(local_port, sing_process, what="sing-box")
             try:
                 return test_udp_proxy("127.0.0.1", local_port, timeout)
             except EgressError as exc:
-                # The proxy is up but the node did not carry the probe. Whatever sing-box
-                # logged while trying (handshake refused, auth rejected, no activity) is
-                # the difference between "your node is wrong" and "we built it wrong".
+                # The proxy is up but the node did not carry the probe. What the engines
+                # logged while trying (handshake refused, auth rejected, no activity) is the
+                # difference between "your node is wrong" and "we built it wrong". The node's
+                # own engine is quoted first: for a REALITY node that is Xray, and a bare
+                # "timed out" with sing-box's silence behind it explains nothing.
                 _stop_process(sing_process)
-                detail = _process_detail(sing_process)
-                raise EgressError(f"{exc}" + (f" — {detail}" if detail else "")) from exc
+                _stop_process(xray_process)
+                details = [text for text in (_process_detail(xray_process),
+                                             _process_detail(sing_process)) if text]
+                raise EgressError(
+                    f"{exc}" + (f" — {' ;; '.join(details)}" if details else "")) from exc
         finally:
             _stop_process(sing_process)
             _stop_process(xray_process)

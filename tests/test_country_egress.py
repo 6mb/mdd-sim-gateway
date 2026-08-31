@@ -6,6 +6,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from control.app import egress
@@ -1120,6 +1121,22 @@ class VlessEncryptionTests(unittest.TestCase):
         self.assertEqual(parsed["encryption"], "mlkem768x25519plus")
         self.assertNotIn(self.ENC, json.dumps(parsed))
         self.assertEqual(parsed["engine"], "xray")
+
+
+class TestProxyDiagnosticsTests(unittest.TestCase):
+    def test_both_engine_streams_are_quoted(self):
+        """Xray logs to stdout and sing-box to stderr; reading one left the other silent."""
+        process = SimpleNamespace(
+            stdout=io.StringIO("xray: proxy/vless/outbound: connection ends\n"),
+            stderr=io.StringIO("sing-box: outbound/socks: timeout\n"))
+        detail = egress._process_detail(process)
+        self.assertIn("xray", detail)
+        self.assertIn("sing-box", detail)
+
+    def test_a_process_without_pipes_is_not_an_error(self):
+        self.assertEqual(egress._process_detail(None), "")
+        self.assertEqual(
+            egress._process_detail(SimpleNamespace(stdout=None, stderr=None)), "")
 
 
 class XrayFailureBlastRadiusTests(unittest.TestCase):
