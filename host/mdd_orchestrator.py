@@ -197,6 +197,11 @@ def parse_share_link(url: str) -> dict:
                                     or query.get("insecure") or "").lower() in ("1", "true")}
     if scheme == "vless":
         node.update({"type": "vless", "uuid": userinfo, "flow": query.get("flow") or "",
+                     # VLESS Encryption (Xray 26.7+): the server declares a `decryption` and
+                     # the client must echo the matching `encryption`. Dropping it produced a
+                     # client that connected and could not be understood — every request
+                     # timed out with nothing logged.
+                     "encryption": unquote(query.get("encryption") or "") or "none",
                      "tls": str(query.get("security") or "").lower()
                      in ("tls", "reality", "xtls")})
         if str(query.get("security") or "").lower() == "reality":
@@ -376,6 +381,8 @@ def node_needs_xray(node: dict) -> bool:
         return False
     if str(node.get("network") or "").lower() == "xhttp":
         return True
+    if str(node.get("encryption") or "none").lower() not in ("", "none"):
+        return True
     return bool((node.get("reality-opts") or {}).get("public-key"))
 
 
@@ -387,10 +394,13 @@ def xray_outbound(node: dict, tag: str) -> dict:
     reality = node.get("reality-opts") or {}
     if network == "xhttp" and not reality.get("public-key"):
         raise ValueError("Reality XHTTP node is missing its public key (pbk)")
-    user = {"id": str(node.get("uuid") or ""), "encryption": "none",
+    user = {"id": str(node.get("uuid") or ""),
+            "encryption": str(node.get("encryption") or "none"),
             "flow": str(node.get("flow") or "")}
-    if node.get("packet-encoding"):
-        user["packetEncoding"] = str(node["packet-encoding"])
+    # XUDP is how Xray clients carry UDP inside VLESS, and UDP is the whole point of these
+    # exits — IKE cannot run without it. The XHTTP path already defaulted to it while the
+    # raw/ws path sent nothing, so identical nodes were built two different ways.
+    user["packetEncoding"] = str(node.get("packet-encoding") or "xudp")
     server_name = node.get("servername") or node.get("server")
     fingerprint = str(node.get("client-fingerprint") or "") or "chrome"
     # Xray names the plain TCP transport "raw"; "tcp" remains accepted as its alias.
@@ -452,6 +462,10 @@ def clash_outbound(node: dict, tag: str) -> dict:
     if kind == "trojan":
         base["password"] = node.get("password", "")
     elif kind == "vless":
+        if str(node.get("encryption") or "none").lower() not in ("", "none"):
+            raise ValueError(
+                "this node uses VLESS Encryption, which only Xray-core carries — "
+                "install Xray so the gateway can run it")
         base["uuid"] = node.get("uuid", "")
         base["flow"] = node.get("flow", "")
     elif kind == "vmess":
@@ -1863,6 +1877,8 @@ class Orchestrator:
     def build_proxy_config(self, proxy: dict) -> tuple[dict, dict]:
         inbounds, outbounds, rules, state = [], [], [], {}
         self._xray_inbounds, self._xray_outbounds, self._xray_rules, self._xray_ports = [], [], [], {}
+        # Which countries are carried by Xray, so that Xray failing takes only those down.
+        self._xray_countries = set()
         tun_index = 0
         existing_path = str(proxy.get("existing_singbox_config") or "").strip()
         existing = read_json(Path(existing_path)) if existing_path else {}
@@ -1903,6 +1919,8 @@ class Orchestrator:
                         text = str(value or "").strip()
                         if text.lower().startswith("vless://"):
                             node = parse_share_link(text)
+                            if node_needs_xray(node):
+                                self._xray_countries.add(country)
                             outbound = self.node_outbound(node, tag, profile_id or f"country-{country}")
                         else:
                             outbound = parse_manual_outbound(value, tag)
@@ -1937,6 +1955,8 @@ class Orchestrator:
                     member_names = {}
                     for index, node in enumerate(matches[:32]):
                         member_tag = f"{tag}-{index}"
+                        if node_needs_xray(node):
+                            self._xray_countries.add(country)
                         outbounds.append(self.node_outbound(
                             node, member_tag, f"{subscription_id}-{hashlib.sha256(str(node).encode()).hexdigest()[:12]}"))
                         member_tags.append(member_tag)
@@ -2409,7 +2429,9 @@ class Orchestrator:
             return
         binary = shutil.which(os.environ.get("MDD_XRAY_BIN", "xray"))
         if not binary:
-            raise RuntimeError("Xray-core executable not found; it is required by XHTTP nodes")
+            raise RuntimeError(
+                "Xray-core executable not found; REALITY and XHTTP nodes are carried by it "
+                "(install it with: sudo ./install.sh reload)")
         candidate = self.xray_generated.with_name("xray.candidate.json")
         atomic_json(candidate, config)
         check = run([binary, "run", "-test", "-config", str(candidate)])
@@ -2498,7 +2520,18 @@ class Orchestrator:
             config, exits_state = self.build_proxy_config(proxy)
             configured = [x for x in exits_state.values() if x.get("mode") != "direct" and x.get("ready")]
             if configured:
-                self.apply_xray(self.next_xray_config)
+                # REALITY made Xray load-bearing for ordinary exits, where it used to matter
+                # only to the rare XHTTP node. Letting its failure escape here took every
+                # country down with it — including exits that never touch Xray. Only the
+                # countries it actually carries are failed; the rest still get their routes.
+                try:
+                    self.apply_xray(self.next_xray_config)
+                except Exception as exc:
+                    for country in self._xray_countries:
+                        if country in exits_state:
+                            exits_state[country] = {**exits_state[country], "ready": False,
+                                                    "error": f"Xray is unavailable: {exc}"}
+                    self.log(f"Xray failed; {len(self._xray_countries)} exit(s) affected: {exc}")
                 self.apply_singbox(config)
             else:
                 self.apply_xray(None)

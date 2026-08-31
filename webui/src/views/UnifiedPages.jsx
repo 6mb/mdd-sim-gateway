@@ -431,7 +431,9 @@ export function EgressPage({ showToast }) {
       showToast(message)
     }
   }
-  /** Non-sensitive view of how the gateway read a pasted link — no host, port or secret. */
+  /** How the gateway read a pasted link. The SNI names the operator's own server, so it
+   * follows the sensitive-information switch — a screenshot of a failed test used to carry
+   * it into a public issue. Nothing else here identifies the host. */
   const parsedSummary = parsed => {
     if (!parsed || typeof parsed !== 'object') return ''
     if (parsed.error) return parsed.error
@@ -470,7 +472,9 @@ export function EgressPage({ showToast }) {
           {profile.type === 'existing' && <small>{t('Compatibility entry')}</small>}
         </div>
         {profile.type === 'socks5' && <div className="u-proxy-auth"><div><label>{t('Username')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.username || ''} onChange={e => patchProfile(id, { username: e.target.value })} /></div><div><label>{t('Password')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="new-password" value={profile.password || ''} onChange={e => patchProfile(id, { password: e.target.value })} /></div></div>}
-        <div className="u-proxy-actions">{['node', 'socks5'].includes(profile.type) && <><button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test UDP')}</button>{profileTests[id]?.ok && <small className="u-test-ok">{t('Passed')} · {profileTests[id].latency} ms</small>}{profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && <small className="u-test-error" title={profileTests[id].error}>{t('Failed')}</small>}{!profileTests[id]?.busy && parsedSummary(profileTests[id]?.parsed) && <small className="u-test-parsed" title={t('How this gateway read the link')}>{parsedSummary(profileTests[id].parsed)}</small>}</>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
+        <div className="u-proxy-actions">{['node', 'socks5'].includes(profile.type) && <><button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test UDP')}</button>{profileTests[id]?.ok && <small className="u-test-ok">{t('Passed')} · {profileTests[id].latency} ms</small>}{profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && <small className="u-test-error">{t('Failed')}</small>}{!profileTests[id]?.busy && parsedSummary(profileTests[id]?.parsed) && <small className="u-test-parsed" title={t('How this gateway read the link')}>{parsedSummary(profileTests[id].parsed)}</small>}</>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
+        {profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && profileTests[id].error
+          && <div className="u-test-detail">{profileTests[id].error}</div>}
       </div>
     })}</div>}
     <div className="u-section-title"><div><h2>{t('Country exits')}</h2><p>{t('If no healthy UDP exit exists, only that SIM’s VoWiFi stops; 4G remains available.')}</p></div><div className="u-inline u-add-exit"><select value={newCountry} onChange={e => setNewCountry(e.target.value)}><option value="">{t('Select a country/region…')}</option>{available.map(code => <option key={code} value={code}>{countryLabel(code, language)}</option>)}</select><button className="btn btn-primary" disabled={!newCountry} onClick={addExit}>{t('+ Add')}</button></div></div>

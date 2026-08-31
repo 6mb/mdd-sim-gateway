@@ -15,6 +15,35 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- [Issue #27](https://github.com/MddIdd/mdd-sim-gateway/issues/27): a VLESS node using
+  Xray 26.7+ VLESS Encryption could never connect. The share link's `encryption` parameter was
+  dropped and `none` sent in its place, so the client established a connection the server could
+  not read: every request timed out, the server logged nothing, and the node was
+  indistinguishable from a dead one. The declared value is carried through to Xray now, such
+  nodes are routed to Xray automatically whether or not they use REALITY, and the sing-box
+  converter refuses them by name instead of building an outbound that silently never answers.
+  Verified against a server configured this way: unreachable before, 79 ms after.
+
+- The UDP validation probe no longer decides an exit's fate from DNS alone. VoWiFi carries IKE
+  on UDP 500/4500 and never queries a resolver, while port 53 is among the most intercepted and
+  rewritten ports there is. STUN probes now run interleaved with DNS ones on ports nobody
+  rewrites, each with its own SOCKS5 association, and any single answer passes the exit. Both
+  lists are configurable (`MDD_UDP_PROBE_TARGETS`, `MDD_UDP_STUN_TARGETS`), and a failure names
+  every probe tried with what each one did.
+
+- Xray becoming unavailable now fails only the exits it carries. Moving REALITY onto Xray made
+  it load-bearing for ordinary exits, where it had mattered only to the rare XHTTP node, and a
+  missing or crashed Xray took every country down with it — including exits that never touch
+  it. Its absence is reported as what it is, naming REALITY and how to install it.
+
+- VLESS nodes on the Xray path request XUDP packet encoding, which the XHTTP path already did
+  while the raw/ws path sent nothing — UDP is what these exits exist for.
+
+- A failed node test shows why on screen instead of behind a hover, where a vanishing toast was
+  all an operator could screenshot. The parsed summary keeps the SNI behind the
+  sensitive-information switch, since that line names the operator's own server and is the part
+  people screenshot into public issues.
+
 - A release candidate now recognizes the final Release with the same numeric version as newer
   (for example, `1.6.1-rc2` → `1.6.1`), so promotion-gated automatic updates can move test
   installations back onto the normal release line.

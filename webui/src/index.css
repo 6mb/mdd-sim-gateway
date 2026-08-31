@@ -321,6 +321,12 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-proxy-actions .btn { min-height:38px; white-space:nowrap; }
 .u-test-ok,.u-test-error { font-size:10px; white-space:nowrap; }.u-test-ok { color:var(--state-up); }.u-test-error { color:var(--state-down); }
 .u-test-parsed { font-size:10px; color:var(--text-mute); font-family:ui-monospace,monospace; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+/* The reason a test failed belongs on screen, not behind a hover: a truncated toast was
+   all an operator could screenshot, which cost real days of back-and-forth diagnosing. */
+.u-test-detail { margin-top:6px; padding:8px 10px; border-radius:8px; font-size:11px;
+  line-height:1.5; color:var(--state-down); background:color-mix(in srgb, var(--state-down) 8%, var(--panel));
+  border:1px solid color-mix(in srgb, var(--state-down) 25%, transparent);
+  font-family:ui-monospace,monospace; word-break:break-word; white-space:pre-wrap; }
 .u-proxy-modal { width:min(720px,100%); max-height:calc(100vh - 40px); overflow:auto; padding:22px; }
 .u-proxy-modal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; }
 .u-proxy-modal-head h2 { margin:0; font-size:20px; }.u-proxy-modal-head p { margin:5px 0 0; color:var(--text-dim); font-size:12px; line-height:1.5; }
