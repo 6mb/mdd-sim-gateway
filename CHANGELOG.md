@@ -4,7 +4,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-31
+
 ### Added
+
+- Feishu/Lark custom bots are now a native notification channel alongside Webhook, Telegram
+  and PushPlus. Each event can be enabled separately, use its own title and content template,
+  and be tested from the WebUI. Official Feishu and Lark webhook endpoints are accepted, with
+  optional HMAC-SHA256 signing; HTTP success is also checked against the platform response so
+  rejected messages are retried and reported instead of appearing delivered. Webhook tokens and
+  signing secrets are removed from support bundles.
 
 - System Settings can now list published test Releases alongside the latest normal Release,
   install an explicitly selected test version, and switch a test installation back to the
