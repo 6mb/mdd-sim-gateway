@@ -867,7 +867,13 @@ def _line_auto_start_allowed(inst: dict) -> tuple[bool, str]:
         or str(item.get("matched") or "") == iid)), None)
     if card_info is None:
         return False, "no_card"
-    device_id, _device_type = _device_for_card(card_info, cards)
+    device_id, device_type = _device_for_card(card_info, cards)
+    # A native reader has no entry in device-desired.json: its VoWiFi switch is the line's
+    # ``enabled`` flag checked above. Falling through to the global device default here made
+    # "VoWiFi off for newly detected devices" cancel recovery for every already-enabled
+    # reader line, even though the device page correctly still showed those lines as enabled.
+    if device_type == "reader":
+        return True, ""
     desired = device_state.desired()
     wanted = ((desired.get("devices") or {}).get(device_id)
               or desired.get("defaults") or {})

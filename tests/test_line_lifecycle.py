@@ -196,6 +196,17 @@ class BackgroundStartGuardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 main._line_auto_start_allowed(inst), (False, "vowifi_disabled"))
 
+    def test_new_device_default_does_not_disable_an_enabled_native_reader_line(self):
+        inst = {"id": "offline", "iccid": "saved-card", "enabled": True}
+        card = {"present": True, "iccid": "saved-card", "name": "USB reader",
+                "reader_port": "usb:1-2", "hardware_kind": "reader"}
+        desired = {"defaults": {"vowifi_enabled": False}, "devices": {}}
+        with patch.object(main.hub, "cards_list", return_value=[card]), \
+                patch.object(main, "_device_for_card", return_value=("reader-1", "reader")), \
+                patch.object(main.device_state, "desired", return_value=desired) as read_desired:
+            self.assertEqual(main._line_auto_start_allowed(inst), (True, ""))
+        read_desired.assert_not_called()
+
     async def test_auto_recovery_rechecks_a_transiently_absent_card(self):
         inst = {"id": "offline", "iccid": "saved-card", "enabled": True}
         main.hub.health_for("offline").update({
