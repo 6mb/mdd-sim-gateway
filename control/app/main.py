@@ -4116,7 +4116,7 @@ def api_put_settings(body: dict):
             raise HTTPException(400, "invalid new-device defaults")
         if any(not isinstance(value, bool) for value in defaults.values()):
             raise HTTPException(400, "new-device defaults must be boolean")
-    for channel in ("webhook", "telegram", "pushplus", "feishu"):
+    for channel in ("webhook", "telegram", "pushplus"):
         try:
             notify_push.validate_message_templates(body.get(channel) or {})
         except ValueError as exc:
@@ -4157,16 +4157,21 @@ def api_put_settings(body: dict):
         if str(pushplus.get("template") or "html") not in {"html", "txt", "markdown", "json"}:
             raise HTTPException(400, "unsupported PushPlus template")
     feishu = body.get("feishu") or {}
-    if feishu.get("enabled"):
+    try:
+        channels = notify_push.validate_feishu_channels(feishu)
+    except ValueError as exc:
+        raise HTTPException(400, f"invalid Feishu configuration: {exc}") from exc
+    for channel in channels:
         try:
+            if not channel.get("enabled"):
+                continue
             sample = notify_push.build_payload(
                 notify_push.EV_INCOMING_SMS,
                 {"id": "preview", "name": "SIM", "iccid": "", "msisdn": ""},
                 "+10000000000", "123456")
             # Validation happens before the HTTP request inside send_feishu. Use a local copy
             # of the same checks here so saving settings never sends a notification.
-            notify_push.validate_feishu_url(feishu.get("url"))
-            notify_push.build_notification_message(sample, feishu)
+            notify_push.build_notification_message(sample, channel)
         except ValueError as exc:
             raise HTTPException(400, f"invalid Feishu configuration: {exc}") from exc
     if "updates" in body:
@@ -6286,9 +6291,7 @@ def _dispatch_push(event: str, iid: str, source: str, text: str | None = None):
     wh = settings.get("webhook") or {}
     tg = settings.get("telegram") or {}
     pp = settings.get("pushplus") or {}
-    fs = settings.get("feishu") or {}
-    if not (wh.get("enabled") or tg.get("enabled") or pp.get("enabled")
-            or fs.get("enabled")):
+    if not notify_push.has_enabled_channel(settings, event):
         return
     asyncio.create_task(
         asyncio.to_thread(notify_push.dispatch, settings, event, inst, source, text))

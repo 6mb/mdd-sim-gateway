@@ -151,6 +151,7 @@ DEFAULTS = {
             "enabled": False,
             "url": "",
             "secret": "",
+            "channels": [],
             "message_templates": {},
             "events": {"incoming_sms": True, "incoming_call": True,
                        "missed_call": True, "voicemail_received": True,
@@ -308,6 +309,38 @@ def load() -> dict:
             # preserve its hidden checkbox forever when loading a pre-keepalive config.
             merged["events"].pop("activation_reminder", None)
             out["settings"][key] = merged
+        # Feishu originally stored one bot directly under ``settings.feishu``. Preserve that
+        # shape on disk for rollback compatibility, while exposing it as a synthetic channel
+        # when no explicit multi-channel list has been saved yet.
+        feishu = out["settings"]["feishu"]
+        saved_feishu = data.get("settings", {}).get("feishu", {}) or {}
+        channels = feishu.get("channels")
+        if not isinstance(channels, list):
+            channels = []
+        normalized_channels = []
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+            item = dict(channel)
+            item["events"] = {**DEFAULTS["settings"]["feishu"]["events"],
+                              **(channel.get("events", {}) or {})}
+            item["events"].pop("activation_reminder", None)
+            item["message_templates"] = dict(channel.get("message_templates", {}) or {})
+            item["instances"] = [str(value) for value in (channel.get("instances") or [])
+                                 if str(value).strip()]
+            normalized_channels.append(item)
+        if "channels" not in saved_feishu and (feishu.get("url") or feishu.get("enabled")):
+            normalized_channels.append({
+                "id": "legacy",
+                "name": "Feishu / Lark",
+                "enabled": bool(feishu.get("enabled")),
+                "url": str(feishu.get("url") or ""),
+                "secret": str(feishu.get("secret") or ""),
+                "instances": [],
+                "message_templates": dict(feishu.get("message_templates", {}) or {}),
+                "events": dict(feishu.get("events", {}) or {}),
+            })
+        feishu["channels"] = normalized_channels
         # Telegram is notification-only. Drop command settings left by an older configuration
         # so an upgrade cannot preserve a remote call/SMS control channel.
         out["settings"]["telegram"].pop("commands", None)
