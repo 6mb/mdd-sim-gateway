@@ -63,7 +63,7 @@ jobs:
           engine_archive="mdd-sim-gateway-engine-${GITHUB_REF_NAME}-${{ matrix.arch }}.tar"
           docker save --output "$engine_archive" "$release_image"
           gzip -1 "$engine_archive"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: engine-image-${{ matrix.arch }}
           path: mdd-sim-gateway-engine-v*-${{ matrix.arch }}.tar.gz
@@ -99,7 +99,7 @@ jobs:
           docker save --output "$image_tar" mdd-sim-gateway/control \
             "mdd-sim-gateway/control:${GITHUB_REF_NAME}"
           gzip -1 "$image_tar"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: control-image-${{ matrix.arch }}
           path: mdd-sim-gateway-control-v*-${{ matrix.arch }}.tar.gz
@@ -134,12 +134,12 @@ jobs:
       - name: Validate Engine definition
         run: |
           docker build --check -f engine/Dockerfile engine
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: engine-image-*
           merge-multiple: true
           path: .
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: control-image-*
           merge-multiple: true
