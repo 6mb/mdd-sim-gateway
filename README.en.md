@@ -75,6 +75,11 @@ When installation completes, open `https://<gateway-address>:8443` and create th
 - Show balance, plan expiry, network presence and keeping results on one page. Prepaid lines can
   schedule a real chargeable SMS, while plan lines can watch the renewal balance and warn when low.
 - Perform EAP-AKA and IMS-AKA in the physical SIM/eSIM without reading or storing Ki/OP/OPc.
+- Interoperate with DITO Telecommunity (515-66) by selecting its advertised
+  AES-CBC-128/HMAC-SHA1/MODP-1024 IKE suite. That legacy suite is scoped to this PLMN;
+  every other carrier keeps the existing MODP-2048 proposal set.
+- Answer permanent/full-auth EAP-AKA identity requests as specified by RFC 4187 for any carrier
+  that requires the standard identity flow.
 - Show each modem UICC's three logical-channel allocations, roles and explicit failures.
 - Provide an authenticated browser softphone, SMS, call history, missed-call notifications and
   per-line local voicemail. Recordings remain on the gateway and are never attached to notifications
