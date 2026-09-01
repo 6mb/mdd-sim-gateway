@@ -1551,6 +1551,10 @@ async def sms_segment_reaper():
         except Exception as exc:  # noqa
             log.debug("SMS segment sweep failed: %r", exc)
             continue
+        try:
+            await asyncio.to_thread(store.prune_late_sms_groups)
+        except Exception as exc:  # noqa
+            log.debug("late SMS group prune failed: %r", exc)
         for group in stale:
             iid = str(group["instance"])
             body = _join_sms_parts(group["bodies"], group["seqs"], group["total"])
@@ -1559,6 +1563,12 @@ async def sms_segment_reaper():
                      ",".join(str(n) for n in group["seqs"]), group["total"])
             rec = await asyncio.to_thread(store.add_message, iid, "in", group["peer"], body,
                                           ts=group["first_ts"])
+            # Keep the group addressable so the parts still in flight complete THIS message
+            # rather than being published as a second fragment of the same text.
+            if len(group["seqs"]) < group["total"]:
+                await asyncio.to_thread(
+                    store.remember_partial_sms_group, iid, group["peer"], group["concat_ref"],
+                    group["total"], rec["id"], group["seqs"], group["bodies"])
             await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
             await asyncio.to_thread(_harvest_allowance_reply, iid, group["peer"])
             _dispatch_push(notify_push.EV_INCOMING_SMS, iid, group["peer"], body)
@@ -6025,6 +6035,27 @@ async def api_engine_event(payload: dict):
         # a part that decoded to nothing would leave the whole message forever incomplete.
         if segment:
             ref, total, seq = segment
+            # A part can arrive long after its group was flushed incomplete (ten minutes
+            # measured between segment 1 and segment 2 of one text crossing two networks).
+            # Buffering it again would publish a second fragment of a message the thread
+            # already shows, so it is folded back into that message first.
+            late = await asyncio.to_thread(store.merge_late_sms_segment, iid, sender, ref,
+                                           total, seq, text)
+            if late is not None:
+                if late["duplicate"]:
+                    log.info("ignoring a repeat of part %d/%d from %s (ref %d) already in "
+                             "message %d", seq, total, sender, ref, late["message_id"])
+                    return {"ok": True, "merged": "duplicate"}
+                merged = _join_sms_parts(late["bodies"], late["seqs"], total)
+                rec = await asyncio.to_thread(store.set_message_body, late["message_id"],
+                                              merged)
+                log.info("late part %d/%d from %s (ref %d) merged into message %d — %s",
+                         seq, total, sender, ref, late["message_id"],
+                         "now complete" if late["complete"]
+                         else f"{len(late['seqs'])}/{total} parts")
+                if rec:
+                    await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
+                return {"ok": True, "merged": f"{len(late['seqs'])}/{total}"}
             parts = await asyncio.to_thread(store.add_sms_segment, iid, sender, ref, total,
                                             seq, text)
             if parts is None:
