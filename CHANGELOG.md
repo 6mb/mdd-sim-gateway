@@ -4,6 +4,46 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-01
+
+### Added
+
+- DITO Telecommunity (PLMN 515-66) VoWiFi support, contributed in
+  [PR #35](https://github.com/MddIdd/mdd-sim-gateway/pull/35). Its ePDG answers the MODP-2048
+  proposal set with NO_PROPOSAL_CHOSEN and offers only AES-CBC-128 / HMAC-SHA1 / MODP-1024, so
+  that legacy suite is now selected for that PLMN alone — every other carrier keeps the existing
+  four proposals in the same order. The RFC 4187 identity requests DITO sends during the first
+  IKE_AUTH exchange (AT_PERMANENT_ID_REQ and AT_FULLAUTH_ID_REQ) are answered as well, instead of
+  being ignored and reported as NO EAP PAYLOAD RECEIVED.
+
+### Fixed
+
+- An RP-ACK or RP-ERROR — the SMSC reporting on a message the gateway sent — was treated as an
+  unknown message type and then handed to the dialplan anyway. Carrying no TPDU, it arrived
+  empty, so every submitted segment wrote a bodyless inbound record: one six-segment text left
+  six phantom messages behind. Reports are now recognised, answered, and stopped before the
+  dialplan, and a refusal is logged with its RP cause.
+
+- A part of a long message that arrived after its group had been flushed started a new group and
+  was published as a second, near-duplicate fragment of a message already in the thread. Between
+  two carriers the parts of one text arrived ten minutes apart, so this was the normal outcome
+  rather than an edge case. A flushed group now stays addressable for an hour and a late part
+  fills in the gap it left.
+
+- The WebRTC endpoint advertised opus, which no build of the engine image can encode: codec_opus
+  is an external, x86-only binary module, and enabling it in menuselect is silently a no-op on
+  arm64. A peer that offered opus alone got a connected call with no audio and no error. Opus is
+  no longer offered; calls continue over ulaw/alaw as they already did in practice.
+
+### Changed
+
+- The published control image and the engine image are substantially smaller: 194 MB -> 76 MB and
+  272 MB -> 143 MB compressed, 852 MB -> 355 MB and 1.04 GB -> 607 MB on disk. The control image
+  no longer ships the toolchain that built it, and the engine ships only the Asterisk modules it
+  can load, stripped, which also drops 109 packages that were pulled in by modules the engine
+  already refused to load.
+
+
 ## [1.7.0] - 2026-09-01
 
 ### Added
