@@ -28,11 +28,15 @@ MDD Sim Gateway is a self-hosted multi-SIM communications gateway for Debian, Ub
 
 Use an ARM64 Debian, Ubuntu or Armbian host with systemd, Docker, USB and a stable network connection.
 
-Storage requirements: keep at least **4 GiB free on the root filesystem** before installation.
-A **16 GB or larger** system disk is recommended, with about **6 GiB free** before an upgrade so
-the new image and one rollback generation can coexist. Development checkouts and explicit source
-builds create substantially more temporary build cache and are unsuitable for space-constrained
-devices. Enlarging a VM's virtual disk alone is not enough: grow its root partition and filesystem,
+Storage requirements: keep at least **2 GiB free on the root filesystem** before installation.
+An **8 GB or larger** system disk is recommended, with about **3 GiB free** before an upgrade so
+the new image and one rollback generation can coexist. Measured: the engine image is 607 MB, two
+generations share their base layers and come to roughly 676 MB together, and the source checkout
+with its virtualenv is about 102 MB; Docker control-plane mode adds 355 MB. **An explicit source
+build is the exception** — compiling Asterisk on the device needs several GiB more in build cache
+and intermediate output, unrelated to the figures above, and is unsuitable for space-constrained
+devices. A normal installation or upgrade downloads the CI-built images and never takes that
+path. Enlarging a VM's virtual disk alone is not enough: grow its root partition and filesystem,
 then use `df -h /` as the authoritative capacity.
 
 ```bash

@@ -41,7 +41,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   272 MB -> 143 MB compressed, 852 MB -> 355 MB and 1.04 GB -> 607 MB on disk. The control image
   no longer ships the toolchain that built it, and the engine ships only the Asterisk modules it
   can load, stripped, which also drops 109 packages that were pulled in by modules the engine
-  already refused to load.
+  already refused to load. The documented storage requirements follow: 2 GiB free to install
+  instead of 4 GiB, 3 GiB kept free for an upgrade instead of 6 GiB, and an 8 GB rather than
+  16 GB system disk. Building the engine from source on the device is unchanged and still needs
+  several GiB more.
 
 
 ## [1.7.0] - 2026-09-01
