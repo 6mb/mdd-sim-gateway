@@ -133,5 +133,23 @@ class AsteriskKeepListTests(unittest.TestCase):
             self.assertIn(module, modules)
 
 
+
+    def test_the_workflows_assert_the_number_of_modules_the_list_names(self):
+        """CI and the release both count the modules in the built image and fail on a mismatch.
+
+        That assertion is what proves the published image is the one the build checked, so it
+        has to move with the keep-list — otherwise editing the list turns a deliberate change
+        into a red release, or worse, a stale number nobody notices is no longer meaningful.
+        """
+        expected = len(self.keep_list())
+        for name in ("ci.yml", "release.yml"):
+            workflow = (self.ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            counts = re.findall(r"^\s*modules:\s*(\d+)\s*$", workflow, re.MULTILINE)
+            self.assertTrue(counts, f"{name} no longer asserts a module count")
+            for count in counts:
+                self.assertEqual(int(count), expected,
+                                 f"{name} expects {count} modules, the keep-list names "
+                                 f"{expected}")
+
 if __name__ == "__main__":
     unittest.main()
