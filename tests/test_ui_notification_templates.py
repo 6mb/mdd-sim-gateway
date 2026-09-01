@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = (ROOT / "webui/src/views/UnifiedPages.jsx").read_text(encoding="utf-8")
+CSS = (ROOT / "webui/src/index.css").read_text(encoding="utf-8")
 
 
 class NotificationTemplateUiTests(unittest.TestCase):
@@ -41,6 +42,11 @@ class NotificationTemplateUiTests(unittest.TestCase):
 
     def test_event_forwarding_options_are_collapsed_like_template_editors(self):
         self.assertIn('<details className="u-event-options"><summary>', SOURCE)
+
+    def test_notification_channel_types_use_a_responsive_two_by_two_grid(self):
+        self.assertIn('className="u-page u-notifications-page"', SOURCE)
+        self.assertIn('.u-notifications-page>.u-tabs+.u-device-grid { grid-template-columns:repeat(2,minmax(0,1fr))', CSS)
+        self.assertIn('.u-notifications-page>.u-tabs+.u-device-grid { grid-template-columns:1fr;', CSS)
 
     def test_telegram_and_updates_offer_library_and_country_routes(self):
         self.assertIn("tg.proxy_mode === 'library'", SOURCE)
