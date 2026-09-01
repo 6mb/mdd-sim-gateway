@@ -4,6 +4,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Feishu/Lark notifications can fan out to multiple independently configured custom bots. Each bot
+  has its own webhook, signing secret, event switches, templates, test action and optional SIM-line
+  filter. Empty filters receive every line and gateway event; filtered bots receive only matching
+  line events. Delivery retries and history remain independent per bot, and existing single-bot
+  configurations migrate automatically without duplicate sends.
+
 ## [1.7.0] - 2026-09-01
 
 ### Added

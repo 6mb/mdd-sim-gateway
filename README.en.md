@@ -82,7 +82,8 @@ When installation completes, open `https://<gateway-address>:8443` and create th
 - Maintain reusable subscriptions, individual nodes and SOCKS5 proxies, then assign one to each
   country. sing-box owns the isolated TUNs; Xray-core carries Reality/XHTTP nodes. VoWiFi fails
   closed unless the selected exit passes a runtime UDP check.
-- Send standard/custom Webhooks, Telegram notifications and PushPlus messages.
+- Send standard/custom Webhooks, Telegram and PushPlus notifications, plus multiple independently
+  signed Feishu/Lark custom bots with optional per-SIM-line routing.
 - Check releases every six hours in the background. Choose automatic installation or notify-only,
   scoped to main releases or every release. Unattended installation still requires the exact version
   and earliest rollout time to be approved separately in `update-policy.json`. All-version
