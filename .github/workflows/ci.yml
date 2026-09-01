@@ -64,14 +64,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both architectures ship exactly what engine/asterisk-keep-modules.txt names: the
+          # build prunes everything else and fails unless the survivors equal the list, so the
+          # counts no longer differ by the x86-only external binary modules. Asserting it again
+          # here is what proves the published image is the one the build checked.
           - arch: arm64
             runner: ubuntu-24.04-arm
             machine: aarch64
-            modules: 334
+            modules: 126
           - arch: amd64
             runner: ubuntu-latest
             machine: x86_64
-            modules: 336
+            modules: 126
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

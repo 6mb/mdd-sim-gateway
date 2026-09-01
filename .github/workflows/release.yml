@@ -16,14 +16,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both architectures ship exactly what engine/asterisk-keep-modules.txt names: the
+          # build prunes everything else and fails unless the survivors equal the list, so the
+          # counts no longer differ by the x86-only external binary modules. Asserting it again
+          # here is what proves the published image is the one the build checked.
           - arch: arm64
             runner: ubuntu-24.04-arm
             machine: aarch64
-            modules: 334
+            modules: 126
           - arch: amd64
             runner: ubuntu-latest
             machine: x86_64
-            modules: 336
+            modules: 126
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,7 +63,7 @@ jobs:
           engine_archive="mdd-sim-gateway-engine-${GITHUB_REF_NAME}-${{ matrix.arch }}.tar"
           docker save --output "$engine_archive" "$release_image"
           gzip -1 "$engine_archive"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: engine-image-${{ matrix.arch }}
           path: mdd-sim-gateway-engine-v*-${{ matrix.arch }}.tar.gz
@@ -95,7 +99,7 @@ jobs:
           docker save --output "$image_tar" mdd-sim-gateway/control \
             "mdd-sim-gateway/control:${GITHUB_REF_NAME}"
           gzip -1 "$image_tar"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: control-image-${{ matrix.arch }}
           path: mdd-sim-gateway-control-v*-${{ matrix.arch }}.tar.gz
@@ -130,12 +134,12 @@ jobs:
       - name: Validate Engine definition
         run: |
           docker build --check -f engine/Dockerfile engine
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: engine-image-*
           merge-multiple: true
           path: .
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: control-image-*
           merge-multiple: true
@@ -189,6 +193,10 @@ jobs:
             echo "missing bilingual Release notes: $notes_file" >&2
             exit 1
           }
+          release_flags=()
+          case "$GITHUB_REF_NAME" in
+            *-rc*|*-beta*|*-alpha*) release_flags+=(--prerelease) ;;
+          esac
           gh release create "${GITHUB_REF_NAME}" \
             "mdd-sim-gateway-${GITHUB_REF_NAME}.tar.gz" \
             "mdd-sim-gateway-control-${GITHUB_REF_NAME}-arm64.tar.gz" \
@@ -196,4 +204,5 @@ jobs:
             "mdd-sim-gateway-engine-${GITHUB_REF_NAME}-arm64.tar.gz" \
             "mdd-sim-gateway-engine-${GITHUB_REF_NAME}-amd64.tar.gz" \
             SHA256SUMS \
-            --verify-tag --notes-file "$notes_file" --title "MDD Sim Gateway ${GITHUB_REF_NAME}"
+            --verify-tag --notes-file "$notes_file" --title "MDD Sim Gateway ${GITHUB_REF_NAME}" \
+            "${release_flags[@]}"
