@@ -2,6 +2,16 @@
 
 Open an issue before a large behavior or hardware change. Keep device operations fail-closed, never add real subscriber data to fixtures, and preserve upstream attribution.
 
+## Branches
+
+Open pull requests against `develop`. It is the integration branch: changes collect there, get
+reviewed and are released together, so `main` always describes what has actually been published
+and a released version can be read straight off it.
+
+`main` takes only release merges, which are then tagged `vX.Y.Z` — the tag is what builds and
+publishes the images. A fix that has to reach users before the next release still goes through
+`develop` first; releasing is a merge and a tag, not a separate route.
+
 Enable the hooks once per clone:
 
 ```bash
