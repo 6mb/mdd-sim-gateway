@@ -4,9 +4,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
-## [1.7.1] - 2026-09-01
+## [1.8.0] - 2026-09-01
 
 ### Added
+
+- Feishu/Lark notifications can fan out to multiple independently configured custom bots. Each bot
+  has its own webhook, signing secret, event switches, templates, test action and optional SIM-line
+  filter. Empty filters receive every line and gateway event; filtered bots receive only matching
+  line events. Delivery retries and history remain independent per bot, and existing single-bot
+  configurations migrate automatically without duplicate sends
+  ([PR #36](https://github.com/MddIdd/mdd-sim-gateway/pull/36)).
 
 - DITO Telecommunity (PLMN 515-66) VoWiFi support, contributed in
   [PR #35](https://github.com/MddIdd/mdd-sim-gateway/pull/35). Its ePDG answers the MODP-2048
@@ -46,6 +53,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   16 GB system disk. Building the engine from source on the device is unchanged and still needs
   several GiB more.
 
+### Added
+
+- Feishu/Lark notifications can fan out to multiple independently configured custom bots. Each bot
+  has its own webhook, signing secret, event switches, templates, test action and optional SIM-line
+  filter. Empty filters receive every line and gateway event; filtered bots receive only matching
+  line events. Delivery retries and history remain independent per bot, and existing single-bot
+  configurations migrate automatically without duplicate sends.
 
 ## [1.7.0] - 2026-09-01
 
