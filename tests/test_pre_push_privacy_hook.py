@@ -45,6 +45,11 @@ class PrePushPrivacyHookTests(unittest.TestCase):
         (self.repo / "hooks").mkdir()
         shutil.copy(CHECKER, self.repo / "tools" / CHECKER.name)
         shutil.copy(HOOK, self.repo / "hooks" / "pre-push")
+        # The modes git records, not whatever the checkout filesystem invented. Scripts in
+        # tools/ are tracked without the executable bit, so a hook that executes the checker
+        # directly fails with "Permission denied" on every ordinary filesystem -- and refuses
+        # every push while blaming a subscriber identifier it never got to look for.
+        os.chmod(self.repo / "tools" / CHECKER.name, 0o644)
         os.chmod(self.repo / "hooks" / "pre-push", 0o755)
 
         git("init", "-q", ".", cwd=self.repo)
@@ -106,12 +111,25 @@ class PrePushPrivacyHookTests(unittest.TestCase):
         result = self.push()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_check_that_cannot_run_refuses_without_inventing_a_finding(self):
+        # Failing closed is right; claiming to have found a subscriber identifier when the
+        # check never ran is not -- that reading cost an afternoon once already.
+        self.commit("a.py", f'peer = "{FICTIONAL}"', "fictional")
+        (self.repo / "tools" / CHECKER.name).write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+
+        result = self.push()
+        reported = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, "an unverified push must not go out")
+        self.assertIn("could not run", reported)
+        self.assertNotIn("carry a subscriber identifier", reported)
+
     def test_the_hook_is_executable_and_wired_to_the_checker(self):
         # A hook without the executable bit is silently never run, which would leave the
         # repository believing it is protected.
         self.assertTrue(os.access(HOOK, os.X_OK), "hooks/pre-push must be executable")
         text = HOOK.read_text(encoding="utf-8")
-        self.assertIn("tools/check-subscriber-identifiers.sh --commits", text)
+        self.assertIn("sh tools/check-subscriber-identifiers.sh", text)
+        self.assertIn("--commits", text)
         self.assertIn("core.hooksPath hooks",
                       (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8"),
                       "the hook only runs once a clone opts in; that has to be documented")
