@@ -9,8 +9,9 @@ SOURCE = (ROOT / "webui/src/views/UnifiedPages.jsx").read_text(encoding="utf-8")
 
 class NotificationTemplateUiTests(unittest.TestCase):
     def test_every_outbound_channel_has_an_event_template_editor(self):
-        for channel in ("Webhook", "Telegram", "PushPlus", "Feishu / Lark"):
+        for channel in ("Webhook", "Telegram", "PushPlus"):
             self.assertIn(f'<MessageTemplateEditor channel="{channel}"', SOURCE)
+        self.assertIn("<MessageTemplateEditor channel={activeFeishuChannel.name || activeFeishuChannel.id}", SOURCE)
 
     def test_editor_exposes_only_the_backend_template_fields(self):
         expected = "{{title}} {{content}} {{event}} {{sim_name}} {{msisdn}} {{from}} {{text}} {{instance}} {{iccid}}"
@@ -18,14 +19,25 @@ class NotificationTemplateUiTests(unittest.TestCase):
 
     def test_each_channel_can_test_the_selected_event(self):
         for method in ("testWebhook", "testTelegram", "testPushPlus", "testFeishu"):
-            self.assertIn(f"api.{method}({{", SOURCE)
+            self.assertIn(f"api.{method}", SOURCE)
         self.assertGreaterEqual(SOURCE.count("_test_event: event"), 4)
 
     def test_channel_test_buttons_show_and_lock_the_pending_state(self):
         self.assertIn("const [channelTesting, setChannelTesting] = useState('')", SOURCE)
         self.assertIn("disabled={!!channelTesting}", SOURCE)
         self.assertIn("channelTesting === key ? 'Testing…' : 'Test'", SOURCE)
-        self.assertEqual(SOURCE.count("{testButton("), 4)
+        self.assertGreaterEqual(SOURCE.count("{testButton("), 4)
+
+    def test_feishu_bots_use_stable_ids_and_support_crud_and_line_routing(self):
+        self.assertIn("key={channel.id}", SOURCE)
+        self.assertIn("const addFeishuChannel = () =>", SOURCE)
+        self.assertIn("const removeFeishuChannel = id =>", SOURCE)
+        self.assertIn("const toggleFeishuInstance =", SOURCE)
+        self.assertIn("instances.map(instance =>", SOURCE)
+        self.assertIn("`feishu:${activeFeishuChannel.id}`", SOURCE)
+        self.assertIn("const [activeFeishuId, setActiveFeishuId]", SOURCE)
+        self.assertIn("channel.id === activeFeishuChannel?.id ? 'active' : ''", SOURCE)
+        self.assertIn("activeFeishuChannel && <section", SOURCE)
 
     def test_event_forwarding_options_are_collapsed_like_template_editors(self):
         self.assertIn('<details className="u-event-options"><summary>', SOURCE)
