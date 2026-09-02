@@ -4,6 +4,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- A bare RFC 3748 EAP-Request/Identity in the first IKE_AUTH reply — how Lebara UK's (PLMN 234-87)
+  self-hosted ePDG opens EAP before any EAP-AKA exchange — was not recognised, so the attach
+  aborted with a misleading NO EAP PAYLOAD RECEIVED. The engine now answers it with an
+  EAP-Response/Identity carrying the IMSI NAI and continues into EAP-AKA. When an EAP payload is
+  present but its method is still unsupported, the error now names the received code and type
+  instead of claiming no payload arrived
+  ([#43](https://github.com/MddIdd/mdd-sim-gateway/issues/43)).
+
 ## [1.8.0] - 2026-09-01
 
 ### Added
