@@ -2635,7 +2635,8 @@ async def api_verify_pin(body: dict):
                 card_entry.update(present=True, iccid=c.iccid, imsi=c.imsi, mcc=c.mcc,
                                   mnc=c.mnc, mnc_len=getattr(c, "mnc_len", None),
                                   pin_enabled=c.pin_enabled, pin_tries=c.pin_tries,
-                                  smsc=c.smsc, carrier_identity=_carrier_identity(c))
+                                  smsc=c.smsc, reader_port=c.reader_port,
+                                  carrier_identity=_carrier_identity(c))
                 inst = _match_instance_by_iccid(c.iccid)
                 if inst and _carrier_identity_update(c):
                     await asyncio.to_thread(cfg.upsert_instance, {
