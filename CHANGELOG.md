@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-09-02
+
 ### Fixed
 
 - A bare RFC 3748 EAP-Request/Identity in the first IKE_AUTH reply — how Lebara UK's (PLMN 234-87)
@@ -17,6 +19,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - Number-keeping intervals can now be configured for up to 365 days instead of being capped at
   90 days, covering carriers with 180-day retention policies
   ([#40](https://github.com/MddIdd/mdd-sim-gateway/issues/40)).
+
+### Security
+
+- Updated the WebUI build dependency chain to a patched Browserslist release, resolving
+  GHSA-c83g-rgw3-j3cx and GHSA-73wf-gq98-2v4g. Production dependency auditing reports no known
+  vulnerabilities ([#42](https://github.com/MddIdd/mdd-sim-gateway/pull/42)).
+- Added a pre-push privacy hook that scans every source blob introduced by the commits being
+  published, so removing a subscriber identifier in a later commit can no longer hide it from the
+  local guard ([#38](https://github.com/MddIdd/mdd-sim-gateway/pull/38)).
 
 ## [1.8.0] - 2026-09-01
 
