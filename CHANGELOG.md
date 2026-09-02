@@ -14,6 +14,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   instead of claiming no payload arrived
   ([#43](https://github.com/MddIdd/mdd-sim-gateway/issues/43)).
 
+- Number-keeping intervals can now be configured for up to 365 days instead of being capped at
+  90 days, covering carriers with 180-day retention policies
+  ([#40](https://github.com/MddIdd/mdd-sim-gateway/issues/40)).
+
 ## [1.8.0] - 2026-09-01
 
 ### Added
