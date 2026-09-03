@@ -95,7 +95,7 @@ const zh = {
   'Existing sing-box config (migration/import mode only)': '已有 sing-box 配置（仅迁移/导入模式需要）',
   'Subscription workflow:': '订阅模式工作流程：',
   'Choose a country → filter subscription nodes using “node-name keywords” → put every matching node in a health-test pool → automatically use a healthy low-latency node → route that country’s SIM ePDG through its own TUN (for example, Japan uses mdd-jp). This does not create a proxy port that you connect to manually.': '选择国家 → 用“节点名称关键词”筛选订阅 → 将所有匹配节点加入健康测速池 → 自动使用低延迟健康节点 → 将该国 SIM 的 ePDG 路由到独立 TUN（例如日本使用 mdd-jp）。系统不会创建需要手工连接的代理端口。',
-  '2. Add a country exit': '2. 添加国家出口', 'Select a country/region…': '选择国家/地区…', '+ Add': '+ 添加',
+  '2. Add a country exit': '2. 添加国家出口', 'Select a country/region…': '选择国家/地区…', 'Search countries/regions…': '搜索国家/地区…', 'No matching countries/regions': '没有匹配的国家/地区', '+ Add': '+ 添加',
   Enabled: '启用', Remove: '移除', 'Exit source': '出口来源', 'Automatic selection from subscription': '订阅自动选择',
   'Import an existing outbound': '导入已有 outbound', 'Specified proxy URL': '指定代理地址', 'Explicit direct connection': '明确直连',
   'Existing outbound tag': '已有 outbound 标签', 'Copies this outbound from the existing sing-box config above.': '从上面的已有 sing-box 配置中复制这个 outbound。',
