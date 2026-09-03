@@ -12,6 +12,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - Renaming a running SIM line now updates its display metadata without rebuilding the line's
   IKE and Asterisk engine; edits to operational settings continue to restart the line so they are
   actually applied ([#53](https://github.com/MddIdd/mdd-sim-gateway/issues/53)).
+- The manual update selector now offers the five most recent stable releases instead of only the
+  latest one, making recent rollback or version switching available from System Settings.
 
 ## [1.8.1] - 2026-09-02
 
