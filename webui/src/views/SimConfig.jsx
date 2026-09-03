@@ -203,8 +203,8 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
         setCreating(false)
         setSelected(String(res.instance.id))
       }
-      // A running line is restarted server-side to apply the new config (pjsip accounts,
-      // IMEI, SMSC, User-Agent…); a stopped line just saves.
+      // Runtime configuration changes restart a running line server-side so Asterisk/IKE can
+      // apply them. A display-name-only edit is metadata and saves without interrupting it.
       setPinMsg(t(creating ? 'Line created and starting…' : res?.applied ? 'Saved — restarting the line to apply changes…' : 'Saved.'))
     } catch (e) { alert(e.message) }
     setSaving(false)
