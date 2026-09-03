@@ -4,6 +4,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- The country-exit picker can now be searched by Chinese or English country name and by two-letter
+  country code, with keyboard navigation for selecting a result
+  ([#53](https://github.com/MddIdd/mdd-sim-gateway/issues/53)).
+- Renaming a running SIM line now updates its display metadata without rebuilding the line's
+  IKE and Asterisk engine; edits to operational settings continue to restart the line so they are
+  actually applied ([#53](https://github.com/MddIdd/mdd-sim-gateway/issues/53)).
+
 ## [1.8.1] - 2026-09-02
 
 ### Fixed
