@@ -17,7 +17,8 @@ class PinPreflightMessageTests(unittest.TestCase):
     def test_every_code_carries_message(self):
         for pf in ({"ok": False, "code": "no_card"},
                    {"ok": False, "code": "pin_required", "tries": 3},
-                   {"ok": False, "code": "pin_invalid", "clear": True, "tries": 2}):
+                   {"ok": False, "code": "pin_invalid", "clear": True, "tries": 2},
+                   {"ok": False, "code": "card_unreadable", "error": "ADF.USIM select failed"}):
             exc = main._pin_preflight_http(pf)
             self.assertEqual(exc.status_code, 409)
             self.assertEqual(exc.detail["code"], pf["code"])
@@ -33,6 +34,20 @@ class PinPreflightMessageTests(unittest.TestCase):
     def test_unknown_code_still_readable(self):
         exc = main._pin_preflight_http({"ok": False, "code": "mystery"})
         self.assertIn("mystery", exc.detail["message"])
+
+    def test_card_unreadable_names_the_read_failure_and_rules_out_a_pin(self):
+        """Issue #60: an unreadable card used to fall through to 'pin_required' with an
+        unknown retry counter, so the UI asked for a PIN that could not help. The message
+        must carry the real read error and say a PIN is not the answer."""
+        exc = main._pin_preflight_http({"ok": False, "code": "card_unreadable",
+                                        "error": "ADF.USIM select failed"})
+        self.assertIn("ADF.USIM select failed", exc.detail["message"])
+        self.assertIn("not a PIN problem", exc.detail["message"])
+
+    def test_card_unreadable_without_a_detail_still_reads(self):
+        exc = main._pin_preflight_http({"ok": False, "code": "card_unreadable"})
+        self.assertTrue(exc.detail["message"])
+        self.assertNotIn("()", exc.detail["message"])
 
     def test_no_card_carries_expected_iccid(self):
         exc = main._pin_preflight_http({"ok": False, "code": "no_card",
@@ -61,6 +76,14 @@ class PreflightBlockLifecycleTests(unittest.TestCase):
         self.assertNotIn("8944000000000000001", json.dumps(kw))
         self.assertEqual(exc.status_code, 409)
         self.assertEqual(exc.detail["code"], "no_card")
+
+    def test_card_unreadable_records_a_present_card(self):
+        events, exc = self._capture({"ok": False, "code": "card_unreadable",
+                                     "error": "ADF.USIM select failed"})
+        event, kw = events[0]
+        self.assertEqual(kw["reason_code"], "card_unreadable")
+        self.assertIs(kw["card_present"], True)
+        self.assertEqual(exc.detail["code"], "card_unreadable")
 
     def test_card_mismatch_maps_to_mismatch_error(self):
         events, exc = self._capture({"ok": False, "code": "card_mismatch",
