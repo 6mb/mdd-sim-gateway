@@ -3266,6 +3266,26 @@ async def _preflight_pin(inst: dict) -> dict:
         lock.release()
 
 
+def _pin_preflight_http(pf: dict) -> HTTPException:
+    """Structured 409 for a failed PIN preflight. Always carries a human-readable
+    `message` — the generic error path in the UI renders detail.message, and without
+    it the toast degrades to the bare HTTP status text ("Conflict")."""
+    tries = pf.get("tries")
+    left = f" ({tries} tries left)" if tries is not None else ""
+    messages = {
+        "no_card": ("no readable SIM for this line — the reader is empty or it "
+                    "currently holds a different card/eSIM profile; for an eSIM, "
+                    "switch the active profile to this line's first"),
+        "pin_required": ("the SIM asks for a PIN and none is saved — enter the "
+                         f"SIM PIN to start this line{left}"),
+        "pin_invalid": f"the saved SIM PIN was rejected{left} — re-enter the PIN",
+    }
+    return HTTPException(409, {
+        "code": pf["code"], "tries": tries,
+        "message": messages.get(pf["code"], f"SIM preflight failed: {pf['code']}"),
+    })
+
+
 @app.post("/api/provision")
 async def api_provision(body: dict):
     """Provision a detected card: verify PIN, read identity, create the line and start it.
@@ -4806,7 +4826,7 @@ async def api_instance_start(iid: str, body: dict | None = None):
     if not pf["ok"]:
         if pf.get("clear"):
             cfg.clear_pin(str(iid))     # stale saved PIN — force re-entry next time
-        raise HTTPException(409, {"code": pf["code"], "tries": pf.get("tries")})
+        raise _pin_preflight_http(pf)
 
     settings = cfg.get_settings()
     dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
@@ -4859,7 +4879,7 @@ async def api_reprovision(iid: str, body: dict | None = None):
     if not pf["ok"]:
         if pf.get("clear"):
             cfg.clear_pin(str(iid))
-        raise HTTPException(409, {"code": pf["code"], "tries": pf.get("tries")})
+        raise _pin_preflight_http(pf)
     hub._msisdn_tries.pop(str(iid), None)
     hub.reset_health(iid, "user_requested")
     await hub.drop_ami(iid)      # engine.start recreates the container (maybe new IP) -> stale client
