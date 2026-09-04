@@ -59,7 +59,24 @@ jobs:
           cache-dependency-path: webui/package-lock.json
       - run: npm ci
       - run: npm run build
-      - run: npm audit --audit-level=high
+      # npm audit calls the public registry, which intermittently returns 503 from its audit
+      # endpoint. A transient registry outage must not fail CI, but a real high-severity
+      # advisory still must. Retry a few times; only tolerate a failure whose output shows the
+      # registry itself was unavailable (never a genuine advisory).
+      - name: npm audit (tolerate registry outages)
+        run: |
+          for attempt in 1 2 3; do
+            out="$(npm audit --audit-level=high 2>&1)" && { echo "$out"; exit 0; }
+            echo "$out"
+            if printf '%s' "$out" | grep -qiE 'Service Unavailable|audit endpoint returned an error|ETIMEDOUT| ECONNRESET|EAI_AGAIN|503'; then
+              echo "::warning::npm audit registry unavailable (attempt $attempt/3)"
+              sleep $((attempt * 15))
+              continue
+            fi
+            echo "::error::npm audit reported a high-severity advisory"
+            exit 1
+          done
+          echo "::warning::npm audit skipped — registry unavailable after 3 attempts"
 
   control-image:
     runs-on: ubuntu-latest
