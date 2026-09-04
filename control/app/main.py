@@ -3229,6 +3229,13 @@ def _preflight_pin_locked(inst: dict, idx: int) -> dict:
     got = (probe.iccid or "").strip()
     if want and got and got != want:
         return {"ok": False, "code": "card_mismatch", "card_iccid": got, "line_iccid": want}
+    if probe.pin_enabled is None:
+        # The card answered, but read_card never got far enough to learn its PIN state (an
+        # ADF.USIM select that failed leaves every PIN field unset). Falling through would
+        # report 'pin_required' with an unknown retry counter, and the UI would ask for a PIN
+        # that cannot help — the dead end issues #51 and #60 both ended in. Report the read
+        # failure itself so the operator sees a fixable fact.
+        return {"ok": False, "code": "card_unreadable", "error": probe.error or ""}
     if probe.pin_enabled is False:
         return {"ok": True, "need_pin": False}
     saved = inst.get("pin")
@@ -3248,6 +3255,7 @@ async def _preflight_pin(inst: dict) -> dict:
     """Actively check the SIM's PIN state BEFORE starting the engine (so we never spin up
     the SWu tunnel/IMS against a locked card). Reads the physical card:
       - card absent                         -> {ok:False, code:'no_card'}
+      - card present but unreadable         -> {ok:False, code:'card_unreadable'}
       - PIN not required (disabled)          -> {ok:True,  need_pin:False}
       - PIN required, no saved PIN           -> {ok:False, code:'pin_required'}
       - PIN required, saved PIN verifies     -> {ok:True,  need_pin:True}
@@ -3285,6 +3293,8 @@ def _pin_preflight_http(pf: dict) -> HTTPException:
     left = f" ({tries} tries left)" if tries is not None else ""
     want = (pf.get("line_iccid") or "").strip()
     expect = f" (this line expects ICCID {want})" if want else ""
+    detail = str(pf.get("error") or "").strip()
+    because = f" ({detail})" if detail else ""
     messages = {
         "no_card": ("no readable SIM at this line's reader — it is empty or the card is "
                     "not ready yet (an eSIM resets briefly while switching profiles); if "
@@ -3292,6 +3302,9 @@ def _pin_preflight_http(pf: dict) -> HTTPException:
         "pin_required": ("the SIM asks for a PIN and none is saved — enter the "
                          f"SIM PIN to start this line{left}"),
         "pin_invalid": f"the saved SIM PIN was rejected{left} — re-enter the PIN",
+        "card_unreadable": ("the SIM was detected but could not be read"
+                            f"{because} — this is not a PIN problem, so entering one will "
+                            "not help; reseat the card and report this error if it persists"),
     }
     return HTTPException(409, {
         "code": pf["code"], "tries": tries,
@@ -3307,7 +3320,7 @@ def _raise_preflight_block(iid: str, pf: dict):
     cache-based guard produces — so the UI's message is identical however it was detected."""
     code = pf.get("code") or ""
     facts: dict = {}
-    if code in {"pin_required", "pin_invalid", "card_mismatch"}:
+    if code in {"pin_required", "pin_invalid", "card_mismatch", "card_unreadable"}:
         facts["card_present"] = True
     elif code == "no_card":
         facts["card_present"] = False

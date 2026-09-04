@@ -36,7 +36,7 @@ LIFECYCLE_EVENTS = {
     "recovery_succeeded", "recovery_cancelled", "vowifi_disabled",
     # A start/reprovision refused by the PIN/identity preflight before the engine ran.
     # reason_code carries the closed code (no_card / pin_required / pin_invalid /
-    # card_mismatch); the ICCID itself never enters this public record.
+    # card_mismatch / card_unreadable); the ICCID itself never enters this public record.
     "preflight_blocked",
 }
 _LIFECYCLE_REASON = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
