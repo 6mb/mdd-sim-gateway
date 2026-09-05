@@ -1,0 +1,88 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Rebase fork workflow onto upstream
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPOSITORY: MddIdd/mdd-sim-gateway
+      UPSTREAM_BRANCH: main
+      SYNC_BRANCH: main
+      WORKFLOW_PATH: .github/workflows/sync-upstream.yml
+    steps:
+      - name: Sync fork in GitHub Actions
+        env:
+          SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SYNC_TOKEN}" ]; then
+            echo "UPSTREAM_SYNC_TOKEN is not configured."
+            exit 1
+          fi
+
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${SYNC_TOKEN}" | base64 -w0)"
+          mkdir repo
+          cd repo
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+
+          git -c "http.https://github.com/.extraheader=${auth_header}" fetch --no-tags origin \
+            "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+          git fetch --no-tags upstream \
+            "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          git checkout -B "${SYNC_BRANCH}" "origin/${SYNC_BRANCH}"
+
+          before="$(git rev-parse "origin/${SYNC_BRANCH}")"
+          upstream_head="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          cp "${WORKFLOW_PATH}" "${RUNNER_TEMP}/sync-upstream.yml"
+
+          git reset --hard "${upstream_head}"
+          mkdir -p "$(dirname "${WORKFLOW_PATH}")"
+          cp "${RUNNER_TEMP}/sync-upstream.yml" "${WORKFLOW_PATH}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "${WORKFLOW_PATH}"
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: sync fork from upstream"
+          fi
+
+          after="$(git rev-parse HEAD)"
+          if [ "${before}" = "${after}" ]; then
+            echo "Fork is already synchronized."
+            exit 0
+          fi
+
+          git -c "http.https://github.com/.extraheader=${auth_header}" \
+            push --force-with-lease="refs/heads/${SYNC_BRANCH}:${before}" origin "HEAD:${SYNC_BRANCH}"
+
+      - name: Verify sync status
+        env:
+          SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${SYNC_TOKEN}" | base64 -w0)"
+          cd repo
+          git -c "http.https://github.com/.extraheader=${auth_header}" fetch --no-tags origin \
+            "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+          git fetch --no-tags upstream \
+            "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          ahead_by="$(git rev-list --count "upstream/${UPSTREAM_BRANCH}..origin/${SYNC_BRANCH}")"
+          behind_by="$(git rev-list --count "origin/${SYNC_BRANCH}..upstream/${UPSTREAM_BRANCH}")"
+          echo "ahead_by=${ahead_by} behind_by=${behind_by}"
+          test "${behind_by}" = "0"
