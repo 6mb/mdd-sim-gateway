@@ -274,6 +274,42 @@ bearer.stats.tx-bytes : 456
             self.assertEqual(value["msisdn"], "+12025550100")
             self.assertEqual(value["sim_iccid"], "8901000000000000001")
 
+    def test_unreadable_sim_iccid_is_not_reported_as_an_identity(self):
+        """mmcli prints "--" for a property it could not read. Passed through, the control
+        plane treats it as a live ICCID that matches no line and never falls through to the
+        PC/SC bridge, which can still read the card over a logical channel."""
+        self.assertEqual(Orchestrator.normalize_iccid("--"), "")
+        self.assertEqual(Orchestrator.normalize_iccid("unknown"), "")
+        self.assertEqual(Orchestrator.normalize_iccid(""), "")
+        self.assertEqual(Orchestrator.normalize_iccid("8901000000000000001"),
+                         "8901000000000000001")
+        # Not an ICCID: wrong issuer prefix, or too short to be one.
+        self.assertEqual(Orchestrator.normalize_iccid("1234567890123456789"), "")
+        self.assertEqual(Orchestrator.normalize_iccid("890100000"), "")
+
+    def test_snapshot_drops_a_placeholder_sim_iccid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=False)
+            modem_detail = """modem.generic.primary-port : cdc-wdm1
+modem.generic.sim : /org/freedesktop/ModemManager1/SIM/1
+modem.generic.state : connected
+modem.generic.power-state : on
+"""
+
+            def fake_run(args, **_kwargs):
+                if args[:2] == ["mmcli", "-m"]:
+                    return SimpleNamespace(returncode=0, stdout=modem_detail, stderr="")
+                if args[:2] == ["mmcli", "-i"]:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="sim.properties.iccid : --\n", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(app, "modemmanager_modem_for_tty",
+                              return_value="/org/freedesktop/ModemManager1/Modem/4"), patch(
+                                  "host.mdd_orchestrator.run", side_effect=fake_run):
+                value = app.modem_snapshot({"id": "modem-c", "tty": "/dev/ttyUSB7"})
+        self.assertEqual(value["sim_iccid"], "")
+
     def test_modem_number_normalization_rejects_placeholders_and_status_text(self):
         self.assertEqual(Orchestrator.normalize_msisdn("--"), "")
         self.assertEqual(Orchestrator.normalize_msisdn("not available"), "")

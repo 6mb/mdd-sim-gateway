@@ -35,6 +35,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   attempting compatibility with older zero-padded two-digit MNCs.
 - VoWiFi history ignores stale request successes and failures after a newer refresh, line
   change or unmount, and clears the previous line's error when switching lines.
+- A SIM whose ICCID ModemManager could not read is treated as unidentified instead of as a
+  line that matches nothing. `mmcli` renders an unreadable property as the literal `--`;
+  that value reached the control plane as a live ICCID, so the modem never fell through to
+  the PC/SC bridge, which can still read the card over a logical channel.
+- A modem that reports no IMEI keeps its published bridge identity. The record was discarded
+  whenever the module never answered the AT IMEI query, which also dropped the bridge's ICCID
+  (so the card matched no line and the reader binding never migrated) and collapsed the modem
+  to a single VPCD slot, putting PIN, SWu and IMS on one reader.
 
 ## [1.9.1] - 2026-09-04
 

@@ -1437,6 +1437,22 @@ class Orchestrator:
         return match.group(1).strip() if match else ""
 
     @staticmethod
+    def normalize_iccid(value: str) -> str:
+        """Return a usable SIM ICCID from a ModemManager property, or "".
+
+        mmcli renders a property it could not read as the literal placeholder "--"
+        (observed when a module rejects the EF_ICCID read). That is "unknown", not an
+        identity: passed through, it reaches the control plane as a truthy ICCID that
+        matches no line, so the SIM never falls through to the PC/SC bridge that can
+        still read it. Validated like the bridge's own decoder: 18-20 digits from 89.
+        """
+        text = str(value or "").strip()
+        if not text or text.casefold() in {"--", "unknown", "none", "n/a"}:
+            return ""
+        digits = re.sub(r"\D", "", text)
+        return digits if digits.startswith("89") and 18 <= len(digits) <= 20 else ""
+
+    @staticmethod
     def normalize_msisdn(value: str) -> str:
         """Return a conservative E.164-like number from ModemManager OwnNumbers.
 
@@ -1485,7 +1501,8 @@ class Orchestrator:
         if sim_object and sim_object not in {"--", "/"}:
             sim_detail = run(["mmcli", "-i", sim_object, "--output-keyvalue"])
             if sim_detail.returncode == 0:
-                sim_iccid = self._kv(sim_detail.stdout or "", "sim.properties.iccid")
+                sim_iccid = self.normalize_iccid(
+                    self._kv(sim_detail.stdout or "", "sim.properties.iccid"))
         # Many USB modems keep their hardware power-state at "on" after
         # ModemManager --disable.  The generic state is the authoritative RF state.
         radio_enabled = power == "on" and state not in {
