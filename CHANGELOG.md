@@ -35,6 +35,29 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   attempting compatibility with older zero-padded two-digit MNCs.
 - VoWiFi history ignores stale request successes and failures after a newer refresh, line
   change or unmount, and clears the previous line's error when switching lines.
+- A SIM whose ICCID ModemManager could not read is treated as unidentified instead of as a
+  line that matches nothing. `mmcli` renders an unreadable property as the literal `--`;
+  that value reached the control plane as a live ICCID, so the modem never fell through to
+  the PC/SC bridge, which can still read the card over a logical channel.
+- A modem's cellular-data profile no longer autoconnects, and no longer offers the host a
+  default route. NetworkManager dialled the profile after a reboot however the operator had
+  set that modem's cellular-data switch, and nothing kept the result from carrying the
+  default route -- which would send the VoWiFi tunnel authenticating that very SIM out
+  through the SIM's own carrier. Profiles written by earlier versions are corrected in
+  place. Set `MDD_MODEM_ALLOW_DEFAULT_ROUTE=1` where the modem genuinely is the only uplink.
+- A cellular profile left behind by an earlier version is secured even when cellular data is
+  simply switched off. Every data path is gated on the ModemManager backend being up, so the
+  state an operator reaches by turning cellular data off -- backend stood down, profile left
+  behind -- was the one state in which nothing corrected a profile that still autoconnected
+  forever.
+- Turning cellular data off now reaches a modem that reports no port. The profile was matched
+  only by the port it was attached to, so a modem in a failed or SIM-less ModemManager state
+  -- the state in which an autoconnecting profile is most likely to be dialling on its own --
+  was left running.
+- A modem that reports no IMEI keeps its published bridge identity. The record was discarded
+  whenever the module never answered the AT IMEI query, which also dropped the bridge's ICCID
+  (so the card matched no line and the reader binding never migrated) and collapsed the modem
+  to a single VPCD slot, putting PIN, SWu and IMS on one reader.
 
 ## [1.9.1] - 2026-09-04
 

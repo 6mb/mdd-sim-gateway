@@ -158,9 +158,13 @@ def _modem_identity_for_reader(reader_name: str | None) -> dict | None:
             with open(path, encoding="utf-8") as handle:
                 identity = json.load(handle)
             if str(identity.get("hardware_id") or "") == hardware_id:
+                # A modem that never reports a 15-digit AT IMEI is a supported state -- the
+                # bridge publishes the identity with an empty IMEI on purpose. Discarding the
+                # whole record over it dropped the bridge's ICCID (so the card never matched a
+                # line and the reader binding never migrated) and collapsed the modem to the
+                # one-slot fallback below, putting PIN/SWu/IMS on a single VPCD reader.
                 imei = cfg.normalize_imei(identity.get("imei", ""))
-                if len(imei) == 15:
-                    return {**identity, "imei": imei}
+                return {**identity, "imei": imei if len(imei) == 15 else ""}
         except (OSError, ValueError, TypeError):
             continue
     # The generated reader can outlive bridge metadata across an unplug/restart.
