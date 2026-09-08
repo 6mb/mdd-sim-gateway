@@ -4,10 +4,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
-## [1.9.2] - 2026-09-08
-
 ### Fixed
 
+- An AMI connection that was refused no longer leaves its manager pinging a transport that
+  never opened. panoramisk schedules a pinger and a reconnect timer as soon as a manager is
+  created and the event loop keeps the object alive through them, so a failed connect logged
+  a send failure once per ping interval for as long as the control plane ran. Restarting the
+  control plane while the engine containers are still starting -- what an upgrade does --
+  was enough to trigger it.
 - Cellular SMS and calls can match a line by IMSI when ModemManager cannot read that SIM's
   ICCID. A readable but different ICCID still fails closed instead of falling back to IMSI.
 - ML307X VoWiFi lines keep their allocated PIN, SWu and IMS reader slots across profile
@@ -16,6 +20,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   no longer calls an undefined helper, and now goes through the shared APDU exchange, so a
   TPDU-level reader's `61xx` response is fetched rather than left pending for the next
   command ([#74](https://github.com/MddIdd/mdd-sim-gateway/pull/74)).
+
+## [1.9.2] - 2026-09-08
+
+### Fixed
+
 - Missing tunnel evidence and local DNS, SIM, protocol or engine failures no longer count as
   failed exit nodes. Unknown evidence does not trigger node changes or stalled-session cleanup,
   and notifications no longer claim a clean tunnel when that has not been established.
