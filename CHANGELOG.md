@@ -45,6 +45,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   default route -- which would send the VoWiFi tunnel authenticating that very SIM out
   through the SIM's own carrier. Profiles written by earlier versions are corrected in
   place. Set `MDD_MODEM_ALLOW_DEFAULT_ROUTE=1` where the modem genuinely is the only uplink.
+- A cellular profile left behind by an earlier version is secured even when cellular data is
+  simply switched off. Every data path is gated on the ModemManager backend being up, so the
+  state an operator reaches by turning cellular data off -- backend stood down, profile left
+  behind -- was the one state in which nothing corrected a profile that still autoconnected
+  forever.
 - Turning cellular data off now reaches a modem that reports no port. The profile was matched
   only by the port it was attached to, so a modem in a failed or SIM-less ModemManager state
   -- the state in which an autoconnecting profile is most likely to be dialling on its own --

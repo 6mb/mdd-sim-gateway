@@ -363,6 +363,48 @@ bearer.stats.tx-bytes : 456
         self.assertEqual(len([c for c in calls if c[:3] == ["nmcli", "connection", "modify"]]), 1)
         self.assertLess(len(calls) - first, first * 5)
 
+    def _sweep(self, listing, returncode=0):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=False)
+            calls = []
+
+            def fake_run(args, **_kwargs):
+                calls.append(args)
+                if args[:2] == ["nmcli", "-t"]:
+                    return SimpleNamespace(returncode=returncode, stdout=listing, stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("host.mdd_orchestrator.run", side_effect=fake_run):
+                app.police_orphaned_modem_profiles()
+                app.police_orphaned_modem_profiles()
+            return calls, app
+
+    def test_a_leftover_profile_is_secured_when_cellular_is_simply_turned_off(self):
+        """Every data path is gated on the cellular backend being up, so turning cellular data
+        off -- ModemManager stood down, the GSM profile left behind -- is the one state where
+        nothing corrects a profile that still says autoconnect forever."""
+        listing = ("Wired connection 1:802-3-ethernet\n"
+                   "mdd-cell-0a05dad4d32d:gsm\n")
+        calls, app = self._sweep(listing)
+        modify = [call for call in calls if call[:3] == ["nmcli", "connection", "modify"]]
+        self.assertEqual(len(modify), 1, "swept once per stand-down, not per cycle")
+        self.assertEqual(modify[0][3], "mdd-cell-0a05dad4d32d")
+        self.assertEqual(modify[0][modify[0].index("connection.autoconnect") + 1], "no")
+        self.assertEqual(modify[0][modify[0].index("ipv4.never-default") + 1], "yes")
+        self.assertIn("mdd-cell-0a05dad4d32d", app.modem_profile_policed)
+
+    def test_the_sweep_leaves_connections_it_does_not_own_alone(self):
+        listing = ("Wired connection 1:802-3-ethernet\n"
+                   "some-other-modem:gsm\n"
+                   "mdd-cell-keep:bridge\n")
+        calls, _app = self._sweep(listing)
+        self.assertEqual([c for c in calls if c[:3] == ["nmcli", "connection", "modify"]], [])
+
+    def test_an_unreadable_connection_list_is_retried_rather_than_swallowed(self):
+        calls, app = self._sweep("", returncode=1)
+        self.assertFalse(app.modem_profiles_swept)
+        self.assertEqual(len([c for c in calls if c[:2] == ["nmcli", "-t"]]), 2)
+
     def test_unreadable_sim_iccid_is_not_reported_as_an_identity(self):
         """mmcli prints "--" for a property it could not read. Passed through, the control
         plane treats it as a live ICCID that matches no line and never falls through to the

@@ -617,6 +617,8 @@ class Orchestrator:
         # legacy profile is a one-off; without this the data-off path would shell out to nmcli
         # on every reconcile to rewrite settings that already say what we want.
         self.modem_profile_policed: set[str] = set()
+        # Cleared whenever the cellular backend is up, so standing it back down re-sweeps.
+        self.modem_profiles_swept = False
         self.applied_timezone = ""
         self.obsolete_services_retired = False
         self.reader_config_path = Path(os.environ.get(
@@ -1664,6 +1666,44 @@ class Orchestrator:
         for name, device in active:
             if name == profile or (primary and device == primary):
                 run(["nmcli", "connection", "down", name])
+
+    def police_orphaned_modem_profiles(self) -> None:
+        """Apply the profile policy to modem profiles nothing else is watching.
+
+        Every ensure/disconnect call sits behind ``through_modemmanager``, which is false
+        whenever no device wants cellular data. So the state an operator reaches by simply
+        turning cellular data off -- ModemManager stood down, the GSM profile left behind --
+        is the one state in which nothing corrects that profile, and a profile written by an
+        earlier version says "autoconnect: forever" in it. That is the most dangerous place
+        to leave it: the operator has said no, nothing is supervising, and NetworkManager
+        still dials on its own the moment the modem enumerates.
+
+        Swept once per stand-down rather than per cycle; profiles are only ever created by
+        ensure_modem_data, which polices them as it goes.
+        """
+        if self.modem_profiles_swept:
+            return
+        self.modem_profiles_swept = True
+        result = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
+        if result.returncode:
+            self.modem_profiles_swept = False
+            return
+        for line in (result.stdout or "").splitlines():
+            name, _, kind = line.rpartition(":")
+            name = name.replace(r"\:", ":")
+            if kind != "gsm" or not name.startswith("mdd-cell-"):
+                continue
+            if name in self.modem_profile_policed:
+                continue
+            outcome = run(["nmcli", "connection", "modify", name,
+                           *self.modem_profile_policy()])
+            if outcome.returncode:
+                self.log(f"could not secure leftover cellular profile {name}: "
+                         f"{(outcome.stderr or outcome.stdout).strip()}")
+                continue
+            self.modem_profile_policed.add(name)
+            self.log(f"secured leftover cellular profile {name} "
+                     "(no autoconnect, never the default route)")
 
     def apply_cellular_backend(self, enabled: bool, *, reset_modems: bool = True):
         """Apply the shared cellular backend required by one or more physical modems.
@@ -3111,6 +3151,11 @@ class Orchestrator:
 
             self.apply_device_radios(discovered, active_desired,
                                      through_modemmanager=cellular_required)
+            if cellular_required:
+                self.modem_profiles_swept = False
+            else:
+                # Nothing above ran: every data path is gated on the backend being up.
+                self.police_orphaned_modem_profiles()
             # Country egress only exists to carry VoWiFi IKE/ePDG traffic.
             proxy_desired = desired
             if not vowifi_required:
