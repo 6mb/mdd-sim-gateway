@@ -8,6 +8,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Cellular SMS and calls can match a line by IMSI when ModemManager cannot read that SIM's
+  ICCID. A readable but different ICCID still fails closed instead of falling back to IMSI.
+- ML307X VoWiFi lines keep their allocated PIN, SWu and IMS reader slots across profile
+  switches, ignore extra unallocated VPCD readers, and retain a configured line IMEI when
+  the modem does not expose one live. DITO lines also use the carrier's required IKE proposal
+  and EAP identity exchange, while APDU-level readers may return SELECT or AKA data inline
+  with `9000`. Reselecting ADF.USIM after an IMSI-bound reader match no longer calls an
+  undefined helper ([#74](https://github.com/MddIdd/mdd-sim-gateway/pull/74)).
 - Missing tunnel evidence and local DNS, SIM, protocol or engine failures no longer count as
   failed exit nodes. Unknown evidence does not trigger node changes or stalled-session cleanup,
   and notifications no longer claim a clean tunnel when that has not been established.
