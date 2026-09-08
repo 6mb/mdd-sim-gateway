@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-09-08
+
 ### Fixed
 
 - Missing tunnel evidence and local DNS, SIM, protocol or engine failures no longer count as
