@@ -311,6 +311,10 @@ EXIT_RANK_WARMUP_SECONDS = float(os.environ.get("MDD_EXIT_RANK_WARMUP", "25"))
 # waking on the base interval to stat the input documents so an operator action is never
 # delayed by more than one base tick.
 IDLE_INTERVAL_SECONDS = float(os.environ.get("MDD_IDLE_INTERVAL", "15"))
+# A modem is plugged in so its SIM can be read; cellular data is a per-device capability, not
+# the box's route to the internet. Set this when the modem genuinely IS the only uplink.
+MODEM_MAY_PROVIDE_DEFAULT_ROUTE = os.environ.get(
+    "MDD_MODEM_ALLOW_DEFAULT_ROUTE", "").strip().lower() in {"1", "true", "yes", "on"}
 # How long a tty may stay unclaimed before the bridge stops waiting for ModemManager and talks
 # to the serial port itself. ModemManager needs on the order of ten to thirty seconds to probe
 # an EC25-class module, so this is set far beyond any healthy first pass: reaching it means
@@ -609,6 +613,10 @@ class Orchestrator:
         self.radio_states: dict[str, bool] = {}
         self.cellular_states: dict[str, dict] = {}
         self.data_attempt_at: dict[str, float] = {}
+        # Profiles already re-stamped with modem_profile_policy() this process. Correcting a
+        # legacy profile is a one-off; without this the data-off path would shell out to nmcli
+        # on every reconcile to rewrite settings that already say what we want.
+        self.modem_profile_policed: set[str] = set()
         self.applied_timezone = ""
         self.obsolete_services_retired = False
         self.reader_config_path = Path(os.environ.get(
@@ -1560,6 +1568,30 @@ class Orchestrator:
                     profiles.append((parts[0].replace(r"\:", ":"), parts[2]))
         return profiles
 
+    @staticmethod
+    def modem_profile_policy() -> list[str]:
+        """nmcli properties that keep a modem's data profile from becoming the host uplink.
+
+        Two separate things went wrong without them. The profile was created with autoconnect
+        on, so NetworkManager dialled it after a reboot however the operator had set this
+        modem's cellular-data switch -- the switch was silently not durable. And nothing
+        stopped the resulting connection from carrying the default route, which would send the
+        VoWiFi tunnel that authenticates this very SIM out through that SIM's own carrier.
+
+        Autoconnect stays off unconditionally: the orchestrator owns the desired state and
+        brings the profile up itself, so NetworkManager acting on its own can only contradict
+        the operator. The default-route guard is what MDD_MODEM_ALLOW_DEFAULT_ROUTE releases,
+        for a deployment whose only uplink really is the modem.
+        """
+        policy = ["connection.autoconnect", "no"]
+        if not MODEM_MAY_PROVIDE_DEFAULT_ROUTE:
+            # never-default is preventive where deleting the route afterwards is corrective:
+            # the route is never installed, so there is no window in which it is live and no
+            # repeated deletion of something already gone. It also reverses with one nmcli
+            # call, which matters on a box reached over the network it is about to reconfigure.
+            policy += ["ipv4.never-default", "yes", "ipv6.never-default", "yes"]
+        return policy
+
     def ensure_modem_data(self, modem: dict, snapshot: dict) -> None:
         """Give each modem its own NetworkManager GSM profile and bearer."""
         if not snapshot.get("powered") or snapshot.get("data_active"):
@@ -1582,8 +1614,8 @@ class Orchestrator:
         exists = run(["nmcli", "connection", "show", profile]).returncode == 0
         if not exists:
             command = ["nmcli", "connection", "add", "type", "gsm", "ifname", primary,
-                       "con-name", profile, "connection.autoconnect", "yes",
-                       "connection.autoconnect-retries", "0"]
+                       "con-name", profile, "connection.autoconnect-retries", "0",
+                       *self.modem_profile_policy()]
             if apn:
                 command.extend(["gsm.apn", apn, "gsm.auto-config", "no"])
             else:
@@ -1593,12 +1625,17 @@ class Orchestrator:
                 self.log(f"could not create cellular profile for {device_id}: "
                          f"{(result.stderr or result.stdout).strip()}")
                 return
-        elif apn:
-            # A profile may have been created before the retained bearer APN became visible.
-            result = run(["nmcli", "connection", "modify", profile,
-                          "gsm.apn", apn, "gsm.auto-config", "no"])
+        else:
+            # Re-stamped on every pass, not only at creation: profiles written by an older
+            # version carry autoconnect=yes and no default-route guard, and they outlive the
+            # upgrade. This is the only place that corrects them while data is wanted.
+            command = ["nmcli", "connection", "modify", profile, *self.modem_profile_policy()]
+            if apn:
+                # A profile may have been created before the retained bearer APN became visible.
+                command.extend(["gsm.apn", apn, "gsm.auto-config", "no"])
+            result = run(command)
             if result.returncode:
-                self.log(f"could not update cellular APN for {device_id}: "
+                self.log(f"could not update cellular profile for {device_id}: "
                          f"{(result.stderr or result.stdout).strip()}")
                 return
         result = run(["nmcli", "connection", "up", profile])
@@ -1607,9 +1644,25 @@ class Orchestrator:
                      f"{(result.stderr or result.stdout).strip()}")
 
     def disconnect_modem_data(self, snapshot: dict) -> None:
+        """Take this modem's data profile down and keep it down.
+
+        The profile is addressed by name rather than only by the port it is attached to. A
+        modem in a failed or SIM-less ModemManager state reports no primary port, so matching
+        on the port alone found nothing to do in exactly the state where an autoconnecting
+        profile is most likely to be dialling on its own.
+        """
+        profile = str(snapshot.get("profile") or "")
+        if profile and profile not in self.modem_profile_policed:
+            # Cellular data is off for this modem, so the profile must not come back by
+            # itself -- neither now nor after the next reboot. Once is enough: nothing else
+            # rewrites these properties behind us.
+            if run(["nmcli", "connection", "show", profile]).returncode == 0:
+                run(["nmcli", "connection", "modify", profile, *self.modem_profile_policy()])
+            self.modem_profile_policed.add(profile)
+        active = self._active_gsm_profiles()
         primary = snapshot.get("primary_port") or snapshot.get("network_interface")
-        for name, device in self._active_gsm_profiles():
-            if primary and device == primary:
+        for name, device in active:
+            if name == profile or (primary and device == primary):
                 run(["nmcli", "connection", "down", name])
 
     def apply_cellular_backend(self, enabled: bool, *, reset_modems: bool = True):

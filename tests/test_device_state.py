@@ -274,6 +274,95 @@ bearer.stats.tx-bytes : 456
             self.assertEqual(value["msisdn"], "+12025550100")
             self.assertEqual(value["sim_iccid"], "8901000000000000001")
 
+    def _orchestrator_calls(self, method, snapshot, *, exists=True, active=(), **kwargs):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=False)
+            calls = []
+
+            def fake_run(args, **_kwargs):
+                calls.append(args)
+                if args[:3] == ["nmcli", "connection", "show"] and len(args) == 4:
+                    return SimpleNamespace(returncode=0 if exists else 1, stdout="", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(app, "_active_gsm_profiles", return_value=list(active)), patch(
+                    "host.mdd_orchestrator.run", side_effect=fake_run):
+                getattr(app, method)(snapshot, **kwargs) if method == "disconnect_modem_data" \
+                    else getattr(app, method)({"id": "modem-a"}, snapshot)
+            return calls, app
+
+    def test_a_modem_profile_never_autoconnects_or_carries_the_default_route(self):
+        """A modem is plugged in to have its SIM read. If NetworkManager dials it on its own
+        and the result becomes the default route, the VoWiFi tunnel authenticating that very
+        SIM leaves through that SIM's own carrier."""
+        policy = Orchestrator.modem_profile_policy()
+        self.assertEqual(policy[policy.index("connection.autoconnect") + 1], "no")
+        self.assertEqual(policy[policy.index("ipv4.never-default") + 1], "yes")
+        self.assertEqual(policy[policy.index("ipv6.never-default") + 1], "yes")
+
+    def test_the_default_route_guard_is_released_for_a_modem_only_uplink(self):
+        with patch.object(mdd_orchestrator, "MODEM_MAY_PROVIDE_DEFAULT_ROUTE", True):
+            policy = Orchestrator.modem_profile_policy()
+        # The switch is about the default route only: autoconnect stays off either way,
+        # because the orchestrator owns the desired state and brings the profile up itself.
+        self.assertEqual(policy[policy.index("connection.autoconnect") + 1], "no")
+        self.assertNotIn("ipv4.never-default", policy)
+        self.assertNotIn("ipv6.never-default", policy)
+
+    def test_a_new_cellular_profile_is_created_with_the_policy(self):
+        snapshot = {"powered": True, "data_active": False, "registration": "roaming",
+                    "primary_port": "ttyUSB5", "apn": "ims",
+                    "profile": Orchestrator.cellular_profile_name("modem-a")}
+        calls, _app = self._orchestrator_calls("ensure_modem_data", snapshot, exists=False)
+        add = next(call for call in calls if call[:3] == ["nmcli", "connection", "add"])
+        self.assertEqual(add[add.index("connection.autoconnect") + 1], "no")
+        self.assertEqual(add[add.index("ipv4.never-default") + 1], "yes")
+
+    def test_an_existing_legacy_profile_is_corrected_even_without_an_apn(self):
+        """Profiles written by an older version carry autoconnect=yes and no route guard, and
+        they outlive the upgrade. Correcting them only when an APN was known left them."""
+        snapshot = {"powered": True, "data_active": False, "registration": "home",
+                    "primary_port": "ttyUSB5", "apn": "",
+                    "profile": Orchestrator.cellular_profile_name("modem-a")}
+        calls, _app = self._orchestrator_calls("ensure_modem_data", snapshot, exists=True)
+        modify = next(call for call in calls if call[:3] == ["nmcli", "connection", "modify"])
+        self.assertEqual(modify[modify.index("connection.autoconnect") + 1], "no")
+        self.assertEqual(modify[modify.index("ipv4.never-default") + 1], "yes")
+
+    def test_disabling_data_reaches_a_profile_whose_modem_reports_no_port(self):
+        """A modem in a failed or SIM-less state reports no primary port. Matching only on the
+        port found nothing to do in exactly the state where an autoconnecting profile is most
+        likely to dial on its own."""
+        snapshot = {"profile": "mdd-cell-legacy", "primary_port": "", "network_interface": ""}
+        calls, app = self._orchestrator_calls(
+            "disconnect_modem_data", snapshot, active=[("mdd-cell-legacy", "wwan0")])
+        modify = next(call for call in calls if call[:3] == ["nmcli", "connection", "modify"])
+        self.assertEqual(modify[3], "mdd-cell-legacy")
+        self.assertEqual(modify[modify.index("connection.autoconnect") + 1], "no")
+        self.assertIn(["nmcli", "connection", "down", "mdd-cell-legacy"], calls)
+        self.assertIn("mdd-cell-legacy", app.modem_profile_policed)
+
+    def test_a_policed_profile_is_not_rewritten_on_every_reconcile(self):
+        """Data-off runs on every cycle. Rewriting settings that already say what we want was
+        the largest avoidable source of process creation in the old proposal for this fix."""
+        snapshot = {"profile": "mdd-cell-legacy", "primary_port": "", "network_interface": ""}
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=False)
+            calls = []
+
+            def fake_run(args, **_kwargs):
+                calls.append(args)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(app, "_active_gsm_profiles", return_value=[]), patch(
+                    "host.mdd_orchestrator.run", side_effect=fake_run):
+                app.disconnect_modem_data(dict(snapshot))
+                first = len(calls)
+                for _ in range(5):
+                    app.disconnect_modem_data(dict(snapshot))
+        self.assertEqual(len([c for c in calls if c[:3] == ["nmcli", "connection", "modify"]]), 1)
+        self.assertLess(len(calls) - first, first * 5)
+
     def test_unreadable_sim_iccid_is_not_reported_as_an_identity(self):
         """mmcli prints "--" for a property it could not read. Passed through, the control
         plane treats it as a live ICCID that matches no line and never falls through to the
