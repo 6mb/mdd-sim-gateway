@@ -4,6 +4,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- A line can present its own SIP User-Agent, set under Advanced IMS identity. Carriers that
+  gate IMS registration on a terminal whitelist answer 403 to an unrecognised User-Agent, and
+  configuring the IMEI does not help -- that value only reaches the ePDG's DEVICE_IDENTITY.
+  Left empty a line still identifies as `MDD-Sim-Gateway`. The value is rendered into
+  `pjsip.conf`, so it is reduced to a single line of printable ASCII and capped at 64
+  characters ([#83](https://github.com/MddIdd/mdd-sim-gateway/issues/83)).
+
 ### Fixed
 
 - A multi-part SMS is no longer imported twice, the first copy reading `--`. `mmcli` renders
