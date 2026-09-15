@@ -239,12 +239,58 @@ def swu_notify(event, arg=None):
         pass
 
 
+def _asterisk_cli(command):
+    """Run one Asterisk CLI command, best effort."""
+    try:
+        subprocess.call(["asterisk", "-rx", command],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _pcscf_debug_window(seconds):
+    """Raise Asterisk's debug level for a bounded window around a P-CSCF apply.
+
+    Asterisk has been leaving the container within ~10-20s of the reload that follows a tunnel
+    re-establish, through a path that leaves neither a shutdown log line nor a kernel crash
+    record. At the shipped verbosity nothing at all is logged in that gap. This switches debug
+    on just for the apply, so the next occurrence is recorded, and schedules it back off so the
+    steady state is unchanged.
+    """
+    if seconds <= 0:
+        return
+    _asterisk_cli("core set debug 3")
+
+    def _off():
+        time.sleep(seconds)
+        _asterisk_cli("core set debug 0")
+
+    try:
+        threading.Thread(target=_off, daemon=True).start()
+    except Exception:
+        _asterisk_cli("core set debug 0")
+
+
 def swu_apply_pcscf(addr):
-    """Re-render pjsip.conf for a (possibly new) P-CSCF and reload Asterisk, but only when the
-    P-CSCF actually changed. The ePDG can hand out a DIFFERENT P-CSCF on every (re)connect /
-    reauth; pjsip's type=identify/type=resolve are pinned to the P-CSCF IP, so a stale value
-    means inbound INVITEs from the new P-CSCF don't match (calls/SMS fail) and outbound routing
-    is wrong. This keeps them in sync on every reconnect, not just the first bring-up."""
+    """Re-render pjsip.conf for a (possibly new) P-CSCF and make Asterisk pick it up, but only
+    when the P-CSCF actually changed. The ePDG can hand out a DIFFERENT P-CSCF on every
+    (re)connect / reauth; pjsip's type=identify/type=resolve are pinned to the P-CSCF IP, so a
+    stale value means inbound INVITEs from the new P-CSCF don't match (calls/SMS fail) and
+    outbound routing is wrong. This keeps them in sync on every reconnect, not just the first
+    bring-up.
+
+    How the new value is applied is selectable via SWU_PCSCF_APPLY_MODE:
+
+      reload  (default) - `module reload res_pjsip.so`, the long-standing behaviour.
+      restart           - `core restart now`, an Asterisk-internal cold restart.
+
+    The reason for the switch: across the observed teardowns, Asterisk went away shortly after
+    the reload in almost every case, taking the container with it and turning a ~12s tunnel
+    blip into a ~40s outage while the container rebuilt from scratch. The correlation is strong
+    but not proof — one teardown reloaded and survived — so the default stays on the current
+    behaviour until the instrumentation above says what is actually happening. `restart` is
+    here so that verdict can be acted on per line without another image build.
+    """
     if not addr:
         return
     last = None
@@ -258,17 +304,32 @@ def swu_apply_pcscf(addr):
     render = os.environ.get("SWU_RENDER", "/usr/local/bin/render.py")
     if not os.path.exists(render):
         return
+    mode = (os.environ.get("SWU_PCSCF_APPLY_MODE") or "reload").strip().lower()
+    if mode not in ("reload", "restart"):
+        swu_log("unknown SWU_PCSCF_APPLY_MODE %r; falling back to reload" % mode)
+        mode = "reload"
     try:
-        swu_log("P-CSCF changed (%s -> %s); re-rendering pjsip + reloading Asterisk" % (last, addr))
+        swu_log("P-CSCF changed (%s -> %s); re-rendering pjsip + applying via %s"
+                % (last, addr, mode))
+        swu_notify("pcscf_apply_start", mode)
+        _pcscf_debug_window(int(os.environ.get("SWU_PCSCF_DEBUG_SECONDS", "90") or 0))
         subprocess.call(["python3", render], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Reload just the parts affected by the P-CSCF change. res_pjsip reload re-reads
-        # pjsip.conf (identify/resolve/registration/endpoint) without dropping the tunnel.
-        subprocess.call(["asterisk", "-rx", "module reload res_pjsip.so"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.call(["asterisk", "-rx", "pjsip send register volte_ims"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Write the applied-marker BEFORE touching Asterisk. Under `restart` the config is
+        # already on disk and a cold start picks it up, so a restart that never returns must not
+        # leave the marker stale and re-trigger this on the next discovery.
         with open(os.path.join(SWU_RUNDIR, "pcscf.applied"), "w") as f:
             f.write(addr)
+        if mode == "restart":
+            # Asterisk re-execs itself; the container, this process and the tunnel all survive.
+            # Any call in progress is dropped — acceptable here because the tunnel carrying it
+            # has just been torn down anyway.
+            _asterisk_cli("core restart now")
+        else:
+            # Reload just the parts affected by the P-CSCF change. res_pjsip reload re-reads
+            # pjsip.conf (identify/resolve/registration/endpoint) without dropping the tunnel.
+            _asterisk_cli("module reload res_pjsip.so")
+            _asterisk_cli("pjsip send register volte_ims")
+        swu_notify("pcscf_apply_done", mode)
     except Exception as e:
         swu_log("pcscf apply failed: %r" % e)
 
@@ -2867,6 +2928,13 @@ class swu():
         addr_int = int(network.network_address) | (iid & host_mask)
         return (str(ipaddress.IPv6Address(addr_int)), plen)
      
+    def seconds_since_connect(self):
+        """How long the current tunnel has been up, or -1 if it never reached CONNECTED."""
+        started = getattr(self, "_connected_at", None)
+        if not started:
+            return -1
+        return max(0, int(time.time() - started))
+
     def delete_routes(self):
         if self.netns_name:
             subprocess.call("ip netns del %s" % self.netns_name, shell=True)
@@ -4677,6 +4745,15 @@ class swu():
                         self.send_data(packet)
                         print('answering INFORMATIONAL (DELETE IKE)')
                         if self.old_ike_message_received == False:
+                            # The ePDG, not us, ended this tunnel. That distinction is the whole
+                            # story behind the periodic outages (one carrier tears down on a
+                            # ~24h timer regardless of how recently the SA was rekeyed), and it
+                            # was previously only visible by reading the archived IKE log by
+                            # hand. Record it as an event so the timeline shows who hung up.
+                            swu_log("ePDG tore down the tunnel (peer-initiated DELETE IKE) "
+                                    "after %ds" % self.seconds_since_connect())
+                            swu_notify("tunnel_deleted_by_peer",
+                                       str(self.seconds_since_connect()))
                             self.ike_to_ipsec_encoder.send(bytes([INTER_PROCESS_DELETE_SA]))
                             self.ike_to_ipsec_decoder.send(bytes([INTER_PROCESS_DELETE_SA]))
                             self.delete_routes()
@@ -5140,6 +5217,10 @@ class swu():
         inner = (self.ipv6_address_list[0] if self.ipv6_address_list
                  else (self.ip_address_list[0] if self.ip_address_list else ""))
         swu_write_pcscf(pcscf)
+        # Stamped so a later teardown can report how long this tunnel actually lasted. The
+        # carrier-side lifetimes only became legible once the durations were in the log next to
+        # who initiated the teardown.
+        self._connected_at = time.time()
         swu_write_status("CONNECTED", inner_ip=inner, pcscf=pcscf, iface=self.tun_device)
         swu_log("tunnel CONNECTED inner=%s pcscf=%s iface=%s" % (inner, pcscf, self.tun_device))
         swu_notify("tunnel_up")

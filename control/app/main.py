@@ -442,6 +442,9 @@ class Hub:
         self.cards: dict[str, dict] = {}     # reader NAME -> detected card/reader info
         self.scanned = False                 # card_monitor completed its first scan
         self._learning: set[str] = set()     # instances currently learning MSISDN
+        # Last observed Docker RestartCount per instance, to tell a restart-policy bounce from
+        # a rebuild the manager performed itself.
+        self._restart_counts: dict[str, int] = {}
         self._msisdn_tries: dict[str, int] = {}
         self._msisdn_checked: dict[str, float] = {}   # last passive re-check
         # Serialise route selection and submission per line. In particular, two concurrent
@@ -542,7 +545,35 @@ class Hub:
         if (not runtime.get("running")
                 or self.ami_generation.get(str(iid)) not in (None, generation)):
             await self.drop_ami(iid)
+        if runtime.get("running"):
+            await self._note_unrequested_restart(str(iid), runtime)
         self.status_wakeup.set()
+
+    async def _note_unrequested_restart(self, iid: str, runtime: dict) -> None:
+        """Record engine bounces that Docker's restart policy performed on its own.
+
+        A rebuild the manager asks for creates a fresh container, so its RestartCount is 0. A
+        restart-policy bounce increments the counter on the same container. Only the latter is
+        invisible today: it completes well inside the health policy's threshold, so no recovery
+        is scheduled and nothing reaches the timeline even though the line just spent ~40s
+        unable to take a call.
+        """
+        count = int(runtime.get("restart_count") or 0)
+        previous = self._restart_counts.get(iid)
+        self._restart_counts[iid] = count
+        if previous is None or count <= previous:
+            return
+        exit_record = await asyncio.to_thread(engine.last_engine_exit, iid)
+        disposition = str(exit_record.get("disposition") or "")
+        reason = {"signal": "engine_signal", "exit": "engine_exit"}.get(disposition, "unknown")
+        try:
+            await asyncio.to_thread(
+                engine.record_lifecycle, iid, "engine_restarted", reason_code=reason)
+        except Exception as exc:  # noqa
+            log.debug("could not record engine restart instance=%s: %r", iid, exc)
+        log.warning("engine %s was restarted by Docker's restart policy "
+                    "(restart_count %s -> %s, last exit: %s)", iid, previous, count,
+                    exit_record or "unrecorded")
 
     async def broadcast(self, msg: dict):
         dead = []

@@ -1,0 +1,186 @@
+"""Evidence for engine bounces that nothing used to record.
+
+The engine containers were being restarted by Docker's restart policy several times a day —
+Asterisk went away a few seconds after the P-CSCF reload that follows an ePDG teardown — and
+none of it reached the timeline: the bounce resolves faster than the health policy's threshold,
+so no recovery is scheduled and lifecycle.jsonl stays empty. These tests cover the three pieces
+that make such a bounce legible afterwards, plus the privacy boundary the new logs must respect.
+"""
+import importlib
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parent.parent
+ENTRYPOINT = REPO / "engine" / "entrypoint.sh"
+
+
+def engine_module():
+    fake_docker = SimpleNamespace(
+        from_env=lambda: None,
+        errors=SimpleNamespace(NotFound=type("NotFound", (Exception,), {})),
+    )
+    with patch.dict(sys.modules, {"docker": fake_docker}):
+        sys.modules.pop("control.app.engine", None)
+        return importlib.import_module("control.app.engine")
+
+
+class SupervisorRecordTests(unittest.TestCase):
+    """The entrypoint's record of how Asterisk left, read back by the manager."""
+
+    def test_last_exit_reports_the_most_recent_disposition(self):
+        engine = engine_module()
+        with tempfile.TemporaryDirectory() as temp:
+            logs = Path(temp) / "instances" / "7" / "logs" / "asterisk"
+            logs.mkdir(parents=True)
+            (logs / "supervisor.jsonl").write_text(
+                json.dumps({"ts": 1, "event": "asterisk_exited",
+                            "rc": 0, "disposition": "exit"}) + "\n"
+                + json.dumps({"ts": 2, "event": "swu_ike_exited", "rc": 1}) + "\n"
+                + json.dumps({"ts": 3, "event": "asterisk_exited", "rc": 139,
+                              "signal": 11, "disposition": "signal"}) + "\n")
+            with patch.object(engine, "DATA_DIR", temp):
+                record = engine.last_engine_exit("7")
+        self.assertEqual(record["disposition"], "signal")
+        self.assertEqual(record["signal"], 11)
+
+    def test_missing_file_is_not_an_error(self):
+        engine = engine_module()
+        with tempfile.TemporaryDirectory() as temp, patch.object(engine, "DATA_DIR", temp):
+            self.assertEqual(engine.last_engine_exit("7"), {})
+
+    def test_engine_restarted_is_an_accepted_lifecycle_event(self):
+        engine = engine_module()
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp) / "instances" / "7" / "logs"
+            base.mkdir(parents=True)
+            with patch.object(engine, "DATA_DIR", temp):
+                engine.record_lifecycle("7", "engine_restarted", reason_code="engine_exit")
+            written = json.loads((base / "lifecycle.jsonl").read_text().strip())
+        self.assertEqual(written["event"], "engine_restarted")
+        self.assertEqual(written["reason_code"], "engine_exit")
+
+    def test_runtime_reports_restart_count(self):
+        """A restart-policy bounce increments RestartCount on the same container; a rebuild
+        the manager performs starts a fresh one at zero. Only the counter separates them."""
+        engine = engine_module()
+        container = SimpleNamespace(
+            status="running", id="abc",
+            attrs={"NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.4"}}},
+                   "RestartCount": 6, "State": {"StartedAt": "2026-09-15T07:09:02Z"}})
+        client = SimpleNamespace(containers=SimpleNamespace(get=lambda _name: container))
+        with patch.object(engine, "_client", return_value=client):
+            runtime = engine.container_runtime("7")
+        self.assertEqual(runtime["restart_count"], 6)
+        self.assertEqual(runtime["started_at"], "2026-09-15T07:09:02Z")
+
+
+class SupportBundleBoundaryTests(unittest.TestCase):
+    """Asterisk's own logs are now persistent. They must not follow into a support bundle."""
+
+    def test_asterisk_logs_are_not_collected_but_supervisor_is(self):
+        source = (REPO / "control" / "app" / "operations.py").read_text()
+        # The allow-list block that decides which files a bundle may carry.
+        block = source[source.index("Explicit allow-list"):]
+        block = block[:block.index("for path in sorted(paths)")]
+        self.assertIn('logs/asterisk/supervisor.jsonl', block)
+        # `full` and `messages` carry the subscriber's IMS public identity on every
+        # registration, so no glob may sweep the directory wholesale.
+        self.assertNotIn('logs/asterisk/*', block)
+        self.assertNotIn('logs/asterisk/full', block)
+        self.assertNotIn('logs/asterisk/messages', block)
+
+
+class EntrypointSupervisionTests(unittest.TestCase):
+    """The entrypoint is shell; these assert on its text and on its actual behaviour."""
+
+    def test_script_is_syntactically_valid(self):
+        result = subprocess.run(["bash", "-n", str(ENTRYPOINT)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_asterisk_is_supervised_rather_than_exec_replaced(self):
+        """Asterisk as PID 1 meant the container simply vanished with it, leaving only
+        ExitCode=0 — which cannot distinguish a clean shutdown from anything else."""
+        text = ENTRYPOINT.read_text()
+        self.assertNotIn("exec asterisk", text)
+        self.assertIn("supervisor_record asterisk_exited", text)
+        # Both dispositions must be recorded, not just the signal case.
+        self.assertIn("disposition=signal", text)
+        self.assertIn("disposition=exit", text)
+
+    def test_reconnect_backoff_resets_after_a_stable_run(self):
+        """Extracted and run for real: the delay only ever doubled (4 -> 8 -> ... -> 60) and
+        was never reset, which stayed hidden only because the container kept restarting and
+        re-seeding it. Once Asterisk no longer takes the container down, an unreset backoff
+        would leave a healthy line waiting a full minute to re-establish."""
+        script = """
+        set -u
+        SWU_STABLE_SECONDS=120
+        supervisor_record() { :; }
+        log() { :; }
+        backoff=4
+        for ran in $RUNS; do
+          if [ "$ran" -ge "$SWU_STABLE_SECONDS" ]; then
+            backoff=4
+          fi
+          echo -n "$backoff "
+          backoff=$((backoff*2)); [ "$backoff" -gt 60 ] && backoff=60
+        done
+        exit 0
+        """
+        # Four teardowns in quick succession, then one run that stayed up for an hour, then
+        # another teardown: the last one must be back at the short delay.
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                                env={"RUNS": "5 5 5 5 3600 5", "PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        delays = result.stdout.split()
+        self.assertEqual(delays, ["4", "8", "16", "32", "4", "8"])
+
+    def test_asterisk_logs_are_written_to_the_bind_mounted_volume(self):
+        """/logs survives both a container restart and a manager rebuild; the image's default
+        log directory survives neither."""
+        conf = (REPO / "engine" / "templates" / "asterisk.conf.j2").read_text()
+        self.assertRegex(conf, r"astlogdir\s*=\s*/logs/asterisk")
+        self.assertIn("mkdir -p", ENTRYPOINT.read_text())
+        self.assertIn("MDD_AST_LOGDIR", ENTRYPOINT.read_text())
+
+
+class PcscfApplyModeTests(unittest.TestCase):
+    """Applying a new P-CSCF is the step Asterisk has been dying just after."""
+
+    def setUp(self):
+        self.source = (REPO / "engine" / "swu_ike.py").read_text()
+        start = self.source.index("def swu_apply_pcscf")
+        self.func = self.source[start:self.source.index("\ndef ", start + 10)]
+
+    def test_default_mode_is_unchanged_behaviour(self):
+        """The correlation between the reload and the exit is strong but not proof — one
+        teardown reloaded and survived. The default must not change ahead of the evidence."""
+        self.assertIn('os.environ.get("SWU_PCSCF_APPLY_MODE") or "reload"', self.func)
+        self.assertIn("module reload res_pjsip.so", self.func)
+
+    def test_restart_mode_is_available_and_validated(self):
+        self.assertIn("core restart now", self.func)
+        self.assertIn('if mode not in ("reload", "restart")', self.func)
+
+    def test_applied_marker_is_written_before_asterisk_is_touched(self):
+        """Under `restart` Asterisk re-execs and this call may not return. The config is
+        already on disk by then, so the marker must not be left stale."""
+        marker = self.func.index('"pcscf.applied"), "w"')
+        # Match the calls, not the mentions of them in the docstring above.
+        self.assertLess(marker, self.func.index('_asterisk_cli("core restart now")'))
+        self.assertLess(marker, self.func.index('_asterisk_cli("module reload res_pjsip.so")'))
+
+    def test_peer_initiated_teardown_is_reported_with_its_duration(self):
+        """Which side ended the tunnel, and after how long, is the whole story behind the
+        periodic outages — one carrier tears down on a ~24h timer regardless of rekeys."""
+        self.assertIn('swu_notify("tunnel_deleted_by_peer"', self.source)
+        self.assertIn("def seconds_since_connect", self.source)
+        self.assertIn("self._connected_at = time.time()", self.source)
