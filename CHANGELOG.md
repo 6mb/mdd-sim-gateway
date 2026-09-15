@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.9.5] - 2026-09-15
+
 ### Fixed
 
 - A browser with no microphone can place and answer calls again, and says what it is doing.
