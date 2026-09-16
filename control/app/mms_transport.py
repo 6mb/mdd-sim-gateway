@@ -11,11 +11,12 @@ does not resolve in public DNS. Two clients are provided:
 - HostHttp is a plain HTTP client from the host, for a carrier whose MMSC is reachable from
   wherever the host is (or a deployment that routes the MMS APN itself).
 
-Limits of the command channel: ModemManager accepts a command only when it ends with a final
-result it recognises, and AT+QISENDEX ends with "SEND OK". Every upload chunk therefore waits
-out the shortest command timeout (one second) and is verified afterwards with AT+QISEND's
-byte counters. Uploads run at roughly 100 bytes a second, so only small requests (a
-retrieval, an acknowledgement) are sent this way; downloads are unaffected.
+The AT commands travel one of two ways. Through ModemManager's command channel the modem
+stays fully shared, but ModemManager completes a command only on a final result it knows and
+AT+QISENDEX ends with "SEND OK", so every upload chunk waits out a command timeout: about 100
+bytes a second, enough for a retrieval or an acknowledgement and nothing more. When
+ModemManager is told to ignore one of the module's spare AT ports, the gateway uses that port
+directly with the prompt-driven binary send, which moves an MMS in about a second.
 """
 from __future__ import annotations
 
@@ -241,7 +242,29 @@ class HostHttp:
 
 
 class ModemCommand:
-    """One AT command through ModemManager's Modem.Command D-Bus method."""
+    """One AT command through ModemManager's Modem.Command D-Bus method.
+
+    Usable with the modem shared, but slow for uploads: see send_chunk().
+    """
+
+    name = "modemmanager"
+    CHUNK = 256              # the longest AT+QISENDEX payload the module accepted
+    # Each chunk costs a two-second command timeout; a WAP proxy drops a request that
+    # trickles in for minutes, so only small requests (retrievals, acknowledgements) fit.
+    UPLOAD_LIMIT = 4 * 1024
+    DATAFORMAT = "1,1"       # hex both ways: a D-Bus string cannot carry arbitrary bytes
+    VERIFY_EACH_CHUNK = True
+
+    def send_chunk(self, sid: int, chunk: bytes) -> None:
+        # Answered with "SEND OK", which ModemManager does not treat as a final result: the
+        # call times out after its one-second minimum. ModemManager declares the whole modem
+        # invalid after ten consecutive timeouts on a port -- a long upload did exactly
+        # that -- so the caller follows every chunk with a query that completes normally,
+        # which resets that count and confirms the bytes were taken.
+        self(f'AT+QISENDEX={sid},"{chunk.hex()}"', 1)
+
+    def close(self) -> None:
+        pass
 
     def __init__(self, modem_path: str, runner=subprocess.run):
         self.modem_path = modem_path
@@ -275,16 +298,137 @@ _QIRD_RE = re.compile(r'\+QIRD:\s*(\d+)\s*(?:\r?\n)?([0-9A-Fa-f]*)')
 _QISEND_RE = re.compile(r'\+QISEND:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)')
 
 
+class SerialAtChannel:
+    """AT commands on a modem port the gateway owns (ModemManager told to ignore it).
+
+    With the port to itself the gateway can use the module's prompt-driven binary send
+    (AT+QISEND=<id>,<len>, ">" then raw bytes, "SEND OK"): over 100 KB/s on a Quectel module,
+    against ~100 B/s through ModemManager.
+    """
+
+    name = "serial"
+    CHUNK = 1460             # AT+QISEND's maximum length per command
+    UPLOAD_LIMIT = None
+    DATAFORMAT = "0,1"       # raw send, hex receive: received bytes can never fake an "OK"
+    VERIFY_EACH_CHUNK = False
+    _FINAL = re.compile(r"(?:^|\r\n)(OK|ERROR|\+CME ERROR:[^\r]*|\+CMS ERROR:[^\r]*)\r\n")
+
+    def __init__(self, port: str, *, serial_factory=None, clock=time.monotonic):
+        self.port = port
+        self.clock = clock
+        self._factory = serial_factory
+        self._serial = None
+
+    def _open(self):
+        if self._serial is None:
+            if self._factory is None:
+                import serial  # pyserial; deferred so importing this module never needs it
+                self._serial = serial.Serial(self.port, 115200, timeout=0.01, exclusive=True)
+            else:
+                self._serial = self._factory(self.port)
+            self._exchange("ATE0", 3)
+        return self._serial
+
+    def _read_until(self, predicate, timeout: float) -> bytes:
+        port = self._serial
+        buffer = b""
+        deadline = self.clock() + timeout
+        while self.clock() < deadline:
+            buffer += port.read(4096)
+            if predicate(buffer):
+                break
+        return buffer
+
+    def _exchange(self, command: str, timeout: float) -> tuple[bool, str]:
+        port = self._serial
+        port.reset_input_buffer()
+        port.write(command.encode("ascii") + b"\r")
+        raw = self._read_until(lambda b: self._FINAL.search(b.decode("latin-1")), timeout)
+        text = raw.decode("latin-1")
+        match = self._FINAL.search(text)
+        if not match:
+            return False, "timed out"
+        body = text[:match.start(1)].strip()
+        return match.group(1) == "OK", body if match.group(1) == "OK" else match.group(1)
+
+    def __call__(self, command: str, timeout: int = 5) -> tuple[bool, str]:
+        try:
+            self._open()
+            return self._exchange(command, timeout)
+        except Exception as exc:  # noqa: BLE001 -- a vanished port is an ordinary failure
+            self.close()
+            return False, f"{self.port}: {exc}"
+
+    def send_chunk(self, sid: int, chunk: bytes) -> None:
+        try:
+            port = self._open()
+            port.reset_input_buffer()
+            port.write(f"AT+QISEND={sid},{len(chunk)}\r".encode("ascii"))
+            prompt = self._read_until(lambda b: b">" in b or b"ERROR" in b, 5)
+            if b">" not in prompt:
+                raise MmsTransportError("the modem refused to send on the MMSC connection")
+            port.write(chunk)
+            result = self._read_until(lambda b: b"SEND OK" in b or b"SEND FAIL" in b
+                                      or b"ERROR" in b, 20)
+        except MmsTransportError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.close()
+            raise MmsTransportError(f"{self.port}: {exc}") from None
+        if b"SEND OK" not in result:
+            raise MmsTransportError("the modem could not send on the MMSC connection; "
+                                    "it may have closed")
+
+    def close(self) -> None:
+        if self._serial is not None:
+            try:
+                self._serial.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._serial = None
+
+
+AT_PORT_ENV = "MDD_MMS_AT_PORT"
+
+
+def find_at_port(modem_path: str, runner=subprocess.run, environ=os.environ) -> str | None:
+    """An AT port of this modem that ModemManager ignores, i.e. one the gateway may own.
+
+    Set by a udev rule (ID_MM_PORT_IGNORE on the module's spare AT interface); the port must
+    still carry an AT port type so the diagnostics port, which is ignored too, is never used.
+    MDD_MMS_AT_PORT names the device explicitly instead.
+    """
+    explicit = str(environ.get(AT_PORT_ENV) or "").strip()
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+    try:
+        result = runner(["mmcli", "-m", modem_path, "--output-json"], capture_output=True,
+                        text=True, timeout=10, check=False)
+        ports = (json.loads(result.stdout or "{}").get("modem", {}).get("generic", {})
+                 .get("ports") or []) if not result.returncode else []
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    for entry in ports:
+        name, _, kind = str(entry).partition(" ")
+        if kind.strip() != "(ignored)" or not name.startswith("tty"):
+            continue
+        try:
+            udev = runner(["udevadm", "info", "-q", "property", "-n", f"/dev/{name}"],
+                          capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        properties = str(udev.stdout or "")
+        if re.search(r"^ID_MM_PORT_TYPE_AT_(PRIMARY|SECONDARY)=1$", properties, re.M):
+            return f"/dev/{name}"
+    return None
+
+
 class ModemSocketHttp:
     """MMSC HTTP through the modem's own PDP context on the MMS APN (Quectel QI* commands)."""
 
     name = "modem"
     CONNECT_ID = 11          # the highest socket id, well away from anything else using QI*
-    CHUNK = 256              # the longest AT+QISENDEX payload the module accepted
     READ = 1500
-    # Each chunk costs a two-second command timeout; a WAP proxy drops a request that
-    # trickles in for minutes, so only small requests (retrievals, acknowledgements) fit.
-    UPLOAD_LIMIT = 4 * 1024
 
     def __init__(self, command: ModemCommand, settings: dict, *, sleep=time.sleep,
                  clock=time.monotonic):
@@ -337,11 +481,12 @@ class ModemSocketHttp:
         proxy = parse_proxy(self.settings.get("proxy"))
         payload, host, port = build_request(method, url, body=body, headers=headers,
                                             via_proxy=bool(proxy))
-        if len(payload) > self.UPLOAD_LIMIT:
+        limit = self.at.UPLOAD_LIMIT
+        if limit is not None and len(payload) > limit:
             raise MmsTransportError(
                 f"a {len(payload) // 1024} KB request is too large for ModemManager's command "
-                f"channel (at most {self.UPLOAD_LIMIT // 1024} KB, about two bytes a second "
-                "per chunk); sending MMS over the modem needs a dedicated AT port",
+                f"channel (at most {limit // 1024} KB); sending MMS over the modem needs an AT "
+                "port the gateway owns -- see the MMS section of TROUBLESHOOTING",
                 retryable=False)
         if proxy:
             host, port = proxy
@@ -350,7 +495,7 @@ class ModemSocketHttp:
         sid = self.CONNECT_ID
         try:
             self.at(f"AT+QICLOSE={sid},1", 3)
-            self._require('AT+QICFG="dataformat",1,1')
+            self._require(f'AT+QICFG="dataformat",{self.at.DATAFORMAT}')
             self._require(f'AT+QIOPEN={cid},{sid},"TCP","{host}",{port},0,0', 10)
             self._wait_connected(sid, deadline)
             self._send(sid, payload, deadline)
@@ -363,6 +508,7 @@ class ModemSocketHttp:
             self.at(f"AT+QICLOSE={sid},1", 3)
             if activated:
                 self.at(f"AT+QIDEACT={cid}", 40)
+            self.at.close()
 
     def _wait_connected(self, sid: int, deadline: float) -> None:
         while True:
@@ -383,22 +529,23 @@ class ModemSocketHttp:
         return int(match.group(1)) if match else -1
 
     def _send(self, sid: int, payload: bytes, deadline: float) -> None:
-        for offset in range(0, len(payload), self.CHUNK):
-            chunk = payload[offset:offset + self.CHUNK]
-            # Answered with "SEND OK", which ModemManager does not treat as a final result:
-            # the call times out after its one-second minimum. ModemManager declares the whole
-            # modem invalid after ten consecutive timeouts on a port -- a 165 KB upload did
-            # exactly that -- so every chunk is followed by a query that completes normally,
-            # which both resets that count and confirms the bytes were taken.
-            self.at(f'AT+QISENDEX={sid},"{chunk.hex()}"', 1)
-            expected = offset + len(chunk)
-            sent = self._sent(sid)
-            if sent != expected:
-                raise MmsTransportError(
-                    f"the modem sent {max(sent, 0)} of {len(payload)} request bytes; "
-                    "the MMSC connection may have closed")
+        chunk_size = self.at.CHUNK
+        for offset in range(0, len(payload), chunk_size):
+            chunk = payload[offset:offset + chunk_size]
+            self.at.send_chunk(sid, chunk)
+            if self.at.VERIFY_EACH_CHUNK:
+                sent = self._sent(sid)
+                if sent != offset + len(chunk):
+                    raise MmsTransportError(
+                        f"the modem sent {max(sent, 0)} of {len(payload)} request bytes; "
+                        "the MMSC connection may have closed")
             if self.clock() > deadline:
                 raise MmsTransportError("timed out sending to the MMSC")
+        if not self.at.VERIFY_EACH_CHUNK:
+            sent = self._sent(sid)
+            if sent != len(payload):
+                raise MmsTransportError(
+                    f"the modem sent {max(sent, 0)} of {len(payload)} request bytes")
 
     def _receive(self, sid: int, deadline: float) -> HttpResponse:
         raw = bytearray()
@@ -437,9 +584,12 @@ def client_for(settings: dict, modem_path: str | None, *, runner=subprocess.run)
     if transport == "host":
         return HostHttp(settings)
     if modem_path:
-        client = ModemSocketHttp(ModemCommand(modem_path, runner), settings)
+        port = find_at_port(modem_path, runner)
+        channel = SerialAtChannel(port) if port else ModemCommand(modem_path, runner)
+        client = ModemSocketHttp(channel, settings)
         if transport == "modem" or client.supported():
             return client
+        channel.close()
     if transport == "modem":
         raise MmsTransportError("no modem holds this line's SIM", retryable=False)
     return HostHttp(settings)

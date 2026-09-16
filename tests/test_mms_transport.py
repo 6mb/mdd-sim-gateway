@@ -241,6 +241,86 @@ class ModemSocketTests(unittest.TestCase):
             t.client_for({**SETTINGS, "transport": "modem"}, None, runner=fake)
 
 
+class FakeSerialPort:
+    """A serial port in front of FakeQuectel's command handling, with QISEND's '>' prompt."""
+
+    def __init__(self, modem: "FakeQuectel"):
+        self.modem = modem
+        self.out = b""
+        self.pending = None
+        self.writes = []
+        self.closed = False
+
+    def reset_input_buffer(self):
+        self.out = b""
+
+    def read(self, size):
+        chunk, self.out = self.out[:size], self.out[size:]
+        return chunk
+
+    def write(self, data):
+        self.writes.append(data)
+        if self.pending is not None:
+            sid, length = self.pending
+            self.pending = None
+            self.modem.sent += data[:length]
+            if len(self.modem.sent) >= self.modem._expected_length() or \
+                    b"Content-Length" not in self.modem.sent:
+                self.modem.unread, self.modem.state = self.modem.reply, 4
+            self.out += b"\r\nSEND OK\r\n"
+            return
+        command = data.decode("ascii").rstrip("\r")
+        self.modem.commands.append(command)
+        match = re.fullmatch(r"AT\+QISEND=(\d+),(\d+)", command)
+        if match and match.group(2) != "0":
+            self.pending = (int(match.group(1)), int(match.group(2)))
+            self.out += b"\r\n> "
+            return
+        if command == "ATE0":
+            ok, text = True, ""
+        else:
+            ok, text = self.modem.handle(command, 5)
+        self.out += (f"\r\n{text}\r\n" if text else "").encode() + \
+            (b"\r\nOK\r\n" if ok else b"\r\nERROR\r\n")
+
+    def close(self):
+        self.closed = True
+
+
+class SerialChannelTests(unittest.TestCase):
+    def test_large_upload_uses_the_binary_prompt_send(self):
+        payload = bytes(range(256)) * 4
+        modem = FakeQuectel(http_reply(payload))
+        ports = []
+        channel = t.SerialAtChannel("/dev/ttyFAKE",
+                                    serial_factory=lambda _p: ports.append(FakeSerialPort(modem))
+                                    or ports[-1])
+        client = t.ModemSocketHttp(channel, SETTINGS, sleep=lambda _s: None)
+        body = b"\x00\xff" * 20_000           # 40 KB, binary, far over the command-channel cap
+        response = client.request("POST", "http://mmsc.example.test:8002/", body=body)
+        self.assertEqual(response.body, payload)
+        self.assertTrue(modem.sent.endswith(body))
+        self.assertIn('AT+QICFG="dataformat",0,1', modem.commands)
+        self.assertFalse(any(c.startswith("AT+QISENDEX") for c in modem.commands))
+        self.assertTrue(ports[0].closed, "the port is released after each exchange")
+
+    def test_port_discovery_takes_an_ignored_at_port_only(self):
+        def runner(args, **kwargs):
+            if args[:2] == ["mmcli", "-m"]:
+                return Result(json.dumps({"modem": {"generic": {"ports": [
+                    "cdc-wdm0 (qmi)", "ttyUSB0 (ignored)", "ttyUSB2 (at)", "ttyUSB3 (ignored)"]}}}))
+            if args[:2] == ["udevadm", "info"]:
+                typed = {"/dev/ttyUSB0": "ID_MM_PORT_TYPE_QCDM=1",
+                         "/dev/ttyUSB3": "ID_MM_PORT_TYPE_AT_SECONDARY=1\nID_MM_PORT_IGNORE=1"}
+                return Result(typed.get(args[-1], ""))
+            return Result(returncode=1)
+
+        self.assertEqual(t.find_at_port("/m/0", runner, environ={}), "/dev/ttyUSB3")
+        self.assertIsNone(t.find_at_port("/m/0", lambda *a, **k: Result(returncode=1), environ={}))
+        self.assertIsNone(t.find_at_port("/m/0", runner,
+                                         environ={t.AT_PORT_ENV: "/dev/does-not-exist"}))
+
+
 class FakeClient:
     def __init__(self, responses):
         self.responses = list(responses)
