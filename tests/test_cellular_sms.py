@@ -285,6 +285,18 @@ class StoragePolicyTests(unittest.TestCase):
         self.assertEqual(len(mm.deletes()), cellular_sms._DELETE_ATTEMPTS)
 
 
+class LegacyFingerprintTests(unittest.TestCase):
+    def test_inbound_record_carries_the_1_9_marker_fingerprint(self):
+        import hashlib
+        mm = FakeModemManager("CARD-A")
+        path = mm.add(7, sms_object(text="hello", timestamp="2026-09-12T09:00:00+08:00"))
+        record = scanner(mm).discover(LINE)[0]
+        expected = hashlib.sha256("\0".join(
+            ("card-a", path, "in", "+447700900123", "hello", "2026-09-12T09:00:00+08:00")
+        ).encode()).hexdigest()
+        self.assertEqual(record["legacy_fingerprint"], expected)
+
+
 class BinaryObjectTests(unittest.TestCase):
     def test_binary_payload_is_handed_to_ingest_and_then_removed(self):
         mm = FakeModemManager()

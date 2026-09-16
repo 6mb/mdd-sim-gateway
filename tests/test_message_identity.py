@@ -231,5 +231,95 @@ class TimeZoneIndependenceTests(unittest.TestCase):
             lambda: sms_pdu.deliver_timestamp("4404812143000462304151906280")), {1773493766})
 
 
+class MigrationSafetyTests(unittest.TestCase):
+    def test_a_step_interrupted_midway_rolls_back_and_runs_again(self):
+        with TempStore() as ctx:
+            store.init()
+            store.ingest_message("1", "in", "INFO", "x", transport="vowifi", sent_ts=1_000)
+            with sqlite3.connect(ctx.db) as db:
+                rows = db.execute("SELECT instance,fingerprint,content_hash,transport,ts,"
+                                  "message_id,created_ts FROM message_identities").fetchall()
+                db.executescript("""
+                    DROP TABLE message_identities;
+                    CREATE TABLE message_identities (instance TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL, content_hash TEXT NOT NULL,
+                        transport TEXT NOT NULL, ts INTEGER NOT NULL, message_id INTEGER,
+                        created_ts INTEGER NOT NULL, PRIMARY KEY(instance, fingerprint));
+                    PRAGMA user_version=3;
+                """)
+                db.executemany("INSERT INTO message_identities VALUES(?,?,?,?,?,?,?)", rows)
+            with patch.object(store, "identity_scope", side_effect=RuntimeError("power cut")):
+                with self.assertRaises(RuntimeError):
+                    store.init()
+            with sqlite3.connect(ctx.db) as db:
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+                names = {r[0] for r in db.execute("SELECT name FROM sqlite_master")}
+                self.assertNotIn("message_identities_old", names)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM message_identities")
+                                 .fetchone()[0], 1)
+            store.init()
+            with sqlite3.connect(ctx.db) as db:
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0],
+                                 len(store._MIGRATIONS))
+
+    def test_start_after_running_an_older_version_repairs_what_it_left(self):
+        with TempStore() as ctx:
+            store.init()
+            mms = store.create_outgoing_mms("1", "+447700900123", to_addrs=["+447700900123"],
+                                            subject="", body="pic", transaction_id="T")
+            store.save_mms_content(mms["id"], [{"content_type": "image/png", "data": b"x"}])
+            with sqlite3.connect(ctx.db) as db:
+                # What 1.9.5 does on this database: recreate its tables, write rows without
+                # identities, delete a message without its MMS state.
+                db.executescript("""
+                    CREATE TABLE message_imports (fingerprint TEXT PRIMARY KEY,
+                        instance TEXT NOT NULL, imported_ts INTEGER NOT NULL);
+                    INSERT INTO message_imports VALUES ('oldfp','1',1);
+                    CREATE TABLE local_modem_sms (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        instance TEXT NOT NULL, iccid TEXT NOT NULL,
+                        daemon_epoch TEXT NOT NULL DEFAULT '', message_id INTEGER,
+                        modem_path TEXT, sms_path TEXT, content_hash TEXT NOT NULL,
+                        created_ts INTEGER NOT NULL, bound_ts INTEGER,
+                        cancelled INTEGER NOT NULL DEFAULT 0);
+                    INSERT INTO messages(instance,direction,peer,body,status,ts,transport)
+                        VALUES ('1','in','INFO','written by 1.9.5','ok',7000,'cellular');
+                """)
+                db.execute("DELETE FROM messages WHERE id=?", (mms["id"],))
+            store.init()
+            self.assertIsNone(store.ingest_message("1", "in", "INFO", "written by 1.9.5",
+                                                   transport="cellular", sent_ts=7000))
+            with sqlite3.connect(ctx.db) as db:
+                names = {r[0] for r in db.execute("SELECT name FROM sqlite_master")}
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM mms").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT fingerprint FROM legacy_message_imports")
+                                 .fetchall(), [("oldfp",)])
+            self.assertNotIn("local_modem_sms", names)
+            self.assertNotIn("message_imports", names)
+            self.assertFalse((Path(store.mms_dir()) / str(mms["id"])).exists())
+
+    def test_message_deleted_under_the_old_import_marker_stays_deleted(self):
+        with TempStore() as ctx:
+            with sqlite3.connect(ctx.db) as db:
+                db.executescript("""
+                    CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        instance TEXT NOT NULL, direction TEXT NOT NULL, peer TEXT NOT NULL,
+                        body TEXT NOT NULL, status TEXT DEFAULT 'ok', ts INTEGER NOT NULL,
+                        error TEXT, transport TEXT DEFAULT 'vowifi');
+                    CREATE TABLE message_imports (fingerprint TEXT PRIMARY KEY,
+                        instance TEXT NOT NULL, imported_ts INTEGER NOT NULL);
+                    INSERT INTO message_imports VALUES ('deleted-by-user','1',1);
+                """)
+            store.init()
+            self.assertIsNone(store.ingest_message(
+                "1", "in", "INFO", "deleted long ago", transport="cellular", sent_ts=4_000,
+                legacy_fingerprint="deleted-by-user"))
+            self.assertIsNone(store.ingest_message(
+                "1", "in", "INFO", "deleted long ago", transport="cellular", sent_ts=4_000))
+            self.assertIsNotNone(store.ingest_message(
+                "1", "in", "INFO", "new", transport="cellular", sent_ts=4_000,
+                legacy_fingerprint="unknown"))
+            self.assertEqual(len(store.list_threads("1")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

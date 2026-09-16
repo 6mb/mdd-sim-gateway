@@ -567,6 +567,7 @@ class Scanner:
             "pdu_type": str(props.get("pdu-type") or "").lower(),
             "storage": str(props.get("storage") or "").lower(),
             "ts": _timestamp(timestamp),
+            "timestamp_raw": timestamp,
             "signature": hashlib.sha256("\0".join((
                 str(content.get("number") or ""), str(content.get("text") or ""),
                 str(content.get("data") or ""), str(props.get("pdu-type") or ""),
@@ -650,6 +651,8 @@ class Scanner:
         # Modules that expose no ICCID through ModemManager are matched on IMSI instead.
         by_imsi = {_normalize_imsi(item.get("imsi")): str(item.get("id")) for item in instances
                    if item.get("imsi") and item.get("iccid") and item.get("id") is not None}
+        line_iccids = {str(item.get("id")): _normalize_iccid(item.get("iccid"))
+                       for item in instances if item.get("id") is not None}
         found = []
         live_keys = set()
         for modem_path, modem_iccid, modem_imsi in self._topology:
@@ -701,6 +704,11 @@ class Scanner:
                           "body": detail["body"], "ts": detail["ts"], "transport": "cellular",
                           "modem_path": modem_path, "sms_path": sms_path,
                           "storage": detail["storage"], "data": data}
+                if direction == "in" and not data:
+                    # The marker 1.9.x recorded for this object; see ingest_message.
+                    record["legacy_fingerprint"] = hashlib.sha256("\0".join((
+                        line_iccids.get(iid) or modem_iccid, sms_path, "in", detail["peer"],
+                        detail["body"], detail["timestamp_raw"])).encode()).hexdigest()
                 if ingest is None:
                     found.append(record)
                     continue

@@ -301,17 +301,40 @@ def init():
             _sweep_binary_messages(c)
             _migrate(c)
             _identity_indexes(c)
+            orphans = _reconcile(c)
+        for mid in orphans:
+            shutil.rmtree(_mms_message_dir(mid), ignore_errors=True)
 
 
 # Schema steps that must run exactly once, in order. `PRAGMA user_version` records the last
 # one applied, so a step may rewrite data -- which the idempotent ALTER-and-ignore migrations
 # above cannot safely do, since they run on every start.
 def _migrate(c) -> None:
-    version = int(c.execute("PRAGMA user_version").fetchone()[0])
+    """Apply each pending step in its own transaction, together with its version bump.
+
+    SQLite DDL is transactional, so a step interrupted by a crash or a power cut rolls back
+    whole and runs again on the next start. Steps must therefore never call executescript(),
+    which commits whatever is pending before it runs; _script() executes statement by statement.
+    """
     for target, step in enumerate(_MIGRATIONS, start=1):
-        if version < target:
+        c.commit()
+        if int(c.execute("PRAGMA user_version").fetchone()[0]) >= target:
+            continue
+        c.execute("BEGIN IMMEDIATE")
+        try:
             step(c)
             c.execute(f"PRAGMA user_version={target}")
+            c.execute("COMMIT")
+        except BaseException:
+            c.execute("ROLLBACK")
+            raise
+
+
+def _script(c, sql: str) -> None:
+    """Run several statements inside the caller's transaction (unlike executescript)."""
+    for statement in sql.split(";"):
+        if statement.strip():
+            c.execute(statement)
 
 
 def _migration_message_identity(c) -> None:
@@ -359,7 +382,15 @@ def _migration_message_identity(c) -> None:
         seen.append((ts, transport))
         _record_identity(c, str(row["instance"]), int(row["id"]), row["direction"],
                          row["peer"], row["body"], ts, transport, row["kind"] or "sms")
-    c.execute("DROP TABLE IF EXISTS message_imports")
+    # The old markers cannot identify a message any more, but they still record which modem
+    # objects were imported -- including ones the user has since deleted. They are kept, under
+    # a name no version writes to, so the scanner can recognise such an object by its old
+    # fingerprint instead of importing it again (see ingest_message's legacy_fingerprint).
+    exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                       "AND name='message_imports'").fetchone()
+    if exists:
+        c.execute("DROP TABLE IF EXISTS legacy_message_imports")
+        c.execute("ALTER TABLE message_imports RENAME TO legacy_message_imports")
 
 
 def _migration_modem_object_on_message(c) -> None:
@@ -398,7 +429,7 @@ def _migration_mms(c) -> None:
     """MMS: one `messages` row per MMS (kind='mms') so it sits in its conversation, plus its
     retrieval/sending state and its parts. Part content lives in files under MMS_DIR; a
     database row per image would bloat every backup of the message history."""
-    c.executescript("""
+    _script(c, """
         CREATE TABLE IF NOT EXISTS mms (
             message_id INTEGER PRIMARY KEY,
             instance TEXT NOT NULL,
@@ -457,7 +488,7 @@ def _migration_identity_scope(c) -> None:
     c.execute("ALTER TABLE message_identities RENAME TO message_identities_old")
     c.execute("DROP INDEX IF EXISTS idx_message_identities_content")
     c.execute("DROP INDEX IF EXISTS idx_message_identities_message")
-    c.executescript("""
+    _script(c, """
         CREATE TABLE message_identities (
             scope TEXT NOT NULL,
             instance TEXT NOT NULL,
@@ -859,6 +890,52 @@ def _identity_scopes(instance: str) -> tuple[str, str]:
     return identity_scope(instance), f"line:{instance}"
 
 
+def _legacy_imported(c, instance: str, fingerprint: str) -> bool:
+    if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                     "AND name='legacy_message_imports'").fetchone():
+        return False
+    return bool(c.execute("SELECT 1 FROM legacy_message_imports WHERE fingerprint=? "
+                          "AND instance=?", (str(fingerprint), str(instance))).fetchone())
+
+
+def _reconcile(c) -> list[int]:
+    """Repair what an older version may have left after a rollback and a new upgrade.
+
+    Runs on every start and is idempotent. An older version recreates the tables this one
+    retired and writes messages without identities; it also deletes messages without their
+    MMS rows and files. None of that can be expressed as a one-time migration, because the
+    database version already says it is current.
+    """
+    missing = c.execute(
+        "SELECT m.id,m.instance,m.direction,m.peer,m.body,m.ts,m.transport,m.kind "
+        "FROM messages m WHERE NOT EXISTS "
+        "(SELECT 1 FROM message_identities i WHERE i.message_id=m.id)").fetchall()
+    for row in missing:
+        if (row["kind"] or "sms") != "sms":
+            continue
+        _record_identity(c, str(row["instance"]), int(row["id"]), row["direction"], row["peer"],
+                         row["body"], int(row["ts"] or 0), row["transport"] or "vowifi")
+    c.execute("UPDATE messages SET received_ts=ts WHERE received_ts IS NULL")
+    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                 "AND name='local_modem_sms'").fetchone():
+        _migration_modem_object_on_message(c)
+    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                 "AND name='message_imports'").fetchone():
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                     "AND name='legacy_message_imports'").fetchone():
+            c.execute("INSERT OR IGNORE INTO legacy_message_imports SELECT * FROM message_imports")
+            c.execute("DROP TABLE message_imports")
+        else:
+            c.execute("ALTER TABLE message_imports RENAME TO legacy_message_imports")
+    orphans = [int(r[0]) for r in c.execute(
+        "SELECT message_id FROM mms WHERE message_id NOT IN (SELECT id FROM messages)")]
+    if orphans:
+        marks = _placeholders(len(orphans))
+        c.execute(f"DELETE FROM mms_parts WHERE message_id IN ({marks})", orphans)
+        c.execute(f"DELETE FROM mms WHERE message_id IN ({marks})", orphans)
+    return orphans
+
+
 def _record_identity(c, instance: str, message_id: int, direction: str, peer, body, ts: int,
                      transport: str, kind: str = "sms") -> None:
     c.execute(
@@ -917,7 +994,7 @@ def ingest_message(instance: str, direction: str, peer: str, body: str, *,
                    transport: str, sent_ts: int | None = None,
                    received_ts: int | None = None, kind: str = "sms",
                    status: str = "ok", identity: str | None = None,
-                   on_insert=None) -> dict | None:
+                   on_insert=None, legacy_fingerprint: str | None = None) -> dict | None:
     """Store a message delivered from outside unless this line already has it.
 
     Returns the stored record, or None when it is a copy of a message already stored -- or
@@ -953,6 +1030,14 @@ def ingest_message(instance: str, direction: str, peer: str, body: str, *,
     with _lock, _conn() as c:
         if c.execute("SELECT 1 FROM message_identities WHERE scope IN (?,?) AND fingerprint=?",
                      (scope, line_scope, fingerprint)).fetchone():
+            return None
+        if legacy_fingerprint and _legacy_imported(c, instance, legacy_fingerprint):
+            # Imported by a version before message identities, and not in the history now:
+            # the user deleted it. Remember it under the current identity and keep it deleted.
+            c.execute(
+                "INSERT OR IGNORE INTO message_identities(scope,instance,fingerprint,"
+                "content_hash,transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?,?)",
+                (scope, instance, fingerprint, content, str(transport), identity_ts, None, now))
             return None
         window = _CROSS_TRANSPORT_WINDOW
         twin = c.execute(

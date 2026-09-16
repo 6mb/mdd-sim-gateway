@@ -2037,7 +2037,8 @@ async def cellular_sms_poller():
                                       transport="cellular", sent_ts=record["ts"] or None)
         return store.ingest_message(
             record["instance"], record["direction"], record["peer"], record["body"],
-            transport="cellular", sent_ts=record["ts"] or None)
+            transport="cellular", sent_ts=record["ts"] or None,
+            legacy_fingerprint=record.get("legacy_fingerprint"))
 
     while True:
         try:
