@@ -196,3 +196,26 @@ class PcscfApplyModeTests(unittest.TestCase):
         self.assertIn('swu_notify("tunnel_deleted_by_peer"', self.source)
         self.assertIn("def seconds_since_connect", self.source)
         self.assertIn("self._connected_at = time.time()", self.source)
+
+
+class RestartBaselineTests(unittest.IsolatedAsyncioTestCase):
+    """A bounce must be recorded even when it is the first Docker event the manager sees."""
+
+    async def test_bounce_after_manager_restart_is_recorded(self):
+        from control.app import main
+        hub = main.Hub()
+        # Manager just started; the status poll sees line 5 running with no bounces yet.
+        hub.seed_restart_baseline("5", {"running": True, "restart_count": 0})
+        with patch.object(main.engine, "last_engine_exit",
+                          return_value={"disposition": "signal"}), \
+                patch.object(main.engine, "record_lifecycle") as record:
+            await hub._note_unrequested_restart("5", {"running": True, "restart_count": 1})
+        record.assert_called_once_with("5", "engine_restarted", reason_code="engine_signal")
+
+    async def test_seeding_never_overwrites_an_existing_baseline(self):
+        from control.app import main
+        hub = main.Hub()
+        hub.seed_restart_baseline("7", {"running": True, "restart_count": 0})
+        # A later poll after the bounce must not swallow it by moving the baseline.
+        hub.seed_restart_baseline("7", {"running": True, "restart_count": 1})
+        self.assertEqual(hub._restart_counts["7"], 0)

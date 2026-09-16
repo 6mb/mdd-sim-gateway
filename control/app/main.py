@@ -549,6 +549,17 @@ class Hub:
             await self._note_unrequested_restart(str(iid), runtime)
         self.status_wakeup.set()
 
+    def seed_restart_baseline(self, iid: str, runtime: dict) -> None:
+        """Record the first RestartCount seen for a running line.
+
+        The baseline used to be set only from Docker start events, so after the manager itself
+        restarted, the first bounce of each line looked like a first sighting and was dropped —
+        exactly what happened to line 5's 09-17 crash. The status poll sees every line within
+        seconds of startup, so seed from there; only a missing baseline is filled in.
+        """
+        if runtime.get("running") and iid not in self._restart_counts:
+            self._restart_counts[iid] = int(runtime.get("restart_count") or 0)
+
     async def _note_unrequested_restart(self, iid: str, runtime: dict) -> None:
         """Record engine bounces that Docker's restart policy performed on its own.
 
@@ -1952,6 +1963,7 @@ async def _poll_instance_status(inst: dict) -> None:
         # One inspect supplies both running state and bridge IP to the whole sample. Previously
         # ami_for(), compute() and the grace-path each queried Docker independently.
         runtime = await hub.runtime.get(iid)
+        hub.seed_restart_baseline(iid, runtime)
         # A disabled line is authoritative user intent. Automatic recovery must never
         # resurrect a stale container left behind by an earlier retry or process restart;
         # doing so can retain the SIM/PCSC channel and disrupt another active line.
