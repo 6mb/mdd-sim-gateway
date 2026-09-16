@@ -1897,9 +1897,8 @@ async def cellular_sms_poller():
                 scanner.discover, list((conf.get("instances") or {}).values()))
             for item in discovered:
                 rec = await asyncio.to_thread(
-                    store.add_imported_message, item["fingerprint"], item["instance"],
-                    item["direction"], item["peer"], item["body"], item["ts"],
-                    item["transport"])
+                    store.ingest_message, item["instance"], item["direction"], item["peer"],
+                    item["body"], transport=item["transport"], sent_ts=item["ts"] or None)
                 if not rec:
                     continue
                 await hub.broadcast({"type": "sms", "instance": rec["instance"],

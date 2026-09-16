@@ -7,6 +7,7 @@ layer by the caller (main.py).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -63,11 +64,25 @@ def init():
                     ts INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_msg_inst_peer ON messages(instance, peer, ts);
-                CREATE TABLE IF NOT EXISTS message_imports (
-                    fingerprint TEXT PRIMARY KEY,
+                -- The identity of every message ever stored, kept when the message itself is
+                -- deleted: a text the modem still holds, or a carrier re-delivery, must not
+                -- bring back what the user removed. `fingerprint` is exact (network timestamp
+                -- included); `content_hash` without the timestamp lets a copy of the same text
+                -- arriving over the other transport be recognised within a short window.
+                CREATE TABLE IF NOT EXISTS message_identities (
                     instance TEXT NOT NULL,
-                    imported_ts INTEGER NOT NULL
+                    fingerprint TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    transport TEXT NOT NULL,
+                    ts INTEGER NOT NULL,
+                    message_id INTEGER,
+                    created_ts INTEGER NOT NULL,
+                    PRIMARY KEY(instance, fingerprint)
                 );
+                CREATE INDEX IF NOT EXISTS idx_message_identities_content
+                    ON message_identities(instance, content_hash, ts);
+                CREATE INDEX IF NOT EXISTS idx_message_identities_message
+                    ON message_identities(message_id);
                 CREATE TABLE IF NOT EXISTS local_modem_sms (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     instance TEXT NOT NULL,
@@ -324,6 +339,69 @@ def init():
             except Exception:
                 pass
             _sweep_binary_messages(c)
+            _migrate(c)
+
+
+# Schema steps that must run exactly once, in order. `PRAGMA user_version` records the last
+# one applied, so a step may rewrite data -- which the idempotent ALTER-and-ignore migrations
+# above cannot safely do, since they run on every start.
+def _migrate(c) -> None:
+    version = int(c.execute("PRAGMA user_version").fetchone()[0])
+    for target, step in enumerate(_MIGRATIONS, start=1):
+        if version < target:
+            step(c)
+            c.execute(f"PRAGMA user_version={target}")
+
+
+def _migration_message_identity(c) -> None:
+    """Give every message a transport-independent identity and fold existing duplicates.
+
+    Imports used to be keyed on a fingerprint over the ModemManager object path. Those paths
+    are renumbered whenever ModemManager restarts, so a message still held by the modem was
+    imported again under its new path, and nothing tied a text delivered over VoWiFi to the
+    copy of the same text the modem received from the same SIM. The old markers can never
+    match the new identity and are dropped; the new identity is backfilled from the stored
+    rows, which is what keeps a message the modem still holds from importing a second time
+    on the first poll after the upgrade.
+    """
+    for statement in (
+            "ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'sms'",
+            "ALTER TABLE messages ADD COLUMN sent_ts INTEGER",
+            "ALTER TABLE messages ADD COLUMN received_ts INTEGER"):
+        try:
+            c.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+    c.execute("UPDATE messages SET received_ts=ts WHERE received_ts IS NULL")
+    # 1.9.3 stored mmcli's placeholder for an unreadable body as the text itself. Those rows
+    # are an unassembled multi-part text (imported again once complete) or an MMS
+    # notification (filed from VoWiFi, retrieved as MMS from now on) -- never a message.
+    c.execute("DELETE FROM messages WHERE transport='cellular' AND direction='in' "
+              "AND TRIM(body)='--'")
+    rows = c.execute("SELECT id,instance,direction,peer,body,ts,transport,kind FROM messages "
+                     "ORDER BY id").fetchall()
+    kept: dict[tuple, list[tuple[int, str]]] = {}
+    for row in rows:
+        content = message_content_hash(row["direction"], row["peer"], row["body"],
+                                       row["kind"] or "sms")
+        key = (str(row["instance"]), content)
+        ts, transport = int(row["ts"] or 0), str(row["transport"] or "vowifi")
+        seen = kept.setdefault(key, [])
+        # Only inbound copies are folded. Two identical outgoing texts are two sends the user
+        # paid for, however close together.
+        duplicate = row["direction"] == "in" and any(
+            abs(ts - other_ts) <= _duplicate_window(transport, other_transport)
+            for other_ts, other_transport in seen)
+        if duplicate:
+            c.execute("DELETE FROM messages WHERE id=?", (int(row["id"]),))
+            continue
+        seen.append((ts, transport))
+        _record_identity(c, str(row["instance"]), int(row["id"]), row["direction"],
+                         row["peer"], row["body"], ts, transport, row["kind"] or "sms")
+    c.execute("DROP TABLE IF EXISTS message_imports")
+
+
+_MIGRATIONS = (_migration_message_identity,)
 
 
 def _sweep_binary_messages(c) -> int:
@@ -599,50 +677,152 @@ def prune_late_sms_groups(window: int = SEGMENT_LATE_WINDOW, now: int | None = N
                          (cutoff,)).rowcount
 
 
+# A copy of one text reaching a line over both transports carries the same network timestamp
+# when both expose it, and a receipt time a few seconds apart when one of them does not.
+_CROSS_TRANSPORT_WINDOW = 180
+# A network timestamp this far ahead of receipt is a wrong SMSC clock, not a real time.
+_SENT_TS_FUTURE_SLACK = 24 * 3600
+
+
+def _duplicate_window(transport: str, other: str) -> int:
+    return _CROSS_TRANSPORT_WINDOW if transport != other else 0
+
+
+def _plausible_sent_ts(sent_ts, received_ts: int) -> int | None:
+    try:
+        value = int(sent_ts or 0)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or value > received_ts + _SENT_TS_FUTURE_SLACK:
+        return None
+    return value
+
+
+def normalize_peer(peer) -> str:
+    """The comparison form of an address: one number written two ways must compare equal.
+
+    A carrier may present the same sender as +447700900123 over IMS and 07700900123 on the
+    modem. Comparing the trailing nine digits of a number covers national and international
+    forms without a numbering-plan table; an alphanumeric sender compares case-insensitively.
+    """
+    text = str(peer or "").strip()
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits and len(digits) >= 8 and all(ch.isdigit() or ch in "+-() ." for ch in text):
+        return digits[-9:]
+    return text.casefold()
+
+
+def message_content_hash(direction: str, peer, body, kind: str = "sms") -> str:
+    raw = "\0".join((str(kind or "sms"), str(direction), normalize_peer(peer), str(body or "")))
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def message_fingerprint(direction: str, peer, body, ts: int, kind: str = "sms") -> str:
+    raw = "\0".join(("v2", message_content_hash(direction, peer, body, kind), str(int(ts))))
+    return hashlib.sha256(raw.encode("ascii")).hexdigest()
+
+
+def _record_identity(c, instance: str, message_id: int, direction: str, peer, body, ts: int,
+                     transport: str, kind: str = "sms") -> None:
+    c.execute(
+        "INSERT OR IGNORE INTO message_identities(instance,fingerprint,content_hash,transport,"
+        "ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?)",
+        (instance, message_fingerprint(direction, peer, body, ts, kind),
+         message_content_hash(direction, peer, body, kind), str(transport or "vowifi"),
+         int(ts), int(message_id), int(time.time())))
+
+
+def _insert_message(c, instance: str, direction: str, peer: str, body: str, *, status: str,
+                    transport: str, ts: int, received_ts: int, sent_ts: int | None = None,
+                    kind: str = "sms", identity_ts: int | None = None) -> dict:
+    cur = c.execute(
+        "INSERT INTO messages(instance,direction,peer,body,status,ts,transport,kind,sent_ts,"
+        "received_ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (instance, direction, peer, body, status, int(ts), transport, kind, sent_ts,
+         int(received_ts)))
+    mid = int(cur.lastrowid)
+    _record_identity(c, instance, mid, direction, peer, body,
+                     ts if identity_ts is None else identity_ts, transport, kind)
+    return {"id": mid, "instance": instance, "direction": direction, "peer": peer,
+            "body": body, "status": status, "error": None, "ts": int(ts),
+            "transport": transport, "kind": kind, "sent_ts": sent_ts,
+            "received_ts": int(received_ts)}
+
+
 def set_message_body(mid: int, body: str) -> dict | None:
     """Replace a stored message's text and return the record as it now reads."""
     with _lock, _conn() as c:
         c.execute("UPDATE messages SET body=? WHERE id=?", (body, int(mid)))
         row = c.execute(
-            "SELECT id,instance,direction,peer,body,status,error,ts,transport "
+            "SELECT id,instance,direction,peer,body,status,error,ts,transport,kind "
             "FROM messages WHERE id=?", (int(mid),)).fetchone()
+        if row:
+            # The text grew, so its identity did too; the identity of the partial text stays
+            # recorded, which keeps a late re-delivery of the partial form from reappearing.
+            _record_identity(c, str(row["instance"]), int(row["id"]), row["direction"],
+                             row["peer"], body, int(row["ts"]), row["transport"] or "vowifi",
+                             row["kind"] or "sms")
     return dict(row) if row else None
 
 
 def add_message(instance: str, direction: str, peer: str, body: str, status: str = "ok",
                 transport: str = "vowifi", ts: int | None = None) -> dict:
+    """Store one message unconditionally (a send the user made, or an already-deduplicated
+    delivery). Its identity is still recorded so a later copy of it is recognised."""
     ts = int(ts or time.time())
     with _lock, _conn() as c:
-        cur = c.execute(
-            "INSERT INTO messages(instance,direction,peer,body,status,ts,transport) VALUES(?,?,?,?,?,?,?)",
-            (str(instance), direction, peer, body, status, ts, transport),
-        )
-        mid = cur.lastrowid
-    return {"id": mid, "instance": str(instance), "direction": direction,
-            "peer": peer, "body": body, "status": status, "error": None, "ts": ts,
-            "transport": transport}
+        return _insert_message(c, str(instance), direction, peer, body, status=status,
+                               transport=transport, ts=ts, received_ts=ts)
 
 
-def add_imported_message(fingerprint: str, instance: str, direction: str, peer: str,
-                         body: str, ts: int, transport: str = "cellular") -> dict | None:
-    """Atomically import one external message once. The marker survives UI deletion so an
-    old SMS still retained by the modem is not resurrected on every polling cycle."""
+def ingest_message(instance: str, direction: str, peer: str, body: str, *,
+                   transport: str, sent_ts: int | None = None,
+                   received_ts: int | None = None, kind: str = "sms",
+                   status: str = "ok") -> dict | None:
+    """Store a message delivered from outside unless this line already has it.
+
+    Returns the stored record, or None when it is a copy of a message already stored -- or
+    stored once and since deleted. Two tests, atomically with the insert:
+      - the exact identity (line, direction, sender, text, network timestamp) was seen before:
+        a carrier re-delivery, or a modem object read again after ModemManager restarted;
+      - the same text from the same sender reached this line over the other transport within
+        a short window: the SIM is registered both over VoWiFi and on the modem, and the
+        network delivered to both.
+    `sent_ts` is the network's timestamp (TP-SCTS) when the transport exposes one; it becomes
+    the displayed time, while `received_ts` stays the local receipt time.
+    """
+    instance = str(instance)
+    now = int(time.time())
+    received_ts = int(received_ts or now)
+    network_ts = _plausible_sent_ts(sent_ts, received_ts)
+    ts = network_ts or received_ts
+    # An outgoing object read back from a modem or SIM normally carries no timestamp at all,
+    # and its first-seen time changes on every read. Its identity is then its content alone:
+    # two identical texts to one recipient that both lack a timestamp are indistinguishable.
+    identity_ts = network_ts or (received_ts if direction == "in" else 0)
+    fingerprint = message_fingerprint(direction, peer, body, identity_ts, kind)
+    content = message_content_hash(direction, peer, body, kind)
     with _lock, _conn() as c:
-        marker = c.execute(
-            "INSERT OR IGNORE INTO message_imports(fingerprint,instance,imported_ts) VALUES(?,?,?)",
-            (fingerprint, str(instance), int(time.time())),
-        )
-        if marker.rowcount == 0:
+        if c.execute("SELECT 1 FROM message_identities WHERE instance=? AND fingerprint=?",
+                     (instance, fingerprint)).fetchone():
             return None
-        cur = c.execute(
-            "INSERT INTO messages(instance,direction,peer,body,status,ts,transport) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (str(instance), direction, peer, body, "ok", int(ts), transport),
-        )
-        mid = cur.lastrowid
-    return {"id": mid, "instance": str(instance), "direction": direction,
-            "peer": peer, "body": body, "status": "ok", "error": None,
-            "ts": int(ts), "transport": transport}
+        window = _CROSS_TRANSPORT_WINDOW
+        twin = c.execute(
+            "SELECT message_id FROM message_identities WHERE instance=? AND content_hash=? "
+            "AND transport<>? AND ts BETWEEN ? AND ? LIMIT 1",
+            (instance, content, str(transport), identity_ts - window,
+             identity_ts + window)).fetchone() if identity_ts else None
+        if twin:
+            # Remember this copy's exact identity too, so its next re-delivery is an exact hit.
+            c.execute(
+                "INSERT OR IGNORE INTO message_identities(instance,fingerprint,content_hash,"
+                "transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?)",
+                (instance, fingerprint, content, str(transport), identity_ts,
+                 twin["message_id"], now))
+            return None
+        return _insert_message(c, instance, direction, peer, body, status=status,
+                               transport=transport, ts=ts, received_ts=received_ts,
+                               sent_ts=network_ts, kind=kind, identity_ts=identity_ts)
 
 
 ALLOWANCE_FIELDS = ("balance", "valid_until", "sms_remaining", "data_remaining",
@@ -960,8 +1140,11 @@ def allowance_query_replies(instance: str, recipient: str, started_ts: int,
     """Read only replies belonging to an explicit, recent query attempt."""
     with _lock, _conn() as c:
         rows = c.execute(
+            # Receipt time, not the displayed network timestamp: an SMSC clock a few seconds
+            # behind ours must not place the carrier's answer before the query that asked.
             "SELECT id,peer,body,ts FROM messages WHERE instance=? AND direction='in' "
-            "AND peer=? AND ts>=? AND ts<=? ORDER BY ts,id",
+            "AND peer=? AND COALESCE(received_ts,ts)>=? AND COALESCE(received_ts,ts)<=? "
+            "ORDER BY ts,id",
             (str(instance), str(recipient), int(started_ts), int(until_ts)),
         ).fetchall()
     return [dict(row) for row in rows]

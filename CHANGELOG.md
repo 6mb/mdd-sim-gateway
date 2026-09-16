@@ -4,6 +4,18 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- An SMS no longer appears twice. A text still held by the modem was imported again every time
+  ModemManager restarted, because the import marker was tied to the modem's object number, which
+  restarts from zero with the daemon; and a SIM registered both over VoWiFi and on its modem is
+  often sent the same text over both, which showed as two identical messages. Every message now
+  has an identity that does not depend on where it came from -- sender, text and the network's
+  own timestamp -- and a copy arriving over the other transport within three minutes is
+  recognised as the same message. Duplicates already in the history are folded once on upgrade,
+  together with the `--` placeholder rows 1.9.3 stored for an unreadable body. A message you
+  delete stays deleted even if the modem still holds it.
+
 ## [1.9.5] - 2026-09-15
 
 ### Fixed
