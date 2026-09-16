@@ -5356,6 +5356,9 @@ _MMS_SETTING_KEYS = ("enabled", "auto_download", "transport", "apn", "mmsc", "pr
 def _mms_settings_view(inst: dict) -> dict:
     effective = mms_transport.resolve_settings(inst)
     effective.pop("password", None)
+    if effective.get("detected"):
+        effective["detected"] = {k: v for k, v in effective["detected"].items()
+                                 if k != "password"}
     own = dict(inst.get("mms") or {})
     own["password_set"] = bool(own.pop("password", ""))
     return {"effective": effective, "line": own}

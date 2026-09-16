@@ -6,6 +6,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- The Messages page shows MMS: pictures inline, audio and video players, other attachments
+  as downloads, and a Download/Retry button for an MMS that is not downloaded yet. Attaching
+  files to a message sends it as MMS; pictures are scaled down in the browser to fit the line's
+  size limit. An "MMS settings" dialog shows the detected carrier settings and lets each line
+  override them or turn auto-download off.
 - MMS can be sent: text, pictures, audio, video or contact cards to one or several
   recipients, with a delivery report shown on the message when the carrier sends one. The
   size limit is per line (300 KB by default). Over the modem an upload is slow -- roughly
