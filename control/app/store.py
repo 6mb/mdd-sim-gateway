@@ -1407,7 +1407,10 @@ def schedule_mms_download(instance: str, message_id: int, now: int | None = None
     """Queue an inbound MMS for retrieval now (a manual download or retry)."""
     now = int(now or time.time())
     with _lock, _conn() as c:
-        cur = c.execute("UPDATE mms SET state='notified', next_attempt_ts=?, updated_ts=? "
+        # A manual request always reaches the MMSC: counting it as an attempt keeps an MMS
+        # first seen already expired from being short-circuited again.
+        cur = c.execute("UPDATE mms SET state='notified', next_attempt_ts=?, updated_ts=?, "
+                        "attempts=MAX(attempts,1) "
                         "WHERE message_id=? AND instance=? AND direction='in' "
                         "AND state IN ('notified','failed','expired')",
                         (now, now, int(message_id), str(instance)))

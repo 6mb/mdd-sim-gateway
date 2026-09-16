@@ -228,3 +228,33 @@ def deliver_timestamp(tpdu_hex: str) -> int | None:
     except ValueError:
         return None
     return int(local.timestamp())
+
+
+def deliver_user_data(tpdu_hex: str) -> bytes | None:
+    """The 8-bit user data of an SMS-DELIVER (after any UDH), or None if not 8-bit/readable.
+
+    Asterisk hands the body to the dialplan as a C string, so a binary payload arrives cut at
+    its first 0x00 -- every WAP Push has one within a few bytes. The raw TPDU the engine also
+    forwards is complete.
+    """
+    try:
+        pdu = bytes.fromhex(str(tpdu_hex or ""))
+    except ValueError:
+        return None
+    if len(pdu) < 2 or pdu[0] & 0x03 != 0x00:
+        return None
+    index = 2 + 1 + (pdu[1] + 1) // 2
+    if len(pdu) < index + 10:
+        return None
+    dcs = pdu[index + 1]
+    if not dcs_is_8bit(dcs):
+        return None
+    length = pdu[index + 9]
+    data = pdu[index + 10:index + 10 + length]
+    if len(data) != length:
+        return None
+    if pdu[0] & 0x40:                               # TP-UDHI: skip the user data header
+        if not data or len(data) < 1 + data[0]:
+            return None
+        data = data[1 + data[0]:]
+    return data

@@ -14,7 +14,8 @@ does not resolve in public DNS. Two clients are provided:
 Limits of the command channel: ModemManager accepts a command only when it ends with a final
 result it recognises, and AT+QISENDEX ends with "SEND OK". Every upload chunk therefore waits
 out the shortest command timeout (one second) and is verified afterwards with AT+QISEND's
-byte counters. Uploads run at roughly 200 bytes a second; downloads are unaffected.
+byte counters. Uploads run at roughly 100 bytes a second, so only small requests (a
+retrieval, an acknowledgement) are sent this way; downloads are unaffected.
 """
 from __future__ import annotations
 
@@ -281,6 +282,9 @@ class ModemSocketHttp:
     CONNECT_ID = 11          # the highest socket id, well away from anything else using QI*
     CHUNK = 256              # the longest AT+QISENDEX payload the module accepted
     READ = 1500
+    # Each chunk costs a two-second command timeout; a WAP proxy drops a request that
+    # trickles in for minutes, so only small requests (retrievals, acknowledgements) fit.
+    UPLOAD_LIMIT = 4 * 1024
 
     def __init__(self, command: ModemCommand, settings: dict, *, sleep=time.sleep,
                  clock=time.monotonic):
@@ -333,6 +337,12 @@ class ModemSocketHttp:
         proxy = parse_proxy(self.settings.get("proxy"))
         payload, host, port = build_request(method, url, body=body, headers=headers,
                                             via_proxy=bool(proxy))
+        if len(payload) > self.UPLOAD_LIMIT:
+            raise MmsTransportError(
+                f"a {len(payload) // 1024} KB request is too large for ModemManager's command "
+                f"channel (at most {self.UPLOAD_LIMIT // 1024} KB, about two bytes a second "
+                "per chunk); sending MMS over the modem needs a dedicated AT port",
+                retryable=False)
         if proxy:
             host, port = proxy
         deadline = self.clock() + timeout
@@ -376,13 +386,19 @@ class ModemSocketHttp:
         for offset in range(0, len(payload), self.CHUNK):
             chunk = payload[offset:offset + self.CHUNK]
             # Answered with "SEND OK", which ModemManager does not treat as a final result:
-            # the call times out after its one-second minimum. The counters below decide.
+            # the call times out after its one-second minimum. ModemManager declares the whole
+            # modem invalid after ten consecutive timeouts on a port -- a 165 KB upload did
+            # exactly that -- so every chunk is followed by a query that completes normally,
+            # which both resets that count and confirms the bytes were taken.
             self.at(f'AT+QISENDEX={sid},"{chunk.hex()}"', 1)
+            expected = offset + len(chunk)
+            sent = self._sent(sid)
+            if sent != expected:
+                raise MmsTransportError(
+                    f"the modem sent {max(sent, 0)} of {len(payload)} request bytes; "
+                    "the MMSC connection may have closed")
             if self.clock() > deadline:
                 raise MmsTransportError("timed out sending to the MMSC")
-        sent = self._sent(sid)
-        if sent != len(payload):
-            raise MmsTransportError(f"the modem sent {sent} of {len(payload)} request bytes")
 
     def _receive(self, sid: int, deadline: float) -> HttpResponse:
         raw = bytearray()

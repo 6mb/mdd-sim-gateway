@@ -205,6 +205,21 @@ class ModemSocketTests(unittest.TestCase):
         chunks = [c for c in fake.commands if c.startswith("AT+QISENDEX")]
         self.assertTrue(all(len(c) <= len('AT+QISENDEX=11,""') + 512 for c in chunks))
 
+    def test_command_channel_refuses_large_requests_before_touching_the_modem(self):
+        fake = FakeQuectel(http_reply(b"ok"))
+        with self.assertRaises(t.MmsTransportError) as raised:
+            self.client(fake).request("POST", "http://mmsc.example.test:8002/", body=b"x" * 5000)
+        self.assertFalse(raised.exception.retryable)
+        self.assertFalse(any(c.startswith("AT+QIOPEN") for c in fake.commands))
+
+    def test_every_chunk_is_followed_by_a_completing_query(self):
+        fake = FakeQuectel(http_reply(b"ok"))
+        self.client(fake).request("POST", "http://mmsc.example.test:8002/", body=b"x" * 900)
+        sends = [i for i, c in enumerate(fake.commands) if c.startswith("AT+QISENDEX")]
+        self.assertGreater(len(sends), 1)
+        for index in sends:
+            self.assertEqual(fake.commands[index + 1], "AT+QISEND=11,0")
+
     def test_short_send_is_an_error(self):
         fake = FakeQuectel(http_reply(b"ok"))
         original = fake.handle
@@ -310,7 +325,6 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(client.requests, [])
         self.assertEqual(store.mms_for_download(self.rec["id"])["state"], "expired")
         store.schedule_mms_download("1", self.rec["id"], now=10**9 * 3)
-        store.set_mms_state(self.rec["id"], "notified", attempts_increment=1)
         client = FakeClient([t.MmsTransportError("timed out")])
         result = mms.download(self.inst, self.rec["id"], client=client, now=10**9 * 3)
         self.assertEqual(len(client.requests), 1, "a manual retry still asks the MMSC")

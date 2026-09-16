@@ -135,6 +135,19 @@ class InboundEventTests(unittest.IsolatedAsyncioTestCase, TempStore):
         self.assertEqual(self.push.call_count, 0, "pushed once the worker knows the content")
         self.assertTrue(main.hub.mms_wakeup.is_set())
 
+    async def test_payload_is_taken_from_the_tpdu_not_the_nul_truncated_body(self):
+        payload = notification_push()
+        udh = bytes.fromhex("0605040b8423f0")
+        user_data = udh + payload
+        tpdu = (bytes([0x44, 0x02, 0x81, 0x99, 0x00, 0x04]) + bytes.fromhex("62907080000000")
+                + bytes([len(user_data)]) + user_data).hex()
+        truncated = payload[:payload.index(b"\x00")]
+        event = self.event(truncated)
+        event["args"][-1] = tpdu
+        result = await main.api_engine_event(event)
+        self.assertEqual(result.get("stored"), "mms")
+        self.assertEqual(len(store.due_mms_downloads()), 1)
+
     async def test_long_wap_push_is_reassembled_from_its_parts(self):
         payload = notification_push()
         first, second = payload[:20], payload[20:]

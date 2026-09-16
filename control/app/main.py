@@ -6467,7 +6467,8 @@ async def api_engine_event(payload: dict):
         segment = _concat_triplet(args)
         sent_ts = sms_pdu.deliver_timestamp(pdu.tpdu_hex)
         if pdu.is_machine_payload or (not pdu.known and sms_pdu.looks_binary(text)):
-            payload = sms_pdu.body_to_hex(text)
+            whole = sms_pdu.deliver_user_data(pdu.tpdu_hex)
+            payload = whole.hex() if whole is not None else sms_pdu.body_to_hex(text)
             if segment and mms.is_wap_push_udh(pdu.udh_hex) and payload:
                 # A WAP Push too long for one SMS: its parts are joined byte-for-byte before
                 # anything can read it. The reaper files a group that never completes.
