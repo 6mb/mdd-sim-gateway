@@ -84,6 +84,10 @@ DEFAULTS = {
         # storage until that storage is full and no new SMS can be received. Delete it once
         # recognised. Set false to keep the raw objects for troubleshooting.
         "drop_mms_wap_push": True,
+        # What happens to an SMS object on the modem/SIM once its message is in the database:
+        # "delete" (default), "when_full" or "keep". Deliberately absent from these defaults:
+        # an unset key defers to MDD_CELLULAR_SMS_STORAGE, so a deployment can choose the
+        # policy from its service environment; a value saved here takes precedence.
         # Voicemail defaults. Off unless asked for: recording a caller is the operator's
         # decision. Per-line overrides live in the line's sip.* block, like ring_timeout.
         "vm_enabled": False,

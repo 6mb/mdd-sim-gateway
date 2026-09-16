@@ -4,6 +4,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Modem SMS storage is emptied as messages are imported. The gateway only ever read the modem's
+  SMS objects, so its storage (23 slots on a typical module, a few more on the SIM) filled up and
+  the modem then stopped accepting texts altogether. An object is now deleted once its message
+  is safely in the database -- checked again right before deleting, so a message that was not
+  imported can never be removed. `MDD_CELLULAR_SMS_STORAGE` (or `settings.cellular_sms_storage`)
+  selects `delete` (default), `when_full` (keep objects, remove the oldest imported ones only
+  when fewer than three slots remain) or `keep`.
+
 ### Fixed
 
 - An SMS no longer appears twice. A text still held by the modem was imported again every time

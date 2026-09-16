@@ -31,10 +31,9 @@ LINE_STATES = ("up", "down", "off")
 LINE_STATE_CONTINUITY_SECONDS = 90
 LINE_STATE_RETENTION_SECONDS = 3 * 24 * 3600
 # A create reply normally arrives within 30 seconds and the scanner runs every five seconds.
-# Keep a wider recovery window for a service restart, but do not let an old timed-out draft hide
-# an unrelated, manually-created SMS with the same recipient and body for an entire day.
-LOCAL_MODEM_SMS_CLAIM_SECONDS = 5 * 60
-LOCAL_MODEM_SMS_RETENTION_SECONDS = 24 * 3600
+# Keep a wider recovery window for a service restart, but do not let an old timed-out send hide
+# an unrelated, manually-created SMS with the same recipient and body indefinitely.
+LOCAL_MODEM_SMS_CLAIM_SECONDS = 30 * 60
 
 
 def _conn():
@@ -83,19 +82,6 @@ def init():
                     ON message_identities(instance, content_hash, ts);
                 CREATE INDEX IF NOT EXISTS idx_message_identities_message
                     ON message_identities(message_id);
-                CREATE TABLE IF NOT EXISTS local_modem_sms (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    instance TEXT NOT NULL,
-                    iccid TEXT NOT NULL,
-                    daemon_epoch TEXT NOT NULL DEFAULT '',
-                    message_id INTEGER,
-                    modem_path TEXT,
-                    sms_path TEXT,
-                    content_hash TEXT NOT NULL,
-                    created_ts INTEGER NOT NULL,
-                    bound_ts INTEGER,
-                    cancelled INTEGER NOT NULL DEFAULT 0
-                );
                 -- Parts of a multi-part (concatenated) inbound SMS, held only until the
                 -- whole message can be assembled. The SMSC delivers each part as its own
                 -- SMS-DELIVER, out of order and seconds apart; the primary key absorbs the
@@ -293,36 +279,6 @@ def init():
                 c.execute("ALTER TABLE calls ADD COLUMN voicemail_id INTEGER")
             except Exception:
                 pass
-            try:
-                c.execute("ALTER TABLE local_modem_sms "
-                          "ADD COLUMN daemon_epoch TEXT NOT NULL DEFAULT ''")
-            except Exception:
-                pass
-            try:
-                c.execute("ALTER TABLE local_modem_sms ADD COLUMN message_id INTEGER")
-            except Exception:
-                pass
-            try:
-                c.execute("ALTER TABLE local_modem_sms "
-                          "ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0")
-            except Exception:
-                pass
-            # The daemon generation is part of an SMS object's identity: numeric paths restart
-            # at zero whenever ModemManager itself restarts.
-            c.execute("DROP INDEX IF EXISTS idx_local_modem_sms_path")
-            c.execute("DROP INDEX IF EXISTS idx_local_modem_sms_pending")
-            c.execute(
-                "DELETE FROM local_modem_sms WHERE sms_path IS NOT NULL AND id NOT IN ("
-                "SELECT MAX(id) FROM local_modem_sms WHERE sms_path IS NOT NULL "
-                "GROUP BY daemon_epoch,iccid,sms_path)")
-            c.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_local_modem_sms_path "
-                "ON local_modem_sms(daemon_epoch,iccid,sms_path) "
-                "WHERE sms_path IS NOT NULL")
-            c.execute(
-                "CREATE INDEX IF NOT EXISTS idx_local_modem_sms_pending "
-                "ON local_modem_sms(daemon_epoch,iccid,content_hash,created_ts) "
-                "WHERE sms_path IS NULL AND cancelled=0")
             # A process exit after ModemManager accepted Create/Send leaves a pending row. On
             # startup its delivery outcome is unknowable, so preserve it and discourage retry.
             c.execute(
@@ -407,7 +363,39 @@ def _migration_message_identity(c) -> None:
     c.execute("DROP TABLE IF EXISTS message_imports")
 
 
-_MIGRATIONS = (_migration_message_identity,)
+def _migration_modem_object_on_message(c) -> None:
+    """Record a cellular send's ModemManager object on its own history row.
+
+    local_modem_sms tracked the gateway's own objects in a side table with reservations, a
+    daemon-generation key and a content hash. Objects are now deleted once sent, and the
+    content comparison alone tells a reused path apart, so the path lives on the message.
+    Bound markers are carried over so an object still listed after the upgrade stays claimed.
+    """
+    for statement in ("ALTER TABLE messages ADD COLUMN modem_path TEXT",
+                      "ALTER TABLE messages ADD COLUMN modem_sms_path TEXT"):
+        try:
+            c.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+    exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                       "AND name='local_modem_sms'").fetchone()
+    if exists:
+        columns = {row[1] for row in c.execute("PRAGMA table_info(local_modem_sms)")}
+        if "message_id" in columns:
+            c.execute(
+                "UPDATE messages SET modem_path=(SELECT l.modem_path FROM local_modem_sms l "
+                "WHERE l.message_id=messages.id AND l.sms_path IS NOT NULL "
+                "ORDER BY l.id DESC LIMIT 1), modem_sms_path=(SELECT l.sms_path "
+                "FROM local_modem_sms l WHERE l.message_id=messages.id "
+                "AND l.sms_path IS NOT NULL ORDER BY l.id DESC LIMIT 1) "
+                "WHERE id IN (SELECT message_id FROM local_modem_sms "
+                "WHERE sms_path IS NOT NULL)")
+        c.execute("DROP TABLE local_modem_sms")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_messages_modem_object "
+              "ON messages(instance, modem_sms_path) WHERE modem_sms_path IS NOT NULL")
+
+
+_MIGRATIONS = (_migration_message_identity, _migration_modem_object_on_message)
 
 
 def _sweep_binary_messages(c) -> int:
@@ -1171,174 +1159,59 @@ def allowance_query_replies(instance: str, recipient: str, started_ts: int,
     return [dict(row) for row in rows]
 
 
-def reserve_local_modem_sms(instance: str, iccid: str, content_hash: str,
-                            daemon_epoch: str, recipient: str, body: str) -> int:
-    """Durably reserve one local ModemManager create operation before it starts.
-
-    The tracking row retains only ``content_hash``; the normal message-history row stores the
-    recipient and body for the UI. A committed reservation lets the receive poller fail closed
-    if the process exits after ModemManager creates an object but before its path can be bound.
-    """
+def begin_local_modem_sms(instance: str, recipient: str, body: str) -> int:
+    """Write the history row of a cellular send before its ModemManager object exists."""
     now = int(time.time())
     with _lock, _conn() as c:
-        # An unbound reservation can only cover a create operation interrupted before its path
-        # was returned. Keep one day of fail-closed protection, then bound disk growth. Markers
-        # for older daemon generations can never match a current object and are also disposable.
-        c.execute("DELETE FROM local_modem_sms WHERE daemon_epoch<>? AND created_ts<?",
-                  (str(daemon_epoch), now - LOCAL_MODEM_SMS_RETENTION_SECONDS))
-        c.execute("DELETE FROM local_modem_sms WHERE sms_path IS NULL AND created_ts<?",
-                  (now - LOCAL_MODEM_SMS_RETENTION_SECONDS,))
-        message = c.execute(
-            "INSERT INTO messages(instance,direction,peer,body,status,ts,transport) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (str(instance), "out", str(recipient), str(body), "pending", now, "cellular"),
-        )
-        cur = c.execute(
-            "INSERT INTO local_modem_sms"
-            "(instance,iccid,daemon_epoch,message_id,content_hash,created_ts) "
-            "VALUES(?,?,?,?,?,?)",
-            (str(instance), str(iccid), str(daemon_epoch), int(message.lastrowid),
-             str(content_hash), now),
-        )
-        return int(cur.lastrowid)
+        rec = _insert_message(c, str(instance), "out", str(recipient), str(body),
+                              status="pending", transport="cellular", ts=now, received_ts=now)
+    return int(rec["id"])
 
 
-def bind_local_modem_sms(reservation_id: int, daemon_epoch: str,
-                         modem_path: str, sms_path: str) -> bool:
-    """Atomically bind a reservation to the ModemManager object it created.
-
-    ModemManager may reuse numeric object paths after a restart. Replacing an older marker for
-    the same SIM/path is safe because the new marker carries the new content hash.
-    """
+def bind_local_modem_sms(message_id: int, modem_path: str, sms_path: str) -> bool:
+    """Record which ModemManager object carries a cellular send."""
     with _lock, _conn() as c:
-        row = c.execute(
-            "SELECT iccid,modem_path,sms_path,cancelled FROM local_modem_sms "
-            "WHERE id=? AND daemon_epoch=?",
-            (int(reservation_id), str(daemon_epoch)),
-        ).fetchone()
-        if not row or row["cancelled"]:
-            return False
-        # A scanner in another worker may have claimed the object between Create and this bind.
-        # Treat an exact prior binding as success; a different binding remains a hard stop.
-        if row["sms_path"] is not None:
-            return (str(row["modem_path"] or "") == str(modem_path)
-                    and str(row["sms_path"]) == str(sms_path))
-        c.execute(
-            "DELETE FROM local_modem_sms "
-            "WHERE daemon_epoch=? AND iccid=? AND sms_path=? AND id<>?",
-            (str(daemon_epoch), str(row["iccid"]), str(sms_path), int(reservation_id)),
-        )
-        cur = c.execute(
-            "UPDATE local_modem_sms SET modem_path=?,sms_path=?,bound_ts=? "
-            "WHERE id=? AND daemon_epoch=? AND sms_path IS NULL",
-            (str(modem_path), str(sms_path), int(time.time()), int(reservation_id),
-             str(daemon_epoch)),
-        )
+        cur = c.execute("UPDATE messages SET modem_path=?,modem_sms_path=? "
+                        "WHERE id=? AND transport='cellular' AND direction='out'",
+                        (str(modem_path), str(sms_path), int(message_id)))
         return cur.rowcount == 1
 
 
-def cancel_local_modem_sms(reservation_id: int) -> None:
-    """Deactivate a reservation when ModemManager definitely created no SMS object.
-
-    Keep the row briefly so the caller can still resolve its atomically-created history row;
-    the cancelled flag prevents the scanner treating it as a live unbound reservation.
-    """
+def get_message(mid: int) -> dict | None:
     with _lock, _conn() as c:
-        c.execute("UPDATE local_modem_sms SET cancelled=1 "
-                  "WHERE id=? AND sms_path IS NULL", (int(reservation_id),))
-
-
-def local_modem_sms_message(reservation_id: int) -> dict | None:
-    """Return the history row atomically created with a local SMS reservation."""
-    with _lock, _conn() as c:
-        row = c.execute(
-            "SELECT m.* FROM local_modem_sms l JOIN messages m ON m.id=l.message_id "
-            "WHERE l.id=? LIMIT 1", (int(reservation_id),),
-        ).fetchone()
+        row = c.execute("SELECT * FROM messages WHERE id=?", (int(mid),)).fetchone()
     return dict(row) if row else None
 
 
-def is_local_modem_sms(daemon_epoch: str, iccid: str, modem_path: str, sms_path: str,
-                       content_hash: str, sms_ts: int = 0) -> bool:
-    """Return whether an outgoing ModemManager object was created by this application.
+def owns_local_modem_sms(instance: str, modem_path: str, sms_path: str, peer: str,
+                         body: str, now: int | None = None) -> bool:
+    """Whether an outgoing ModemManager object was created by this gateway's own send.
 
-    Exact path markers survive control-plane restarts. The content hash prevents a different
-    object imported after ModemManager reuses a numeric path from being hidden.
-
-    A recent unbound reservation covers the narrow crash/failure window between object creation
-    and binding. When ModemManager supplies an object timestamp it must be close to the reserve
-    time; objects without one get only a short claim window. Thus a failed attempt cannot hide a
-    separately-created outgoing message with identical content for the full marker retention.
+    The bound path identifies it, with the content compared as well: ModemManager renumbers
+    objects when it restarts, so a path alone may by now name somebody else's message. A send
+    interrupted between Create and bind (a timed-out reply, a process exit) leaves its row
+    unbound; a recent unbound row with the same content claims the object, which keeps the
+    next restart from importing the gateway's own text as a second, external send.
     """
-    now = int(time.time())
+    now = int(now or time.time())
+    content = message_content_hash("out", peer, body)
     with _lock, _conn() as c:
-        row = c.execute(
-            "SELECT 1 FROM local_modem_sms "
-            "WHERE daemon_epoch=? AND iccid=? AND modem_path=? AND sms_path=? "
-            "AND content_hash=? LIMIT 1",
-            (str(daemon_epoch), str(iccid), str(modem_path), str(sms_path),
-             str(content_hash)),
-        ).fetchone()
-        if row:
-            return True
-        object_ts = int(sms_ts or 0)
-        if object_ts > 0:
-            lower = object_ts - LOCAL_MODEM_SMS_CLAIM_SECONDS
-            upper = object_ts + LOCAL_MODEM_SMS_CLAIM_SECONDS
-        else:
-            lower = now - LOCAL_MODEM_SMS_CLAIM_SECONDS
-            upper = now + LOCAL_MODEM_SMS_CLAIM_SECONDS
-        pending = c.execute(
-            "SELECT id FROM local_modem_sms WHERE daemon_epoch=? AND iccid=? "
-            "AND sms_path IS NULL AND cancelled=0 AND content_hash=? "
-            "AND created_ts BETWEEN ? AND ? ORDER BY created_ts DESC,id DESC LIMIT 1",
-            (str(daemon_epoch), str(iccid), str(content_hash), lower, upper),
-        ).fetchone()
-        if not pending:
-            return False
-        # A Create reply may be lost or the process may exit before bind_local_modem_sms().
-        # Claim the matching live object now so subsequent restarts remain deduplicated.
-        c.execute(
-            "DELETE FROM local_modem_sms WHERE daemon_epoch=? AND iccid=? AND sms_path=? "
-            "AND id<>?",
-            (str(daemon_epoch), str(iccid), str(sms_path), int(pending["id"])),
-        )
-        claimed = c.execute(
-            "UPDATE local_modem_sms SET modem_path=?,sms_path=?,bound_ts=? "
-            "WHERE id=? AND sms_path IS NULL AND cancelled=0",
-            (str(modem_path), str(sms_path), now, int(pending["id"])),
-        )
-        return claimed.rowcount == 1
-
-
-def prune_local_modem_sms(daemon_epoch: str, iccid: str, modem_path: str,
-                          live_sms_paths: set[str] | list[str]) -> int:
-    """Bound durable-marker growth after a verified ModemManager path listing.
-
-    Current objects retain their marker indefinitely. Missing paths, cancelled reservations and
-    markers from older daemon generations get a one-day grace period so an in-flight HTTP caller
-    can still resolve the history row that was committed with its reservation.
-    """
-    now = int(time.time())
-    cutoff = now - LOCAL_MODEM_SMS_RETENTION_SECONDS
-    live = {str(path) for path in live_sms_paths}
-    with _lock, _conn() as c:
-        removed = c.execute(
-            "DELETE FROM local_modem_sms WHERE created_ts<? "
-            "AND (cancelled=1 OR daemon_epoch<>? OR sms_path IS NULL)",
-            (cutoff, str(daemon_epoch)),
-        ).rowcount
         rows = c.execute(
-            "SELECT id,sms_path FROM local_modem_sms WHERE daemon_epoch=? AND iccid=? "
-            "AND modem_path=? AND sms_path IS NOT NULL "
-            "AND COALESCE(bound_ts,created_ts)<?",
-            (str(daemon_epoch), str(iccid), str(modem_path), cutoff),
-        ).fetchall()
-        stale_ids = [(int(row["id"]),) for row in rows if str(row["sms_path"]) not in live]
-        if stale_ids:
-            c.executemany("DELETE FROM local_modem_sms WHERE id=?", stale_ids)
-            removed += len(stale_ids)
-        return int(removed)
+            "SELECT id,peer,body FROM messages WHERE instance=? AND transport='cellular' "
+            "AND direction='out' AND modem_path=? AND modem_sms_path=?",
+            (str(instance), str(modem_path), str(sms_path))).fetchall()
+        if any(message_content_hash("out", r["peer"], r["body"]) == content for r in rows):
+            return True
+        candidates = c.execute(
+            "SELECT id,peer,body FROM messages WHERE instance=? AND transport='cellular' "
+            "AND direction='out' AND modem_sms_path IS NULL AND ts>=? ORDER BY ts DESC,id DESC",
+            (str(instance), now - LOCAL_MODEM_SMS_CLAIM_SECONDS)).fetchall()
+        for row in candidates:
+            if message_content_hash("out", row["peer"], row["body"]) == content:
+                c.execute("UPDATE messages SET modem_path=?,modem_sms_path=? WHERE id=?",
+                          (str(modem_path), str(sms_path), int(row["id"])))
+                return True
+    return False
 
 
 def list_threads(instance: str) -> list:

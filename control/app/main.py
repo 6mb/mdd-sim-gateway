@@ -1895,21 +1895,23 @@ def _save_host_alert_state(state: dict) -> None:
 async def cellular_sms_poller():
     """Import SMS received by the 4G modem even when its VoWiFi engine is stopped."""
     scanner = cellular_sms.Scanner(local_sms_tracker=store)
+
+    def ingest(record: dict) -> dict | None:
+        return store.ingest_message(
+            record["instance"], record["direction"], record["peer"], record["body"],
+            transport="cellular", sent_ts=record["ts"] or None)
+
     while True:
         try:
-            # One config read serves both the line list and the scanner's policy flag, so the
+            # One config read serves both the line list and the scanner's policy, so the
             # operator's choice takes effect without restarting the control plane.
             conf = await asyncio.to_thread(cfg.load)
-            scanner.drop_mms_wap_push = bool(
-                (conf.get("settings") or {}).get("drop_mms_wap_push", True))
-            discovered = await asyncio.to_thread(
-                scanner.discover, list((conf.get("instances") or {}).values()))
-            for item in discovered:
-                rec = await asyncio.to_thread(
-                    store.ingest_message, item["instance"], item["direction"], item["peer"],
-                    item["body"], transport=item["transport"], sent_ts=item["ts"] or None)
-                if not rec:
-                    continue
+            settings = conf.get("settings") or {}
+            scanner.drop_mms_wap_push = bool(settings.get("drop_mms_wap_push", True))
+            stored = await asyncio.to_thread(
+                scanner.poll, list((conf.get("instances") or {}).values()), ingest,
+                policy=cellular_sms.storage_policy(settings))
+            for rec in stored:
                 if rec["direction"] == "in":
                     await _publish_incoming_sms(rec)
                 else:
@@ -5299,7 +5301,7 @@ async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
     instances = await asyncio.to_thread(cfg.list_instances)
     result = await asyncio.to_thread(
         cellular_sms.send, instances, iid, to, text, local_sms_tracker=store)
-    reservation_id = result.pop("_reservation_id", None)
+    message_id = result.pop("message_id", None)
     if result.get("unavailable"):
         return {**result, "message": None}
 
@@ -5308,8 +5310,8 @@ async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
     # encourages a retry that may create a duplicate and an extra roaming charge.
     message_status = ("sent" if result.get("ok") else
                       "unknown" if result.get("uncertain") else "failed")
-    rec = (await asyncio.to_thread(store.local_modem_sms_message, reservation_id)
-           if reservation_id is not None else None)
+    rec = (await asyncio.to_thread(store.get_message, message_id)
+           if message_id is not None else None)
     if rec is None:
         rec = store.add_message(iid, "out", to, text, status=message_status,
                                 transport="cellular")
