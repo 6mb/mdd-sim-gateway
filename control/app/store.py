@@ -331,6 +331,12 @@ def init():
                 "WHERE transport='cellular' AND status='pending'")
             # migration: why a down segment began (added later)
             try:
+                # The network timestamp of each buffered part (TP-SCTS), so the assembled
+                # text is dated -- and identified -- by its first part.
+                c.execute("ALTER TABLE sms_segments ADD COLUMN sent_ts INTEGER")
+            except Exception:
+                pass
+            try:
                 c.execute("ALTER TABLE line_states ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
             except Exception:
                 pass
@@ -533,22 +539,36 @@ def set_message_status(mid: int, status: str, error: str | None = None):
 SEGMENT_TIMEOUT = 180
 
 
+def _group_sent_ts(rows) -> int | None:
+    """The network time of a multi-part text: its first part's, as a handset shows it.
+
+    ModemManager stamps an assembled message with the timestamp of its first part, so using
+    the same part keeps a VoWiFi copy's identity aligned with the modem's copy of that text.
+    """
+    stamped = [(int(r["seq"]), int(r["sent_ts"])) for r in rows if r["sent_ts"]]
+    return min(stamped)[1] if stamped else None
+
+
 def add_sms_segment(instance: str, peer: str, concat_ref: int, total: int, seq: int,
-                    body: str, ts: int | None = None) -> list[str] | None:
+                    body: str, ts: int | None = None, *, sent_ts: int | None = None,
+                    with_meta: bool = False) -> list[str] | dict | None:
     """Buffer one part of a concatenated SMS.
 
     Returns the full ordered list of part bodies once the LAST missing part arrives (and drops
     the group from the buffer), or None while parts are still outstanding. Re-delivery of a
     part already held is absorbed by the primary key and never completes a group twice: the
-    row count only reaches `total` when every distinct seq is present."""
+    row count only reaches `total` when every distinct seq is present. `with_meta` returns
+    {"bodies", "sent_ts"} instead, carrying the network time of the assembled text."""
     ts = int(ts or time.time())
     with _lock, _conn() as c:
         c.execute(
-            "INSERT INTO sms_segments(instance,peer,concat_ref,total,seq,body,created_ts) "
-            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(instance,peer,concat_ref,total,seq) DO NOTHING",
-            (str(instance), peer, int(concat_ref), int(total), int(seq), body, ts))
+            "INSERT INTO sms_segments(instance,peer,concat_ref,total,seq,body,created_ts,"
+            "sent_ts) VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(instance,peer,concat_ref,total,seq) DO NOTHING",
+            (str(instance), peer, int(concat_ref), int(total), int(seq), body, ts,
+             int(sent_ts) if sent_ts else None))
         rows = c.execute(
-            "SELECT seq,body FROM sms_segments "
+            "SELECT seq,body,sent_ts FROM sms_segments "
             "WHERE instance=? AND peer=? AND concat_ref=? AND total=? ORDER BY seq",
             (str(instance), peer, int(concat_ref), int(total))).fetchall()
         if len(rows) < int(total):
@@ -556,7 +576,8 @@ def add_sms_segment(instance: str, peer: str, concat_ref: int, total: int, seq: 
         c.execute(
             "DELETE FROM sms_segments WHERE instance=? AND peer=? AND concat_ref=? AND total=?",
             (str(instance), peer, int(concat_ref), int(total)))
-    return [r["body"] for r in rows]
+    bodies = [r["body"] for r in rows]
+    return {"bodies": bodies, "sent_ts": _group_sent_ts(rows)} if with_meta else bodies
 
 
 def take_stale_sms_segments(timeout: int = SEGMENT_TIMEOUT,
@@ -576,7 +597,7 @@ def take_stale_sms_segments(timeout: int = SEGMENT_TIMEOUT,
         for g in groups:
             key = (g["instance"], g["peer"], g["concat_ref"], g["total"])
             rows = c.execute(
-                "SELECT seq,body FROM sms_segments "
+                "SELECT seq,body,sent_ts FROM sms_segments "
                 "WHERE instance=? AND peer=? AND concat_ref=? AND total=? ORDER BY seq",
                 key).fetchall()
             c.execute(
@@ -584,7 +605,7 @@ def take_stale_sms_segments(timeout: int = SEGMENT_TIMEOUT,
                 "WHERE instance=? AND peer=? AND concat_ref=? AND total=?", key)
             out.append({"instance": g["instance"], "peer": g["peer"],
                         "concat_ref": g["concat_ref"], "total": int(g["total"]),
-                        "first_ts": int(g["first_ts"]),
+                        "first_ts": int(g["first_ts"]), "sent_ts": _group_sent_ts(rows),
                         "seqs": [int(r["seq"]) for r in rows],
                         "bodies": [r["body"] for r in rows]})
     return out

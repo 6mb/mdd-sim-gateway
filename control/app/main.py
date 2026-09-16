@@ -1541,6 +1541,14 @@ def _join_sms_parts(bodies: list[str], seqs: list[int], total: int) -> str:
     return "".join(out)
 
 
+async def _publish_incoming_sms(rec: dict) -> None:
+    """Announce one newly stored inbound text, whichever transport delivered it."""
+    iid = str(rec["instance"])
+    await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
+    await asyncio.to_thread(_harvest_allowance_reply, iid, rec["peer"])
+    _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"], rec["body"])
+
+
 async def sms_segment_reaper():
     """Store what a multi-part SMS collected when the rest of its parts never arrive.
 
@@ -1565,17 +1573,18 @@ async def sms_segment_reaper():
             log.info("incomplete multi-part SMS on line %s from %s: parts %s of %d — storing "
                      "what arrived", iid, group["peer"],
                      ",".join(str(n) for n in group["seqs"]), group["total"])
-            rec = await asyncio.to_thread(store.add_message, iid, "in", group["peer"], body,
-                                          ts=group["first_ts"])
+            rec = await asyncio.to_thread(
+                store.ingest_message, iid, "in", group["peer"], body, transport="vowifi",
+                sent_ts=group.get("sent_ts"), received_ts=group["first_ts"])
+            if rec is None:
+                continue
             # Keep the group addressable so the parts still in flight complete THIS message
             # rather than being published as a second fragment of the same text.
             if len(group["seqs"]) < group["total"]:
                 await asyncio.to_thread(
                     store.remember_partial_sms_group, iid, group["peer"], group["concat_ref"],
                     group["total"], rec["id"], group["seqs"], group["bodies"])
-            await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
-            await asyncio.to_thread(_harvest_allowance_reply, iid, group["peer"])
-            _dispatch_push(notify_push.EV_INCOMING_SMS, iid, group["peer"], body)
+            await _publish_incoming_sms(rec)
 
 
 def _host_alert_summary(alerts: list[dict]) -> str:
@@ -1901,13 +1910,11 @@ async def cellular_sms_poller():
                     item["body"], transport=item["transport"], sent_ts=item["ts"] or None)
                 if not rec:
                     continue
-                await hub.broadcast({"type": "sms", "instance": rec["instance"],
-                                     "message": rec})
                 if rec["direction"] == "in":
-                    await asyncio.to_thread(_harvest_allowance_reply, rec["instance"],
-                                            rec["peer"])
-                    _dispatch_push(notify_push.EV_INCOMING_SMS, rec["instance"],
-                                   rec["peer"], rec["body"])
+                    await _publish_incoming_sms(rec)
+                else:
+                    await hub.broadcast({"type": "sms", "instance": rec["instance"],
+                                         "message": rec})
         except Exception as exc:  # noqa
             log.debug("cellular SMS poll failed: %r", exc)
         await asyncio.sleep(5)
@@ -6171,6 +6178,7 @@ async def api_engine_event(payload: dict):
         # existed, where args carries no TP-DCS to judge by.
         pdu = sms_pdu.parse_event_args(args)
         segment = _concat_triplet(args)
+        sent_ts = sms_pdu.deliver_timestamp(pdu.tpdu_hex)
         if pdu.is_machine_payload or (not pdu.known and sms_pdu.looks_binary(text)):
             rec = await asyncio.to_thread(
                 store.add_binary_sms, iid, sender,
@@ -6213,22 +6221,26 @@ async def api_engine_event(payload: dict):
                 if rec:
                     await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
                 return {"ok": True, "merged": f"{len(late['seqs'])}/{total}"}
-            parts = await asyncio.to_thread(store.add_sms_segment, iid, sender, ref, total,
-                                            seq, text)
-            if parts is None:
+            group = await asyncio.to_thread(store.add_sms_segment, iid, sender, ref, total,
+                                            seq, text, sent_ts=sent_ts, with_meta=True)
+            if group is None:
                 log.info("buffered part %d/%d of a multi-part SMS from %s (ref %d)",
                          seq, total, sender, ref)
                 return {"ok": True, "buffered": f"{seq}/{total}"}
             log.info("reassembled a %d-part SMS from %s (ref %d)", total, sender, ref)
-            text = "".join(parts)
+            text, sent_ts = "".join(group["bodies"]), group["sent_ts"]
         elif not text.strip():
             log.info("dropping empty-body inbound SMS (internal signalling / binary/OTA "
                      "SIM message — no displayable text)")
             return {"ok": True, "dropped": "empty_body"}
-        rec = store.add_message(iid, "in", sender, text)
-        await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
-        await asyncio.to_thread(_harvest_allowance_reply, iid, sender)
-        _dispatch_push(notify_push.EV_INCOMING_SMS, iid, sender, text)
+        rec = await asyncio.to_thread(store.ingest_message, iid, "in", sender, text,
+                                      transport="vowifi", sent_ts=sent_ts)
+        if rec is None:
+            # A carrier re-delivery, or the modem holding this SIM already imported its copy.
+            log.info("inbound SMS from %s on line %s is already stored — not shown twice",
+                     sender, iid)
+            return {"ok": True, "duplicate": True}
+        await _publish_incoming_sms(rec)
     elif event == "sms_out" and len(args) >= 2:
         pass  # already stored by the send path
     elif event == "call_in":

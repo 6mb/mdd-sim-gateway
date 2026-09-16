@@ -15,6 +15,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   recognised as the same message. Duplicates already in the history are folded once on upgrade,
   together with the `--` placeholder rows 1.9.3 stored for an unreadable body. A message you
   delete stays deleted even if the modem still holds it.
+- A VoWiFi SMS is dated by the network's timestamp, like one received on the modem, instead
+  of the moment the gateway happened to process it. A multi-part text takes its first part's
+  time, which is also what ModemManager reports for the assembled copy.
 
 ## [1.9.5] - 2026-09-15
 
