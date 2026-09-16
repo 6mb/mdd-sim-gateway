@@ -69,6 +69,7 @@ def init():
                 -- included); `content_hash` without the timestamp lets a copy of the same text
                 -- arriving over the other transport be recognised within a short window.
                 CREATE TABLE IF NOT EXISTS message_identities (
+                    scope TEXT NOT NULL,
                     instance TEXT NOT NULL,
                     fingerprint TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
@@ -76,12 +77,9 @@ def init():
                     ts INTEGER NOT NULL,
                     message_id INTEGER,
                     created_ts INTEGER NOT NULL,
-                    PRIMARY KEY(instance, fingerprint)
+                    PRIMARY KEY(scope, fingerprint)
                 );
-                CREATE INDEX IF NOT EXISTS idx_message_identities_content
-                    ON message_identities(instance, content_hash, ts);
-                CREATE INDEX IF NOT EXISTS idx_message_identities_message
-                    ON message_identities(message_id);
+
                 -- Parts of a multi-part (concatenated) inbound SMS, held only until the
                 -- whole message can be assembled. The SMSC delivers each part as its own
                 -- SMS-DELIVER, out of order and seconds apart; the primary key absorbs the
@@ -302,6 +300,7 @@ def init():
                 pass
             _sweep_binary_messages(c)
             _migrate(c)
+            _identity_indexes(c)
 
 
 # Schema steps that must run exactly once, in order. `PRAGMA user_version` records the last
@@ -445,7 +444,52 @@ def _migration_mms(c) -> None:
         pass
 
 
-_MIGRATIONS = (_migration_message_identity, _migration_modem_object_on_message, _migration_mms)
+def _migration_identity_scope(c) -> None:
+    """Scope identities to the subscriber (the SIM) instead of the line id.
+
+    A line id is only a slot: delete a line and add another SIM, and the new SIM inherits the
+    old one's identities; re-add the same SIM under a new id, and the messages its modem still
+    holds import again, deleted ones included. The scope is the SIM's ICCID (its IMSI where
+    the modem exposes no ICCID), resolved from the line configuration; rows of lines that no
+    longer exist, or that have no SIM identity, stay scoped to their line id.
+    """
+    columns = {row[1] for row in c.execute("PRAGMA table_info(message_identities)")}
+    c.execute("ALTER TABLE message_identities RENAME TO message_identities_old")
+    c.execute("DROP INDEX IF EXISTS idx_message_identities_content")
+    c.execute("DROP INDEX IF EXISTS idx_message_identities_message")
+    c.executescript("""
+        CREATE TABLE message_identities (
+            scope TEXT NOT NULL,
+            instance TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            transport TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            message_id INTEGER,
+            created_ts INTEGER NOT NULL,
+            PRIMARY KEY(scope, fingerprint)
+        );
+    """)
+    rows = c.execute("SELECT * FROM message_identities_old").fetchall()
+    for row in rows:
+        scope = (row["scope"] if "scope" in columns and row["scope"]
+                 else identity_scope(row["instance"]))
+        c.execute("INSERT OR IGNORE INTO message_identities(scope,instance,fingerprint,"
+                  "content_hash,transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?,?)",
+                  (scope, row["instance"], row["fingerprint"], row["content_hash"],
+                   row["transport"], row["ts"], row["message_id"], row["created_ts"]))
+    c.execute("DROP TABLE message_identities_old")
+
+
+def _identity_indexes(c) -> None:
+    c.execute("CREATE INDEX IF NOT EXISTS idx_message_identities_content "
+              "ON message_identities(scope, content_hash, ts)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_message_identities_message "
+              "ON message_identities(message_id)")
+
+
+_MIGRATIONS = (_migration_message_identity, _migration_modem_object_on_message, _migration_mms,
+               _migration_identity_scope)
 
 
 def _sweep_binary_messages(c) -> int:
@@ -788,12 +832,39 @@ def message_fingerprint(direction: str, peer, body, ts: int, kind: str = "sms") 
     return hashlib.sha256(raw.encode("ascii")).hexdigest()
 
 
+# Resolves a line id to the subscriber whose messages it holds ("iccid:..." or "imsi:..."),
+# or "" when unknown. The control plane installs one backed by the line configuration; the
+# store itself has no view of configuration.
+_subscriber_resolver = None
+
+
+def set_subscriber_resolver(resolver) -> None:
+    global _subscriber_resolver
+    _subscriber_resolver = resolver
+
+
+def identity_scope(instance: str) -> str:
+    """Whose messages an identity belongs to: the SIM where known, else the line id."""
+    subscriber = ""
+    if _subscriber_resolver is not None:
+        try:
+            subscriber = str(_subscriber_resolver(str(instance)) or "")
+        except Exception:  # noqa: BLE001 -- identity must not fail on a config read
+            subscriber = ""
+    return subscriber or f"line:{instance}"
+
+
+def _identity_scopes(instance: str) -> tuple[str, str]:
+    """The scope written for new identities, and the line-id scope older rows may carry."""
+    return identity_scope(instance), f"line:{instance}"
+
+
 def _record_identity(c, instance: str, message_id: int, direction: str, peer, body, ts: int,
                      transport: str, kind: str = "sms") -> None:
     c.execute(
-        "INSERT OR IGNORE INTO message_identities(instance,fingerprint,content_hash,transport,"
-        "ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?)",
-        (instance, message_fingerprint(direction, peer, body, ts, kind),
+        "INSERT OR IGNORE INTO message_identities(scope,instance,fingerprint,content_hash,"
+        "transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?,?)",
+        (identity_scope(instance), instance, message_fingerprint(direction, peer, body, ts, kind),
          message_content_hash(direction, peer, body, kind), str(transport or "vowifi"),
          int(ts), int(message_id), int(time.time())))
 
@@ -878,22 +949,23 @@ def ingest_message(instance: str, direction: str, peer: str, body: str, *,
     key = body if identity is None else identity
     fingerprint = message_fingerprint(direction, peer, key, identity_ts, kind)
     content = message_content_hash(direction, peer, key, kind)
+    scope, line_scope = _identity_scopes(instance)
     with _lock, _conn() as c:
-        if c.execute("SELECT 1 FROM message_identities WHERE instance=? AND fingerprint=?",
-                     (instance, fingerprint)).fetchone():
+        if c.execute("SELECT 1 FROM message_identities WHERE scope IN (?,?) AND fingerprint=?",
+                     (scope, line_scope, fingerprint)).fetchone():
             return None
         window = _CROSS_TRANSPORT_WINDOW
         twin = c.execute(
-            "SELECT message_id FROM message_identities WHERE instance=? AND content_hash=? "
+            "SELECT message_id FROM message_identities WHERE scope IN (?,?) AND content_hash=? "
             "AND transport<>? AND ts BETWEEN ? AND ? LIMIT 1",
-            (instance, content, str(transport), identity_ts - window,
+            (scope, line_scope, content, str(transport), identity_ts - window,
              identity_ts + window)).fetchone() if identity_ts else None
         if twin:
             # Remember this copy's exact identity too, so its next re-delivery is an exact hit.
             c.execute(
-                "INSERT OR IGNORE INTO message_identities(instance,fingerprint,content_hash,"
-                "transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?)",
-                (instance, fingerprint, content, str(transport), identity_ts,
+                "INSERT OR IGNORE INTO message_identities(scope,instance,fingerprint,"
+                "content_hash,transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?,?)",
+                (scope, instance, fingerprint, content, str(transport), identity_ts,
                  twin["message_id"], now))
             return None
         record = _insert_message(c, instance, direction, peer, body, status=status,

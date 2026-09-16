@@ -130,5 +130,106 @@ class IdentityMigrationTests(unittest.TestCase):
                                                    transport="cellular", sent_ts=2000))
 
 
+class SubscriberScopeTests(unittest.TestCase):
+    def setUp(self):
+        self.ctx = TempStore().__enter__()
+        self.lines = {"1": "iccid:8900000000000000001"}
+        store.set_subscriber_resolver(lambda iid: self.lines.get(iid, ""))
+        store.init()
+
+    def tearDown(self):
+        store.set_subscriber_resolver(None)
+        self.ctx.__exit__(None, None, None)
+
+    def test_same_sim_under_a_new_line_id_keeps_its_identities(self):
+        rec = store.ingest_message("1", "in", "INFO", "kept on modem", transport="cellular",
+                                   sent_ts=5_000)
+        store.delete_messages("1", [rec["id"]])
+        del self.lines["1"]
+        self.lines["4"] = "iccid:8900000000000000001"       # line deleted, SIM re-added
+        self.assertIsNone(store.ingest_message("4", "in", "INFO", "kept on modem",
+                                               transport="cellular", sent_ts=5_000))
+
+    def test_another_sim_reusing_a_line_id_starts_clean(self):
+        store.ingest_message("1", "in", "INFO", "same text", transport="cellular", sent_ts=5_000)
+        self.lines["1"] = "iccid:8900000000000000002"
+        self.assertIsNotNone(store.ingest_message("1", "in", "INFO", "same text",
+                                                  transport="cellular", sent_ts=5_000))
+
+    def test_line_without_sim_identity_is_scoped_to_its_id(self):
+        store.ingest_message("9", "in", "INFO", "x", transport="vowifi", sent_ts=5_000)
+        with store._conn() as c:
+            self.assertEqual(c.execute("SELECT scope FROM message_identities WHERE instance='9'")
+                             .fetchone()[0], "line:9")
+
+
+class ScopeMigrationTests(unittest.TestCase):
+    def test_version_three_identities_move_to_their_sim(self):
+        with TempStore() as ctx:
+            store.init()
+            store.ingest_message("1", "in", "INFO", "old", transport="cellular", sent_ts=5_000)
+            with sqlite3.connect(ctx.db) as db:
+                # Rebuild the pre-scope table as a version 3 database had it.
+                rows = db.execute("SELECT instance,fingerprint,content_hash,transport,ts,"
+                                  "message_id,created_ts FROM message_identities").fetchall()
+                db.executescript("""
+                    DROP TABLE message_identities;
+                    CREATE TABLE message_identities (instance TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL, content_hash TEXT NOT NULL,
+                        transport TEXT NOT NULL, ts INTEGER NOT NULL, message_id INTEGER,
+                        created_ts INTEGER NOT NULL, PRIMARY KEY(instance, fingerprint));
+                    CREATE INDEX idx_message_identities_content
+                        ON message_identities(instance, content_hash, ts);
+                    PRAGMA user_version=3;
+                """)
+                db.executemany("INSERT INTO message_identities VALUES(?,?,?,?,?,?,?)", rows)
+            store.set_subscriber_resolver(lambda iid: {"1": "imsi:001010000000001"}.get(iid, ""))
+            try:
+                store.init()
+                with store._conn() as c:
+                    self.assertEqual([r[0] for r in c.execute("SELECT scope FROM message_identities")],
+                                     ["imsi:001010000000001"])
+                self.assertIsNone(store.ingest_message("1", "in", "INFO", "old",
+                                                       transport="cellular", sent_ts=5_000))
+            finally:
+                store.set_subscriber_resolver(None)
+
+
+class TimeZoneIndependenceTests(unittest.TestCase):
+    ZONES = ("UTC", "Asia/Shanghai", "America/Los_Angeles", "Europe/Berlin")
+
+    def each_zone(self, fn):
+        import os, time
+        original = os.environ.get("TZ")
+        results = set()
+        try:
+            for zone in self.ZONES:
+                os.environ["TZ"] = zone
+                time.tzset()
+                results.add(fn())
+        finally:
+            if original is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original
+            time.tzset()
+        return results
+
+    def test_modemmanager_timestamps_do_not_depend_on_the_host_zone(self):
+        from control.app import cellular_sms
+        cases = {"2026-03-14T15:09:26+02": 1773493766, "2026-03-14T15:09:26+02:00": 1773493766,
+                 "2026-03-14T15:09:26+0200": 1773493766, "2026-03-14T13:09:26Z": 1773493766,
+                 "2026-03-14T09:09:26-04": 1773493766}
+        for raw, expected in cases.items():
+            self.assertEqual(self.each_zone(lambda: cellular_sms._timestamp(raw)), {expected}, raw)
+        self.assertEqual(self.each_zone(lambda: cellular_sms._timestamp("2026-03-14T15:09:26")),
+                         {0}, "a zone-less value is refused, not read in local time")
+
+    def test_vowifi_scts_does_not_depend_on_the_host_zone(self):
+        from control.app import sms_pdu
+        self.assertEqual(self.each_zone(
+            lambda: sms_pdu.deliver_timestamp("4404812143000462304151906280")), {1773493766})
+
+
 if __name__ == "__main__":
     unittest.main()

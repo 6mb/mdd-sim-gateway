@@ -58,7 +58,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   often sent the same text over both, which showed as two identical messages. Every message now
   has an identity that does not depend on where it came from -- sender, text and the network's
   own timestamp -- and a copy arriving over the other transport within three minutes is
-  recognised as the same message. Duplicates already in the history are folded once on upgrade,
+  recognised as the same message. Identities belong to the SIM (its ICCID, or IMSI where the
+  modem exposes no ICCID) rather than to the line slot, so re-adding a SIM under a new line
+  does not bring back what its modem still holds, and another SIM given a reused line id starts
+  clean. Network timestamps are converted to absolute time independently of the host's time
+  zone, including ModemManager's hours-only zone suffix that older Python versions could not
+  parse. Duplicates already in the history are folded once on upgrade,
   together with the `--` placeholder rows 1.9.3 stored for an unreadable body. A message you
   delete stays deleted even if the modem still holds it.
 - A VoWiFi SMS is dated by the network's timestamp, like one received on the modem, instead

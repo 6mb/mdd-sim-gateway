@@ -449,14 +449,31 @@ def _delete_object(modem_path: str, sms_path: str, runner, timeout: float = 10) 
     return problem is None and not getattr(result, "returncode", 1)
 
 
+_ISO_ZONE_RE = re.compile(r"(?:Z|([+-])(\d{2})(?::?(\d{2}))?)$")
+
+
 def _timestamp(value) -> int:
+    """Epoch seconds of a ModemManager timestamp, independent of the host's time zone.
+
+    ModemManager writes the SMSC's zone as "+10" (hours only), which datetime.fromisoformat
+    rejects before Python 3.11, and a value without any zone would silently be read in the
+    host's local zone. The zone is normalised to "+HH:MM" first, and a value that still has
+    none is refused (0, so the receipt time is used) rather than guessed.
+    """
     raw = str(value or "").strip()
-    if not raw:
+    match = _ISO_ZONE_RE.search(raw)
+    if not raw or not match:
         return 0
+    if match.group(0) == "Z":
+        normalised = raw[:match.start()] + "+00:00"
+    else:
+        normalised = (raw[:match.start()] + f"{match.group(1)}{match.group(2)}:"
+                      f"{match.group(3) or '00'}")
     try:
-        return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+        parsed = datetime.fromisoformat(normalised)
     except (ValueError, OverflowError):
         return 0
+    return int(parsed.timestamp()) if parsed.tzinfo is not None else 0
 
 
 _CPMS_RE = re.compile(r'"(\w+)"\s*,\s*(\d+)\s*,\s*(\d+)')

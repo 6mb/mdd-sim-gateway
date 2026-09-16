@@ -1545,6 +1545,16 @@ def _join_sms_parts(bodies: list[str], seqs: list[int], total: int) -> str:
     return "".join(out)
 
 
+def _line_subscriber(iid: str) -> str:
+    """The SIM a line's messages belong to, for message identity: ICCID, else IMSI."""
+    inst = cfg.get_instance(iid) or {}
+    iccid = cellular_sms._normalize_iccid(inst.get("iccid"))
+    if iccid:
+        return f"iccid:{iccid}"
+    imsi = cellular_sms._normalize_imsi(inst.get("imsi"))
+    return f"imsi:{imsi}" if imsi else ""
+
+
 async def _publish_incoming_sms(rec: dict) -> None:
     """Announce one newly stored inbound text, whichever transport delivered it."""
     iid = str(rec["instance"])
@@ -2497,6 +2507,7 @@ async def update_automation_poller():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    store.set_subscriber_resolver(_line_subscriber)
     store.init()
     # An upgrade from an older/self-use build may inherit more than five running containers.
     # Keep every saved record, but stop excess engines before background recovery begins.
