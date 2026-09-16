@@ -1591,8 +1591,9 @@ async def mms_worker():
         except Exception as exc:  # noqa
             log.debug("MMS queue read failed: %r", exc)
             continue
-        for row in due:
-            await _process_mms_download(row)
+        # Lines on different modems download in parallel; mms.io_lock() serialises the
+        # exchanges that share one modem.
+        await asyncio.gather(*(_process_mms_download(row) for row in due))
 
 
 async def _process_mms_download(row: dict) -> None:

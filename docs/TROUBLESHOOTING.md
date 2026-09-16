@@ -166,14 +166,9 @@ sudo systemctl restart docker
    ```
 
    返回 `+QICSGP:` 即可用；报错说明命令通道未开启或模块不支持，此时只能选择“主机网络”，且需保证主机能访问 MMSC。
-3. **发送彩信需要独占 AT 口**：经 ModemManager 转发时，模块的上传指令以 `SEND OK` 结束，ModemManager 不认，每段都要等超时，速度约 100 字节/秒，而且连续超时 10 次会被 ModemManager 判定模块失效。因此这条通道只用于下载和回执，超过 4 KB 的请求直接拒绝。要发送彩信，需让 ModemManager 放开模块的备用 AT 口，网关会自动找到并独占它（也可用 `MDD_MMS_AT_PORT` 指定），100 KB 约 3 秒。Quectel EC25（2c7c:0125）的备用 AT 口是接口 3：
+3. **发送彩信需要独占 AT 口**：经 ModemManager 转发时，模块的上传指令以 `SEND OK` 结束，ModemManager 不认，每段都要等超时，速度约 100 字节/秒，而且连续超时 10 次会被 ModemManager 判定模块失效。因此这条通道只用于下载和回执，超过 4 KB 的请求直接拒绝。安装程序会写入 `/etc/udev/rules.d/78-mdd-mms-at-port.rules`，让 ModemManager 放开 Quectel 模块中被它标记为**备用** AT 口（`ID_MM_PORT_TYPE_AT_SECONDARY`）的端口；主 AT 口和 QMI 仍归 ModemManager，只有一个 AT 口的模块不受影响。网关会在每台模块的端口列表中找到这个口并独占使用（也可用 `MDD_MMS_AT_PORT` 指定），100 KB 约 3 秒。插多台模块时每台各用自己的端口，不同模块的彩信收发并行，同一模块上依次进行。
 
-   ```bash
-   printf '%s\n' 'ACTION!="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0125", ENV{ID_USB_INTERFACE_NUM}=="03", ENV{ID_MM_PORT_IGNORE}="1"' | sudo tee /etc/udev/rules.d/78-mdd-mms-at-port.rules
-   sudo udevadm control --reload-rules && sudo udevadm trigger --action=change --subsystem-match=tty && sudo systemctl restart ModemManager
-   ```
-
-   其他型号请先用 `udevadm info -q property -n /dev/ttyUSBx` 确认哪个口带 `ID_MM_PORT_TYPE_AT_SECONDARY=1`，再改规则中的 idProduct 与接口号。重启 ModemManager 会短暂断开 4G 数据连接。`mmcli -m 0` 的端口列表中该口显示为 `(ignored)` 即生效；删除规则文件并重启 ModemManager 即可撤销。浏览器仍会先把图片压缩到线路的大小上限（默认 300 KB）。
+   检查是否生效：`mmcli -m 0` 的端口列表中备用 AT 口显示为 `(ignored)`。只有一个 AT 口的模块无法独占，发送彩信会报错说明原因，下载不受影响。规则写入或卸载时会重启 ModemManager，4G 数据连接会短暂断开。
 4. **状态“未知”**：请求已发出但没有收到 MMSC 答复。网关不会自动重发，以免对方收到两条彩信。
 5. **早已过期的通知**：模块离线期间积压、已超过 MMSC 保存期限的通知直接标记为“已过期”，不请求 MMSC，也不推送；仍可手动重试。
 

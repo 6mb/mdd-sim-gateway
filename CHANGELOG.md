@@ -14,9 +14,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - MMS can be sent: text, pictures, audio, video or contact cards to one or several
   recipients, with a delivery report shown on the message when the carrier sends one. The
   size limit is per line (300 KB by default). Over the modem this needs an AT port the gateway
-  owns: a udev rule tells ModemManager to ignore the module's spare AT interface, and the
-  gateway finds that port by itself (or takes `MDD_MMS_AT_PORT`). A 100 KB MMS then uploads in
-  about three seconds. Without it only retrievals go over the modem, because ModemManager
+  owns: the installer adds a udev rule releasing the port ModemManager classifies as a Quectel
+  module's secondary AT port (the primary one and QMI stay with ModemManager, and a module with
+  a single AT port is left alone), and the gateway finds that port on each modem by itself (or
+  takes `MDD_MMS_AT_PORT`). A 100 KB MMS then uploads in about three seconds, and lines on
+  different modems send and download in parallel. Without it only retrievals go over the modem, because ModemManager
   relays the module's upload command at about 100 bytes a second -- slow enough for the MMSC
   proxy to give up, and each chunk counts toward ModemManager's limit of consecutive timeouts
   after which it drops the modem. A send whose answer is lost is marked unknown and never

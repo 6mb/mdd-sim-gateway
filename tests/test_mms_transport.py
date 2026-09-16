@@ -475,5 +475,35 @@ class SendTests(DownloadTests):
         self.assertEqual(store.get_message(rec["id"])["status"], "unknown")
 
 
+class ExchangeLockTests(unittest.TestCase):
+    def test_exchanges_share_a_lock_only_when_they_share_a_modem(self):
+        import threading
+        a, b = mms.io_lock("/modem/0"), mms.io_lock("/modem/1")
+        self.assertIs(a, mms.io_lock("/modem/0"))
+        self.assertIsNot(a, b)
+        with a:
+            acquired = []
+            other = threading.Thread(target=lambda: acquired.append(b.acquire(timeout=1)))
+            other.start(); other.join()
+            same = threading.Thread(target=lambda: acquired.append(a.acquire(timeout=0.05)))
+            same.start(); same.join()
+        b.release()
+        self.assertEqual(acquired, [True, False])
+
+    def test_the_client_is_opened_before_its_modem_lock_is_taken(self):
+        opened = []
+
+        def fake_open(inst, settings, runner=None):
+            opened.append(mms.io_lock("/modem/7").locked())
+            return FakeClient([]), "/modem/7"
+
+        with patch.object(mms, "open_client", side_effect=fake_open):
+            with mms._exchange({}, {}, None, None) as client:
+                self.assertTrue(mms.io_lock("/modem/7").locked())
+                self.assertIsInstance(client, FakeClient)
+        self.assertEqual(opened, [False])
+        self.assertFalse(mms.io_lock("/modem/7").locked())
+
+
 if __name__ == "__main__":
     unittest.main()

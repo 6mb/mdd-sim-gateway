@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 
 from . import cellular_sms, mms_pdu, mms_transport, store
 
@@ -24,9 +25,16 @@ WAP_PUSH_PORT = 2948
 # Retrieval retries after a transient failure. An MMSC keeps a message for days, but a
 # notification can be retried sooner than its expiry is worth waiting for.
 RETRY_DELAYS = (60, 300, 900, 3600, 4 * 3600)
-# One MMSC exchange at a time per gateway: the modem's command channel is serial and shared
-# with the SIM bridge, and interleaving two sockets' AT commands would only slow both.
-io_lock = threading.Lock()
+# One MMSC exchange at a time per modem: its AT port and its socket id are single-use, so
+# two exchanges on one modem would trample each other. Different modems -- and the host --
+# have nothing in common and run side by side.
+_io_locks: dict[str, threading.Lock] = {}
+_io_locks_guard = threading.Lock()
+
+
+def io_lock(key: str) -> threading.Lock:
+    with _io_locks_guard:
+        return _io_locks.setdefault(str(key), threading.Lock())
 
 _STATUS_NAMES = {
     mms_pdu.STATUS_EXPIRED: "expired", mms_pdu.STATUS_RETRIEVED: "retrieved",
@@ -116,7 +124,20 @@ def open_client(inst: dict, settings: dict, *, runner=subprocess.run):
         raise mms_transport.MmsTransportError(
             "no MMSC is known for this line's carrier; set it in the line's MMS settings",
             retryable=False)
-    return mms_transport.client_for(settings, _modem_for(inst, runner), runner=runner)
+    modem_path = _modem_for(inst, runner)
+    client = mms_transport.client_for(settings, modem_path, runner=runner)
+    return client, (modem_path if isinstance(client, mms_transport.ModemSocketHttp) else "host")
+
+
+@contextmanager
+def _exchange(inst: dict, settings: dict, client, runner):
+    """The client for this line, held under its modem's lock for the whole exchange."""
+    if client is not None:
+        key = f"client:{id(client)}"
+    else:
+        client, key = open_client(inst, settings, runner=runner)
+    with io_lock(key):
+        yield client
 
 
 def _parts_for_store(pdu: mms_pdu.MmsPdu) -> list[dict]:
@@ -151,9 +172,7 @@ def download(inst: dict, message_id: int, *, client=None, now: int | None = None
         return {"ok": False, "error": "expired", "final": True, "expired": True}
     store.set_mms_state(message_id, "downloading")
     try:
-        with io_lock:
-            if client is None:
-                client = open_client(inst, settings, runner=runner)
+        with _exchange(inst, settings, client, runner) as client:
             response = client.request("GET", row["content_location"],
                                       headers=_request_headers(settings))
             if response.status != 200:
@@ -288,9 +307,7 @@ def send(inst: dict, message_id: int, *, client=None, runner=subprocess.run) -> 
         request = mms_pdu.encode_send_req(
             transaction_id=row["transaction_id"], to=json.loads(row["to_addrs"] or "[]"),
             parts=parts, subject=row["subject"] or "", delivery_report=True)
-        with io_lock:
-            if client is None:
-                client = open_client(inst, settings, runner=runner)
+        with _exchange(inst, settings, client, runner) as client:
             response = client.request(
                 "POST", settings["mmsc"], body=request,
                 headers=_request_headers(settings, mms_transport.MMS_CONTENT_TYPE),

@@ -220,6 +220,36 @@ ensure_cellular_tools() {
   have mmcli || die "ModemManager command mmcli is unavailable"
   have nmcli || die "NetworkManager command nmcli is unavailable"
   ensure_modemmanager_command_interface
+  ensure_mms_at_port_rule
+}
+
+# Sending MMS through a modem's embedded TCP/IP stack needs an AT port the gateway owns:
+# through ModemManager's command channel the module's upload command never completes, so each
+# chunk waits out a timeout, and a run of them makes ModemManager drop the modem. This rule
+# releases only a port ModemManager itself classifies as a Quectel module's *secondary* AT
+# port; the primary AT port and QMI/MBIM stay with ModemManager, and a module with a single
+# AT port has no secondary one to match.
+ensure_mms_at_port_rule() {
+  [ -d /etc/udev/rules.d ] || return 0
+  rule_file=/etc/udev/rules.d/78-mdd-mms-at-port.rules
+  temporary=$(mktemp /tmp/mdd-udev.XXXXXX)
+  cat >"$temporary" <<'RULE'
+# MDD Sim Gateway: let the gateway own a Quectel module's secondary AT port for MMS uploads.
+# ModemManager keeps the primary AT port and QMI; a module with a single AT port is unaffected.
+ACTION!="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="2c7c", ENV{ID_MM_PORT_TYPE_AT_SECONDARY}=="1", ENV{ID_MM_PORT_IGNORE}="1"
+RULE
+  if [ ! -f "$rule_file" ] || ! cmp -s "$temporary" "$rule_file"; then
+    install -m 0644 "$temporary" "$rule_file"
+    if have udevadm; then
+      udevadm control --reload-rules 2>/dev/null || true
+      udevadm trigger --action=change --subsystem-match=tty 2>/dev/null || true
+    fi
+    if have systemctl && systemctl is-active ModemManager.service >/dev/null 2>&1; then
+      info "releasing the modem's secondary AT port for MMS (ModemManager restarts)…"
+      systemctl restart ModemManager.service
+    fi
+  fi
+  rm -f "$temporary"
 }
 
 # The module SIM bridge sends APDUs through ModemManager's guarded AT command API.  Upstream
@@ -1402,6 +1432,10 @@ cmd_uninstall() {
   info "removing native control plane (if any)…"
   remove_control_local
   remove_orchestrator
+  if [ -f /etc/udev/rules.d/78-mdd-mms-at-port.rules ]; then
+    rm -f /etc/udev/rules.d/78-mdd-mms-at-port.rules
+    if have udevadm; then udevadm control --reload-rules 2>/dev/null || true; fi
+  fi
   if [ -f /etc/systemd/system/ModemManager.service.d/90-mdd-command-interface.conf ]; then
     rm -f /etc/systemd/system/ModemManager.service.d/90-mdd-command-interface.conf
     systemctl daemon-reload >/dev/null 2>&1 || true
