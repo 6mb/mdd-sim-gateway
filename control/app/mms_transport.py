@@ -18,6 +18,7 @@ byte counters. Uploads run at roughly 200 bytes a second; downloads are unaffect
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -68,32 +69,44 @@ def lookup_provider(mcc, mnc, path: str | None = None) -> dict | None:
     mcc, mnc = str(mcc or "").strip(), str(mnc or "").strip()
     if not mcc or not mnc:
         return None
+    path = path or PROVIDER_DB
     try:
-        root = ElementTree.parse(path or PROVIDER_DB).getroot()
-    except (OSError, ElementTree.ParseError):
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
         return None
-    wanted = {(mcc, mnc.lstrip("0") or "0")}
+    entry = _mms_provider_table(path, stamp).get((mcc, mnc.lstrip("0") or "0"))
+    return dict(entry) if entry else None
+
+
+@functools.lru_cache(maxsize=2)
+def _mms_provider_table(path: str, _stamp: int) -> dict:
+    """{(mcc, mnc): first MMS APN entry}, parsed once per database file version."""
+    try:
+        root = ElementTree.parse(path).getroot()
+    except (OSError, ElementTree.ParseError):
+        return {}
+    table: dict = {}
     for provider in root.iter("provider"):
         gsm = provider.find("gsm")
         if gsm is None:
             continue
-        codes = {(n.get("mcc", ""), (n.get("mnc", "").lstrip("0") or "0"))
-                 for n in gsm.findall("network-id")}
-        if not codes & wanted:
-            continue
+        entry = None
         for apn in gsm.findall("apn"):
             usage = apn.find("usage")
-            if usage is None or usage.get("type") != "mms":
-                continue
             mmsc = (apn.findtext("mmsc") or "").strip()
-            if not mmsc:
-                continue
-            return {"name": (provider.findtext("name") or "").strip(),
-                    "apn": apn.get("value", ""), "mmsc": mmsc,
-                    "proxy": (apn.findtext("mmsproxy") or "").strip(),
-                    "username": (apn.findtext("username") or "").strip(),
-                    "password": (apn.findtext("password") or "").strip()}
-    return None
+            if usage is not None and usage.get("type") == "mms" and mmsc:
+                entry = {"name": (provider.findtext("name") or "").strip(),
+                         "apn": apn.get("value", ""), "mmsc": mmsc,
+                         "proxy": (apn.findtext("mmsproxy") or "").strip(),
+                         "username": (apn.findtext("username") or "").strip(),
+                         "password": (apn.findtext("password") or "").strip()}
+                break
+        if entry is None:
+            continue
+        for network in gsm.findall("network-id"):
+            key = (network.get("mcc", ""), network.get("mnc", "").lstrip("0") or "0")
+            table.setdefault(key, entry)
+    return table
 
 
 def resolve_settings(inst: dict, *, provider_path: str | None = None) -> dict:
