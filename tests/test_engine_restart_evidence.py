@@ -178,6 +178,18 @@ class PcscfApplyModeTests(unittest.TestCase):
         self.assertLess(marker, self.func.index('_asterisk_cli("core restart now")'))
         self.assertLess(marker, self.func.index('_asterisk_cli("module reload res_pjsip.so")'))
 
+    def test_apply_mode_is_settable_per_line_with_a_global_fallback(self):
+        """The crash is a use-after-free that does not fire on every reload, so switching one
+        line proves nothing unless the others stay on the old path as a control group."""
+        source = (REPO / "control" / "app" / "engine.py").read_text()
+        start = source.index('"SWU_PCSCF_APPLY_MODE"')
+        clause = source[start:start + 260]
+        self.assertIn('inst.get("pcscf_apply_mode")', clause)
+        # Per-line value must win over the global one.
+        self.assertLess(clause.index('inst.get("pcscf_apply_mode")'),
+                        clause.index('settings.get("engine")'))
+        self.assertIn('or "reload"', clause)
+
     def test_peer_initiated_teardown_is_reported_with_its_duration(self):
         """Which side ended the tunnel, and after how long, is the whole story behind the
         periodic outages — one carrier tears down on a ~24h timer regardless of rekeys."""

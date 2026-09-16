@@ -477,10 +477,15 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
             "MDD_ID": iid,
             "SWU_LIVENESS_PERIOD": str(inst.get("liveness_period", 0)),
             "SWU_TUN_MTU": os.environ.get("SWU_TUN_MTU", "1400"),
-            # How a new P-CSCF is pushed into Asterisk on reconnect: "reload" (default, current
-            # behaviour) or "restart" (Asterisk-internal cold restart). See swu_apply_pcscf.
+            # How a new P-CSCF is pushed into Asterisk on reconnect: "reload" (default) or
+            # "restart" (Asterisk-internal cold restart). See swu_apply_pcscf. Settable per
+            # line so one carrier can be moved over while the others stay on the old path as
+            # a control group — the reload crash is a use-after-free that does not reproduce
+            # on every reload, so a single line switching is not by itself evidence.
             "SWU_PCSCF_APPLY_MODE": str(
-                (settings.get("engine") or {}).get("pcscf_apply_mode", "reload")),
+                inst.get("pcscf_apply_mode")
+                or (settings.get("engine") or {}).get("pcscf_apply_mode")
+                or "reload"),
         },
         sysctls={
             "net.ipv6.conf.all.accept_ra": "0",
