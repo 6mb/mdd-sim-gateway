@@ -395,7 +395,57 @@ def _migration_modem_object_on_message(c) -> None:
               "ON messages(instance, modem_sms_path) WHERE modem_sms_path IS NOT NULL")
 
 
-_MIGRATIONS = (_migration_message_identity, _migration_modem_object_on_message)
+def _migration_mms(c) -> None:
+    """MMS: one `messages` row per MMS (kind='mms') so it sits in its conversation, plus its
+    retrieval/sending state and its parts. Part content lives in files under MMS_DIR; a
+    database row per image would bloat every backup of the message history."""
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS mms (
+            message_id INTEGER PRIMARY KEY,
+            instance TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            state TEXT NOT NULL,
+            transaction_id TEXT NOT NULL DEFAULT '',
+            content_location TEXT NOT NULL DEFAULT '',
+            message_ref TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            from_addr TEXT NOT NULL DEFAULT '',
+            to_addrs TEXT NOT NULL DEFAULT '[]',
+            cc_addrs TEXT NOT NULL DEFAULT '[]',
+            size INTEGER,
+            expiry_ts INTEGER,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_ts INTEGER,
+            last_error TEXT NOT NULL DEFAULT '',
+            transport TEXT NOT NULL DEFAULT '',
+            delivery TEXT NOT NULL DEFAULT '{}',
+            updated_ts INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mms_state ON mms(state, next_attempt_ts);
+        CREATE INDEX IF NOT EXISTS idx_mms_ref ON mms(instance, message_ref);
+        CREATE TABLE IF NOT EXISTS mms_parts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            content_type TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            content_id TEXT NOT NULL DEFAULT '',
+            charset TEXT NOT NULL DEFAULT '',
+            size INTEGER NOT NULL DEFAULT 0,
+            path TEXT NOT NULL DEFAULT '',
+            text TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mms_parts_message ON mms_parts(message_id, seq);
+    """)
+    try:
+        # A binary multi-part payload (a long WAP Push) is reassembled from the same buffer
+        # as text parts, but must never be flushed as a text message.
+        c.execute("ALTER TABLE sms_segments ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'")
+    except sqlite3.OperationalError:
+        pass
+
+
+_MIGRATIONS = (_migration_message_identity, _migration_modem_object_on_message, _migration_mms)
 
 
 def _sweep_binary_messages(c) -> int:
@@ -434,6 +484,13 @@ def add_binary_sms(instance: str, peer: str, ts: int | None = None, *,
     ts = int(ts or time.time())
     ref, total, seq = concat or (None, None, None)
     with _lock, _conn() as c:
+        if transport == "cellular":
+            # A modem object read again (a kept object after a restart) is the same payload.
+            same = c.execute("SELECT * FROM binary_sms WHERE instance=? AND peer=? AND ts=? "
+                             "AND body_hex=? LIMIT 1",
+                             (str(instance), peer, ts, body_hex)).fetchone()
+            if same:
+                return dict(same)
         cur = c.execute(
             "INSERT INTO binary_sms(instance,peer,ts,transport,tp_pid,tp_dcs,"
             "concat_ref,concat_total,concat_seq,udh_hex,tpdu_hex,body_hex) "
@@ -539,7 +596,7 @@ def _group_sent_ts(rows) -> int | None:
 
 def add_sms_segment(instance: str, peer: str, concat_ref: int, total: int, seq: int,
                     body: str, ts: int | None = None, *, sent_ts: int | None = None,
-                    with_meta: bool = False) -> list[str] | dict | None:
+                    with_meta: bool = False, kind: str = "text") -> list[str] | dict | None:
     """Buffer one part of a concatenated SMS.
 
     Returns the full ordered list of part bodies once the LAST missing part arrives (and drops
@@ -551,10 +608,10 @@ def add_sms_segment(instance: str, peer: str, concat_ref: int, total: int, seq: 
     with _lock, _conn() as c:
         c.execute(
             "INSERT INTO sms_segments(instance,peer,concat_ref,total,seq,body,created_ts,"
-            "sent_ts) VALUES(?,?,?,?,?,?,?,?) "
+            "sent_ts,kind) VALUES(?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(instance,peer,concat_ref,total,seq) DO NOTHING",
             (str(instance), peer, int(concat_ref), int(total), int(seq), body, ts,
-             int(sent_ts) if sent_ts else None))
+             int(sent_ts) if sent_ts else None, str(kind)))
         rows = c.execute(
             "SELECT seq,body,sent_ts FROM sms_segments "
             "WHERE instance=? AND peer=? AND concat_ref=? AND total=? ORDER BY seq",
@@ -569,7 +626,7 @@ def add_sms_segment(instance: str, peer: str, concat_ref: int, total: int, seq: 
 
 
 def take_stale_sms_segments(timeout: int = SEGMENT_TIMEOUT,
-                            now: int | None = None) -> list[dict]:
+                            now: int | None = None, kind: str = "text") -> list[dict]:
     """Remove every part group whose FIRST part arrived more than `timeout` seconds ago and
     return what each one had collected, so an incomplete message is still shown rather than
     silently dropped. Each entry carries the ordered bodies plus the seq numbers present, so
@@ -580,8 +637,8 @@ def take_stale_sms_segments(timeout: int = SEGMENT_TIMEOUT,
     with _lock, _conn() as c:
         groups = c.execute(
             "SELECT instance,peer,concat_ref,total,MIN(created_ts) AS first_ts "
-            "FROM sms_segments GROUP BY instance,peer,concat_ref,total "
-            "HAVING MIN(created_ts) <= ?", (cutoff,)).fetchall()
+            "FROM sms_segments WHERE kind=? GROUP BY instance,peer,concat_ref,total "
+            "HAVING MIN(created_ts) <= ?", (str(kind), cutoff)).fetchall()
         for g in groups:
             key = (g["instance"], g["peer"], g["concat_ref"], g["total"])
             rows = c.execute(
@@ -743,14 +800,15 @@ def _record_identity(c, instance: str, message_id: int, direction: str, peer, bo
 
 def _insert_message(c, instance: str, direction: str, peer: str, body: str, *, status: str,
                     transport: str, ts: int, received_ts: int, sent_ts: int | None = None,
-                    kind: str = "sms", identity_ts: int | None = None) -> dict:
+                    kind: str = "sms", identity_ts: int | None = None,
+                    identity: str | None = None) -> dict:
     cur = c.execute(
         "INSERT INTO messages(instance,direction,peer,body,status,ts,transport,kind,sent_ts,"
         "received_ts) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (instance, direction, peer, body, status, int(ts), transport, kind, sent_ts,
          int(received_ts)))
     mid = int(cur.lastrowid)
-    _record_identity(c, instance, mid, direction, peer, body,
+    _record_identity(c, instance, mid, direction, peer, body if identity is None else identity,
                      ts if identity_ts is None else identity_ts, transport, kind)
     return {"id": mid, "instance": instance, "direction": direction, "peer": peer,
             "body": body, "status": status, "error": None, "ts": int(ts),
@@ -765,7 +823,7 @@ def set_message_body(mid: int, body: str) -> dict | None:
         row = c.execute(
             "SELECT id,instance,direction,peer,body,status,error,ts,transport,kind "
             "FROM messages WHERE id=?", (int(mid),)).fetchone()
-        if row:
+        if row and (row["kind"] or "sms") == "sms":
             # The text grew, so its identity did too; the identity of the partial text stays
             # recorded, which keeps a late re-delivery of the partial form from reappearing.
             _record_identity(c, str(row["instance"]), int(row["id"]), row["direction"],
@@ -787,7 +845,8 @@ def add_message(instance: str, direction: str, peer: str, body: str, status: str
 def ingest_message(instance: str, direction: str, peer: str, body: str, *,
                    transport: str, sent_ts: int | None = None,
                    received_ts: int | None = None, kind: str = "sms",
-                   status: str = "ok") -> dict | None:
+                   status: str = "ok", identity: str | None = None,
+                   on_insert=None) -> dict | None:
     """Store a message delivered from outside unless this line already has it.
 
     Returns the stored record, or None when it is a copy of a message already stored -- or
@@ -798,7 +857,10 @@ def ingest_message(instance: str, direction: str, peer: str, body: str, *,
         a short window: the SIM is registered both over VoWiFi and on the modem, and the
         network delivered to both.
     `sent_ts` is the network's timestamp (TP-SCTS) when the transport exposes one; it becomes
-    the displayed time, while `received_ts` stays the local receipt time.
+    the displayed time, while `received_ts` stays the local receipt time. `identity` replaces
+    the body in the identity when the body is not what makes the message unique (an MMS is
+    identified by its MMSC location before any text is known); `on_insert(c, record)` runs in
+    the same transaction as the insert.
     """
     instance = str(instance)
     now = int(time.time())
@@ -809,8 +871,13 @@ def ingest_message(instance: str, direction: str, peer: str, body: str, *,
     # and its first-seen time changes on every read. Its identity is then its content alone:
     # two identical texts to one recipient that both lack a timestamp are indistinguishable.
     identity_ts = network_ts or (received_ts if direction == "in" else 0)
-    fingerprint = message_fingerprint(direction, peer, body, identity_ts, kind)
-    content = message_content_hash(direction, peer, body, kind)
+    if identity is not None:
+        # An explicit identity is unique by itself (an MMSC location), and a resent
+        # notification carries a new network timestamp: time must not split it in two.
+        identity_ts = 0
+    key = body if identity is None else identity
+    fingerprint = message_fingerprint(direction, peer, key, identity_ts, kind)
+    content = message_content_hash(direction, peer, key, kind)
     with _lock, _conn() as c:
         if c.execute("SELECT 1 FROM message_identities WHERE instance=? AND fingerprint=?",
                      (instance, fingerprint)).fetchone():
@@ -829,9 +896,13 @@ def ingest_message(instance: str, direction: str, peer: str, body: str, *,
                 (instance, fingerprint, content, str(transport), identity_ts,
                  twin["message_id"], now))
             return None
-        return _insert_message(c, instance, direction, peer, body, status=status,
-                               transport=transport, ts=ts, received_ts=received_ts,
-                               sent_ts=network_ts, kind=kind, identity_ts=identity_ts)
+        record = _insert_message(c, instance, direction, peer, body, status=status,
+                                 transport=transport, ts=ts, received_ts=received_ts,
+                                 sent_ts=network_ts, kind=kind, identity_ts=identity_ts,
+                                 identity=identity)
+        if on_insert is not None:
+            on_insert(c, record)
+        return record
 
 
 ALLOWANCE_FIELDS = ("balance", "valid_until", "sms_remaining", "data_remaining",
@@ -1180,7 +1251,7 @@ def bind_local_modem_sms(message_id: int, modem_path: str, sms_path: str) -> boo
 def get_message(mid: int) -> dict | None:
     with _lock, _conn() as c:
         row = c.execute("SELECT * FROM messages WHERE id=?", (int(mid),)).fetchone()
-    return dict(row) if row else None
+        return _with_mms(c, [dict(row)])[0] if row else None
 
 
 def owns_local_modem_sms(instance: str, modem_path: str, sms_path: str, peer: str,
@@ -1214,12 +1285,268 @@ def owns_local_modem_sms(instance: str, modem_path: str, sms_path: str, peer: st
     return False
 
 
+# ----------------------------- MMS -----------------------------
+# Inbound: notified -> downloading -> retrieved | failed | expired (failed may be retried).
+# Outbound: sending -> sent -> delivered | failed.
+MMS_STATES = ("notified", "downloading", "retrieved", "failed", "expired", "sending", "sent",
+              "delivered")
+
+
+def mms_dir() -> str:
+    return os.path.join(DATA_DIR, "mms")
+
+
+def _mms_message_dir(message_id: int) -> str:
+    return os.path.join(mms_dir(), str(int(message_id)))
+
+
+def _mms_public(row, parts) -> dict:
+    record = dict(row)
+    for key in ("to_addrs", "cc_addrs"):
+        try:
+            record[key] = json.loads(record.get(key) or "[]")
+        except ValueError:
+            record[key] = []
+    try:
+        record["delivery"] = json.loads(record.get("delivery") or "{}")
+    except ValueError:
+        record["delivery"] = {}
+    # The MMSC location is a bearer credential for the content; the browser never needs it.
+    record.pop("content_location", None)
+    record["parts"] = [{k: p[k] for k in ("id", "seq", "content_type", "name", "content_id",
+                                          "charset", "size", "text")} for p in parts]
+    return record
+
+
+def _with_mms(c, messages: list[dict]) -> list[dict]:
+    ids = [int(m["id"]) for m in messages if (m.get("kind") or "sms") == "mms"]
+    if not ids:
+        return messages
+    marks = _placeholders(len(ids))
+    states = {int(r["message_id"]): r for r in c.execute(
+        f"SELECT * FROM mms WHERE message_id IN ({marks})", ids)}
+    parts: dict[int, list] = {}
+    for r in c.execute(f"SELECT * FROM mms_parts WHERE message_id IN ({marks}) "
+                       "ORDER BY message_id, seq", ids):
+        parts.setdefault(int(r["message_id"]), []).append(r)
+    for message in messages:
+        row = states.get(int(message["id"]))
+        if row is not None:
+            message["mms"] = _mms_public(row, parts.get(int(message["id"]), []))
+    return messages
+
+
+def canonical_peer(instance: str, peer: str) -> str:
+    """The spelling this line's history already uses for `peer`, so one correspondent keeps
+    one conversation. An MMSC often writes the sender without "+" where the SMS path had it."""
+    key = normalize_peer(peer)
+    if not key:
+        return str(peer or "")
+    with _lock, _conn() as c:
+        rows = c.execute("SELECT DISTINCT peer FROM messages WHERE instance=? "
+                         "ORDER BY peer", (str(instance),)).fetchall()
+    for row in rows:
+        if normalize_peer(row["peer"]) == key:
+            return str(row["peer"])
+    return str(peer or "")
+
+
+def ingest_mms_notification(instance: str, *, peer: str, transport: str,
+                            content_location: str, transaction_id: str = "",
+                            subject: str = "", size: int | None = None,
+                            expiry_ts: int | None = None, sent_ts: int | None = None,
+                            to_addrs: list[str] | None = None) -> dict | None:
+    """Store one MMS notification as a pending MMS, unless this line already has it.
+
+    The MMSC location identifies the MMS: the same notification reaches a SIM registered over
+    VoWiFi and on its modem, and a carrier resends it when a notify-response goes missing.
+    """
+    now = int(time.time())
+
+    def create(c, record):
+        c.execute(
+            "INSERT INTO mms(message_id,instance,direction,state,transaction_id,content_location,"
+            "subject,from_addr,to_addrs,size,expiry_ts,transport,next_attempt_ts,updated_ts) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (record["id"], str(instance), "in", "notified", str(transaction_id or ""),
+             str(content_location), str(subject or ""), str(peer or ""),
+             json.dumps(list(to_addrs or [])), size, expiry_ts, str(transport), now, now))
+
+    rec = ingest_message(instance, "in", peer, subject or "", transport=transport,
+                         sent_ts=sent_ts, kind="mms", identity=f"mms:{content_location}",
+                         on_insert=create)
+    return get_message(rec["id"]) if rec else None
+
+
+def mms_for_download(message_id: int) -> dict | None:
+    """The full MMS state row, including the MMSC location, for the retrieval worker."""
+    with _lock, _conn() as c:
+        row = c.execute("SELECT * FROM mms WHERE message_id=?", (int(message_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def due_mms_downloads(now: int | None = None, limit: int = 5) -> list[dict]:
+    now = int(now or time.time())
+    with _lock, _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM mms WHERE direction='in' AND state IN ('notified','failed') "
+            "AND next_attempt_ts IS NOT NULL AND next_attempt_ts<=? "
+            "ORDER BY next_attempt_ts LIMIT ?", (now, int(limit))).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_mms_state(message_id: int, state: str, *, error: str | None = None,
+                  next_attempt_ts: int | None | bool = False, attempts_increment: int = 0,
+                  message_ref: str | None = None, message_status: str | None = None) -> None:
+    """Move an MMS to `state`. `next_attempt_ts=None` clears the retry schedule; leaving it
+    False keeps whatever is scheduled."""
+    fields, args = ["state=?", "updated_ts=?", "attempts=attempts+?"], \
+        [str(state), int(time.time()), int(attempts_increment)]
+    if error is not None:
+        fields.append("last_error=?")
+        args.append(str(error)[:500])
+    if next_attempt_ts is not False:
+        fields.append("next_attempt_ts=?")
+        args.append(next_attempt_ts)
+    if message_ref is not None:
+        fields.append("message_ref=?")
+        args.append(str(message_ref))
+    with _lock, _conn() as c:
+        c.execute(f"UPDATE mms SET {','.join(fields)} WHERE message_id=?",
+                  (*args, int(message_id)))
+        if message_status is not None:
+            c.execute("UPDATE messages SET status=?, error=? WHERE id=?",
+                      (message_status, error if message_status == "failed" else None,
+                       int(message_id)))
+
+
+def _safe_part_name(seq: int, name: str, content_type: str) -> str:
+    base = os.path.basename(str(name or "")).strip()
+    base = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in base)[:80].strip("._")
+    if not base:
+        base = content_type.split("/")[-1].split(";")[0] or "part"
+        base = "".join(ch if ch.isalnum() else "_" for ch in base)[:20]
+    return f"{int(seq):02d}-{base}"
+
+
+def save_mms_content(message_id: int, parts: list[dict], *, subject: str | None = None,
+                     body: str | None = None, from_addr: str | None = None,
+                     to_addrs: list[str] | None = None, cc_addrs: list[str] | None = None,
+                     size: int | None = None) -> None:
+    """Replace an MMS's parts with `parts` ({content_type, data, name, content_id, charset,
+    text}) and update its summary. Files are written before the rows that point at them."""
+    directory = _mms_message_dir(message_id)
+    os.makedirs(directory, exist_ok=True)
+    rows = []
+    for seq, part in enumerate(parts):
+        data = bytes(part.get("data") or b"")
+        filename = _safe_part_name(seq, part.get("name", ""), part.get("content_type", ""))
+        temporary = os.path.join(directory, f".{filename}.tmp")
+        with open(temporary, "wb") as handle:
+            handle.write(data)
+        os.replace(temporary, os.path.join(directory, filename))
+        rows.append((int(message_id), seq, str(part.get("content_type") or
+                                              "application/octet-stream"),
+                     str(part.get("name") or ""), str(part.get("content_id") or ""),
+                     str(part.get("charset") or ""), len(data), filename, part.get("text")))
+    with _lock, _conn() as c:
+        old = [r[0] for r in c.execute("SELECT path FROM mms_parts WHERE message_id=?",
+                                       (int(message_id),))]
+        c.execute("DELETE FROM mms_parts WHERE message_id=?", (int(message_id),))
+        c.executemany("INSERT INTO mms_parts(message_id,seq,content_type,name,content_id,"
+                      "charset,size,path,text) VALUES(?,?,?,?,?,?,?,?,?)", rows)
+        updates, args = ["updated_ts=?"], [int(time.time())]
+        for column, value in (("subject", subject), ("from_addr", from_addr), ("size", size)):
+            if value is not None:
+                updates.append(f"{column}=?")
+                args.append(value)
+        for column, value in (("to_addrs", to_addrs), ("cc_addrs", cc_addrs)):
+            if value is not None:
+                updates.append(f"{column}=?")
+                args.append(json.dumps(list(value)))
+        c.execute(f"UPDATE mms SET {','.join(updates)} WHERE message_id=?",
+                  (*args, int(message_id)))
+        if body is not None:
+            c.execute("UPDATE messages SET body=? WHERE id=?", (str(body), int(message_id)))
+    keep = {row[7] for row in rows}
+    for name in old:
+        if name and name not in keep:
+            try:
+                os.remove(os.path.join(directory, name))
+            except OSError:
+                pass
+
+
+def mms_part_file(instance: str, message_id: int, part_id: int) -> dict | None:
+    """A stored part and the absolute path of its content, scoped to its line."""
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT p.* FROM mms_parts p JOIN messages m ON m.id=p.message_id "
+            "WHERE m.instance=? AND p.message_id=? AND p.id=?",
+            (str(instance), int(message_id), int(part_id))).fetchone()
+    if not row or not row["path"]:
+        return None
+    directory = os.path.realpath(_mms_message_dir(message_id))
+    path = os.path.realpath(os.path.join(directory, row["path"]))
+    if os.path.dirname(path) != directory or not os.path.isfile(path):
+        return None
+    return {**dict(row), "file": path}
+
+
+def create_outgoing_mms(instance: str, peer: str, *, to_addrs: list[str], subject: str,
+                        body: str, transaction_id: str, transport: str = "") -> dict:
+    now = int(time.time())
+    with _lock, _conn() as c:
+        rec = _insert_message(c, str(instance), "out", str(peer), str(body), status="pending",
+                              transport=transport or "mms", ts=now, received_ts=now,
+                              kind="mms", identity=f"mms-out:{transaction_id}")
+        c.execute(
+            "INSERT INTO mms(message_id,instance,direction,state,transaction_id,subject,"
+            "to_addrs,transport,updated_ts) VALUES(?,?,?,?,?,?,?,?,?)",
+            (rec["id"], str(instance), "out", "sending", str(transaction_id), str(subject or ""),
+             json.dumps(list(to_addrs)), str(transport or ""), now))
+    return rec
+
+
+def record_mms_delivery(instance: str, message_ref: str, recipient: str, status: str,
+                        ts: int | None = None) -> dict | None:
+    """Apply one delivery report to the outgoing MMS it belongs to; None if none matches."""
+    if not message_ref:
+        return None
+    with _lock, _conn() as c:
+        row = c.execute("SELECT message_id,delivery FROM mms WHERE instance=? AND direction='out' "
+                        "AND message_ref=? ORDER BY message_id DESC LIMIT 1",
+                        (str(instance), str(message_ref))).fetchone()
+        if not row:
+            return None
+        try:
+            delivery = json.loads(row["delivery"] or "{}")
+        except ValueError:
+            delivery = {}
+        delivery[str(recipient or "")] = {"status": str(status), "ts": int(ts or time.time())}
+        delivered = status == "retrieved"
+        c.execute("UPDATE mms SET delivery=?, state=CASE WHEN ? THEN 'delivered' ELSE state END, "
+                  "updated_ts=? WHERE message_id=?",
+                  (json.dumps(delivery), 1 if delivered else 0, int(time.time()),
+                   int(row["message_id"])))
+        if delivered:
+            c.execute("UPDATE messages SET status='delivered', error=NULL WHERE id=?",
+                      (int(row["message_id"]),))
+        elif status in ("rejected", "unreachable", "expired"):
+            c.execute("UPDATE messages SET status='failed', error=? WHERE id=? "
+                      "AND status<>'delivered'",
+                      (f"MMS {status}", int(row["message_id"])))
+    return get_message(int(row["message_id"]))
+
+
 def list_threads(instance: str) -> list:
     with _lock, _conn() as c:
         rows = c.execute(
             """SELECT peer, MAX(ts) AS last_ts,
                       (SELECT body FROM messages m2 WHERE m2.instance=m.instance AND m2.peer=m.peer
                        ORDER BY ts DESC LIMIT 1) AS last_body,
+                      (SELECT kind FROM messages m2 WHERE m2.instance=m.instance AND m2.peer=m.peer
+                       ORDER BY ts DESC LIMIT 1) AS last_kind,
                       COUNT(*) AS n
                FROM messages m WHERE instance=? GROUP BY peer ORDER BY last_ts DESC""",
             (str(instance),),
@@ -1233,7 +1560,7 @@ def list_messages(instance: str, peer: str, limit: int = 200) -> list:
             "SELECT * FROM messages WHERE instance=? AND peer=? ORDER BY ts ASC LIMIT ?",
             (str(instance), peer, limit),
         ).fetchall()
-    return [dict(r) for r in rows]
+        return _with_mms(c, [dict(r) for r in rows])
 
 
 def recent_messages(instance: str, limit: int = 10) -> list:
@@ -1244,11 +1571,26 @@ def recent_messages(instance: str, limit: int = 10) -> list:
             "SELECT * FROM messages WHERE instance=? ORDER BY ts DESC, id DESC LIMIT ?",
             (str(instance), max(1, int(limit))),
         ).fetchall()
-    return [dict(r) for r in rows]
+        return _with_mms(c, [dict(r) for r in rows])
 
 
 def _placeholders(n: int) -> str:
     return ",".join("?" * n)
+
+
+def _delete_where(where: str, args: tuple) -> int:
+    """Delete messages and everything an MMS among them owns: its state, parts and files."""
+    with _lock, _conn() as c:
+        ids = [int(r[0]) for r in c.execute(f"SELECT id FROM messages WHERE {where}", args)]
+        if not ids:
+            return 0
+        marks = _placeholders(len(ids))
+        c.execute(f"DELETE FROM mms_parts WHERE message_id IN ({marks})", ids)
+        c.execute(f"DELETE FROM mms WHERE message_id IN ({marks})", ids)
+        removed = c.execute(f"DELETE FROM messages WHERE id IN ({marks})", ids).rowcount
+    for mid in ids:
+        shutil.rmtree(_mms_message_dir(mid), ignore_errors=True)
+    return removed
 
 
 def delete_messages(instance: str, ids: list[int]) -> int:
@@ -1256,27 +1598,18 @@ def delete_messages(instance: str, ids: list[int]) -> int:
     ids = [int(i) for i in ids]
     if not ids:
         return 0
-    with _lock, _conn() as c:
-        cur = c.execute(
-            f"DELETE FROM messages WHERE instance=? AND id IN ({_placeholders(len(ids))})",
-            (str(instance), *ids),
-        )
-        return cur.rowcount
+    return _delete_where(f"instance=? AND id IN ({_placeholders(len(ids))})",
+                         (str(instance), *ids))
 
 
 def delete_thread(instance: str, peer: str) -> int:
     """Delete every message in one conversation (instance + peer). Returns rows removed."""
-    with _lock, _conn() as c:
-        cur = c.execute("DELETE FROM messages WHERE instance=? AND peer=?",
-                        (str(instance), peer))
-        return cur.rowcount
+    return _delete_where("instance=? AND peer=?", (str(instance), peer))
 
 
 def clear_messages(instance: str) -> int:
     """Delete ALL messages for this instance. Returns rows removed."""
-    with _lock, _conn() as c:
-        cur = c.execute("DELETE FROM messages WHERE instance=?", (str(instance),))
-        return cur.rowcount
+    return _delete_where("instance=?", (str(instance),))
 
 
 def add_call(instance: str, direction: str, peer: str, status: str = "ringing",

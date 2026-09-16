@@ -285,25 +285,23 @@ class StoragePolicyTests(unittest.TestCase):
         self.assertEqual(len(mm.deletes()), cellular_sms._DELETE_ATTEMPTS)
 
 
-class WapPushTests(unittest.TestCase):
-    def test_mms_wap_push_notification_is_deleted_instead_of_imported(self):
+class BinaryObjectTests(unittest.TestCase):
+    def test_binary_payload_is_handed_to_ingest_and_then_removed(self):
         mm = FakeModemManager()
         path = mm.add(7, wap_push_sms())
         ingest = Ingest()
-        self.assertEqual(scanner(mm).poll(LINE, ingest), [])
-        self.assertEqual(ingest.records, [])
+        stored = scanner(mm).poll(LINE, ingest)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(ingest.records[0]["body"], "")
+        self.assertTrue(ingest.records[0]["data"].startswith(b"\x23\x06\x24"))
         self.assertEqual(mm.deletes(), [path])
 
-    def test_mms_wap_push_notification_is_kept_when_dropping_is_disabled(self):
+    def test_object_with_neither_text_nor_payload_is_left_alone(self):
         mm = FakeModemManager()
-        mm.add(7, wap_push_sms())
-        self.assertEqual(scanner(mm, drop_mms_wap_push=False).poll(LINE, Ingest()), [])
-        self.assertEqual(mm.deletes(), [])
-
-    def test_unreadable_text_without_the_marker_is_left_alone(self):
-        mm = FakeModemManager()
-        mm.add(7, sms_object(text="--", data="01 02 03"))
-        self.assertEqual(scanner(mm).poll(LINE, Ingest()), [])
+        mm.add(7, sms_object(text="--", data="--"))
+        ingest = Ingest()
+        self.assertEqual(scanner(mm).poll(LINE, ingest), [])
+        self.assertEqual(ingest.records, [])
         self.assertEqual(mm.deletes(), [])
 
 

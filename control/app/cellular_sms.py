@@ -168,13 +168,6 @@ def _sms_text(value) -> str:
     return "" if text.strip() == "--" else text
 
 
-# A carrier MMS notification is delivered over the SMS channel as a WAP Push with no readable
-# text and a binary WSP payload carrying this MIME type. The marker is the standard one from
-# WAP-209-MMSEncapsulation, so it identifies the notification for any carrier without keying
-# on a sender number, an SMSC or an MMSC host.
-_WAP_PUSH_MMS_MARKER = b"application/vnd.wap.mms-message"
-
-
 def _sms_data(value) -> bytes:
     """Decode the mmcli rendering of an SMS binary payload; empty when absent or unparsable."""
     if isinstance(value, (list, tuple)):
@@ -193,13 +186,6 @@ def _sms_data(value) -> bytes:
         return bytes.fromhex(compact)
     except ValueError:
         return b""
-
-
-def _is_mms_wap_push(content: dict) -> bool:
-    """True for a binary MMS notification: no readable text plus the WAP Push MIME marker."""
-    if _sms_text(content.get("text")).strip():
-        return False
-    return _WAP_PUSH_MMS_MARKER in _sms_data(content.get("data"))
 
 
 def _normalize_imsi(value) -> str:
@@ -504,14 +490,13 @@ class Scanner:
     def __init__(self, runner=subprocess.run, *, topology_ttl: float = 60.0,
                  detail_ttl: float = 60.0, clock=time.monotonic,
                  local_sms_tracker=None, epoch_getter=_modemmanager_epoch,
-                 drop_mms_wap_push: bool = True, environ=os.environ):
+                 environ=os.environ):
         self.runner = runner
         self.topology_ttl = topology_ttl
         self.detail_ttl = detail_ttl
         self.clock = clock
         self.local_sms_tracker = local_sms_tracker
         self.epoch_getter = epoch_getter
-        self.drop_mms_wap_push = drop_mms_wap_push
         self.environ = environ
         self._daemon_epoch = ""
         self._topology_expires = 0.0
@@ -594,10 +579,6 @@ class Scanner:
         self._details.pop(key, None)
         self._settled.pop(key, None)
         return True
-
-    def _consume_mms_wap_push(self, key: tuple[str, str], detail: dict) -> None:
-        """Delete one recognised MMS notification so modem/SIM storage cannot fill up."""
-        self._delete(key, detail["signature"])
 
     def _prune_when_full(self, modem_path: str, live: list[tuple[str, str]], now: float) -> None:
         cached = self._capacity.get(modem_path)
@@ -691,19 +672,18 @@ class Scanner:
                     if policy == "delete":
                         self._delete(key, detail["signature"])
                     continue
+                data = b""
                 if not detail["body"].strip():
-                    # A carrier MMS notification has no displayable form here and the
-                    # gateway never retrieves MMS, so nothing will ever consume it. Left
-                    # in place it occupies modem/SIM SMS storage indefinitely.
-                    if (ingest is not None and self.drop_mms_wap_push
-                            and _is_mms_wap_push(detail["content"])):
-                        self._consume_mms_wap_push(key, detail)
-                    continue
+                    # No readable text: a binary payload -- an MMS notification (WAP Push),
+                    # a SIM data download -- or nothing at all. Only a payload is imported.
+                    data = _sms_data(detail["content"].get("data"))
+                    if not data or detail["pdu_type"] == "submit":
+                        continue
                 direction = "out" if detail["pdu_type"] == "submit" else "in"
                 record = {"instance": iid, "direction": direction, "peer": detail["peer"],
                           "body": detail["body"], "ts": detail["ts"], "transport": "cellular",
                           "modem_path": modem_path, "sms_path": sms_path,
-                          "storage": detail["storage"]}
+                          "storage": detail["storage"], "data": data}
                 if ingest is None:
                     found.append(record)
                     continue

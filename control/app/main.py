@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
-               sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd)
+               sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -1545,8 +1545,62 @@ async def _publish_incoming_sms(rec: dict) -> None:
     """Announce one newly stored inbound text, whichever transport delivered it."""
     iid = str(rec["instance"])
     await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
+    if (rec.get("kind") or "sms") == "mms":
+        _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"], _mms_push_text(rec))
+        return
     await asyncio.to_thread(_harvest_allowance_reply, iid, rec["peer"])
     _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"], rec["body"])
+
+
+def _mms_push_text(rec: dict) -> str:
+    mms_state = rec.get("mms") or {}
+    parts = [p for p in mms_state.get("parts") or []
+             if not str(p.get("content_type", "")).startswith(("text/", "application/smil"))]
+    summary = "[MMS]"
+    if mms_state.get("subject"):
+        summary += f" {mms_state['subject']}"
+    if rec.get("body") and rec["body"] != mms_state.get("subject"):
+        summary += f"\n{rec['body']}"
+    if parts:
+        summary += f"\n({len(parts)} attachment{'s' if len(parts) != 1 else ''})"
+    elif mms_state.get("state") == "notified" and mms_state.get("size"):
+        summary += f" ({int(mms_state['size']) // 1024 or 1} KB)"
+    return summary
+
+
+async def _publish_binary_sms(result: dict) -> None:
+    """Announce what a binary SMS turned out to be: an MMS, a delivery report, or a filed
+    payload nobody reads (which refreshes a count, never a toast or a push)."""
+    iid = str(result["instance"])
+    if result.get("message"):
+        await _publish_incoming_sms(result["message"])
+    elif result.get("delivery"):
+        await hub.broadcast({"type": "sms", "instance": iid, "message": result["delivery"]})
+    elif result.get("filed"):
+        await hub.broadcast({"type": "sms", "instance": iid, "binary": True})
+
+
+def _ingest_binary_sms(iid: str, sender: str, data: bytes, *, transport: str,
+                       sent_ts: int | None = None, pdu=None, segment=None,
+                       body_text: str = "") -> dict:
+    """Route one binary SMS payload: an MMS push to the MMS store, anything else to filing.
+
+    Returns {"binary": True, "instance", "message"|"delivery"|"filed"} so the caller can
+    announce it; falsy "message" with "handled" means a notification already held.
+    """
+    result = mms.handle_wap_push(iid, sender, data, transport=transport, sent_ts=sent_ts)
+    if result.get("handled"):
+        return {**result, "binary": True, "instance": str(iid),
+                "direction": "in"} if (result.get("message") or result.get("delivery")) else None
+    rec = store.add_binary_sms(
+        iid, sender, ts=sent_ts, transport=transport,
+        tp_pid=getattr(pdu, "tp_pid", None), tp_dcs=getattr(pdu, "tp_dcs", None),
+        concat=segment, udh_hex=getattr(pdu, "udh_hex", ""),
+        tpdu_hex=getattr(pdu, "tpdu_hex", ""), body_hex=bytes(data).hex())
+    log.info("filed a non-text SMS from %s on line %s (pid=%s dcs=%s, %d bytes) — "
+             "not shown as a message", sender, iid, rec["tp_pid"], rec["tp_dcs"],
+             len(rec["body_hex"]) // 2)
+    return {"binary": True, "instance": str(iid), "direction": "in", "filed": rec}
 
 
 async def sms_segment_reaper():
@@ -1563,6 +1617,15 @@ async def sms_segment_reaper():
         except Exception as exc:  # noqa
             log.debug("SMS segment sweep failed: %r", exc)
             continue
+        try:
+            for group in await asyncio.to_thread(store.take_stale_sms_segments, kind="wap"):
+                for seq, body in zip(group["seqs"], group["bodies"]):
+                    await asyncio.to_thread(
+                        store.add_binary_sms, str(group["instance"]), group["peer"],
+                        ts=group["first_ts"], body_hex=body,
+                        concat=(group["concat_ref"], group["total"], seq))
+        except Exception as exc:  # noqa
+            log.debug("stale WAP Push sweep failed: %r", exc)
         try:
             await asyncio.to_thread(store.prune_late_sms_groups)
         except Exception as exc:  # noqa
@@ -1897,6 +1960,9 @@ async def cellular_sms_poller():
     scanner = cellular_sms.Scanner(local_sms_tracker=store)
 
     def ingest(record: dict) -> dict | None:
+        if record.get("data"):
+            return _ingest_binary_sms(record["instance"], record["peer"], record["data"],
+                                      transport="cellular", sent_ts=record["ts"] or None)
         return store.ingest_message(
             record["instance"], record["direction"], record["peer"], record["body"],
             transport="cellular", sent_ts=record["ts"] or None)
@@ -1907,12 +1973,13 @@ async def cellular_sms_poller():
             # operator's choice takes effect without restarting the control plane.
             conf = await asyncio.to_thread(cfg.load)
             settings = conf.get("settings") or {}
-            scanner.drop_mms_wap_push = bool(settings.get("drop_mms_wap_push", True))
             stored = await asyncio.to_thread(
                 scanner.poll, list((conf.get("instances") or {}).values()), ingest,
                 policy=cellular_sms.storage_policy(settings))
             for rec in stored:
-                if rec["direction"] == "in":
+                if rec.get("binary"):
+                    await _publish_binary_sms(rec)
+                elif rec["direction"] == "in":
                     await _publish_incoming_sms(rec)
                 else:
                     await hub.broadcast({"type": "sms", "instance": rec["instance"],
@@ -6182,20 +6249,27 @@ async def api_engine_event(payload: dict):
         segment = _concat_triplet(args)
         sent_ts = sms_pdu.deliver_timestamp(pdu.tpdu_hex)
         if pdu.is_machine_payload or (not pdu.known and sms_pdu.looks_binary(text)):
-            rec = await asyncio.to_thread(
-                store.add_binary_sms, iid, sender,
-                tp_pid=pdu.tp_pid, tp_dcs=pdu.tp_dcs, concat=segment,
-                udh_hex=pdu.udh_hex, tpdu_hex=pdu.tpdu_hex,
-                body_hex=sms_pdu.body_to_hex(text))
-            log.info("filed a non-text SMS from %s on line %s (pid=%s dcs=%s, %d bytes) — "
-                     "not shown as a message", sender, iid, pdu.tp_pid, pdu.tp_dcs,
-                     len(rec["body_hex"]) // 2)
-            # Tell an open page to refresh its filed-payload count. Deliberately carries no
-            # "message" key: the toast in the web UI keys on that, and a payload nobody can read
-            # must not raise "SMS from …". No push notification either — see _dispatch_push
-            # below, which this path never reaches.
-            await hub.broadcast({"type": "sms", "instance": iid, "binary": True})
-            return {"ok": True, "stored": "binary", "id": rec["id"]}
+            payload = sms_pdu.body_to_hex(text)
+            if segment and mms.is_wap_push_udh(pdu.udh_hex) and payload:
+                # A WAP Push too long for one SMS: its parts are joined byte-for-byte before
+                # anything can read it. The reaper files a group that never completes.
+                ref, total, seq = segment
+                group = await asyncio.to_thread(
+                    store.add_sms_segment, iid, sender, ref, total, seq, payload,
+                    sent_ts=sent_ts, with_meta=True, kind="wap")
+                if group is None:
+                    return {"ok": True, "buffered": f"{seq}/{total}"}
+                payload, sent_ts, segment = "".join(group["bodies"]), group["sent_ts"], None
+            result = await asyncio.to_thread(
+                _ingest_binary_sms, iid, sender, bytes.fromhex(payload), transport="vowifi",
+                sent_ts=sent_ts, pdu=pdu, segment=segment)
+            # A filed payload only refreshes the page's count: the toast in the web UI keys on
+            # a "message", and a payload nobody can read must not raise "SMS from …".
+            if result:
+                await _publish_binary_sms(result)
+            if result and result.get("filed"):
+                return {"ok": True, "stored": "binary", "id": result["filed"]["id"]}
+            return {"ok": True, "stored": "mms"}
         # One part of a multi-part text: buffer it and wait for its siblings. The empty-body
         # rule below is deliberately NOT applied to a part — the sources it guards against
         # (IMS signalling, OTA payloads) never carry a concatenation header, whereas dropping

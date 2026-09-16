@@ -6,6 +6,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- An MMS notification is recognised and kept as a pending MMS in its conversation, from
+  VoWiFi and from the modem alike. 1.9.4 looked for the text `application/vnd.wap.mms-message`
+  in the payload, but carriers send that content type as its one-byte binary code, so real
+  notifications were never matched: over VoWiFi they piled up among the non-text payloads and
+  on the modem they stayed in storage. A notification now becomes one MMS per MMSC location,
+  however many times and over whichever transport it arrives, and a WAP Push too long for one
+  SMS is reassembled first. Delivery reports for sent MMS are applied to the message they
+  belong to. `drop_mms_wap_push` is gone: the modem object is removed by the storage policy
+  once the notification is stored.
 - Modem SMS storage is emptied as messages are imported. The gateway only ever read the modem's
   SMS objects, so its storage (23 slots on a typical module, a few more on the SIM) filled up and
   the modem then stopped accepting texts altogether. An object is now deleted once its message
