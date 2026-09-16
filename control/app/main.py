@@ -5258,6 +5258,60 @@ def api_messages(iid: str, peer: str):
     return {"messages": store.list_messages(iid, peer)}
 
 
+@app.post("/api/instances/{iid}/mms/send")
+async def api_mms_send(iid: str, request: Request):
+    """Compose and submit an MMS. multipart/form-data: to (comma-separated), text, subject,
+    and any number of `attachments` files. Returns at once with the stored message; the
+    upload itself can take minutes over the modem and is reported over the websocket."""
+    inst = await asyncio.to_thread(cfg.get_instance, iid)
+    if not inst:
+        raise HTTPException(404, "no such line")
+    settings = mms_transport.resolve_settings(inst)
+    if not settings.get("enabled"):
+        raise HTTPException(409, "MMS is turned off for this line")
+    if not settings.get("configured"):
+        raise HTTPException(409, "no MMSC is known for this line's carrier")
+    try:
+        form = await request.form(max_files=20, max_fields=20,
+                                  max_part_size=int(settings["max_size"]) + 1024)
+    except Exception as exc:  # noqa
+        raise HTTPException(413 if "size" in str(exc).lower() else 422,
+                            f"unreadable MMS form: {exc}") from None
+    recipients = mms.parse_recipients(form.get("to") or "")
+    text = str(form.get("text") or "")
+    subject = str(form.get("subject") or "").strip()[:80]
+    attachments = []
+    for upload in form.getlist("attachments"):
+        if not hasattr(upload, "read"):
+            continue
+        data = await upload.read(int(settings["max_size"]) + 1)
+        attachments.append({"name": os.path.basename(upload.filename or "")[:80],
+                            "content_type": upload.content_type or "", "data": data})
+    problem = mms.validate_outgoing(recipients, text, attachments, settings)
+    if problem:
+        raise HTTPException(422, problem)
+    rec = await asyncio.to_thread(mms.create_outgoing, iid, recipients, text, attachments,
+                                  subject)
+    await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
+    asyncio.create_task(_send_mms_task(str(iid), int(rec["id"])))
+    return {"ok": True, "message": rec}
+
+
+async def _send_mms_task(iid: str, mid: int) -> None:
+    try:
+        inst = await asyncio.to_thread(cfg.get_instance, iid)
+        result = await asyncio.to_thread(mms.send, inst or {}, mid)
+        log.info("MMS %d on line %s: %s%s", mid, iid, result["status"],
+                 f" ({result['error']})" if result.get("error") else "")
+    except Exception as exc:  # noqa
+        log.warning("MMS send %d failed unexpectedly: %r", mid, exc)
+        await asyncio.to_thread(store.set_mms_state, mid, "failed", error=str(exc),
+                                message_status="failed")
+    rec = await asyncio.to_thread(store.get_message, mid)
+    if rec:
+        await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
+
+
 @app.post("/api/instances/{iid}/messages/{mid}/mms/download")
 async def api_mms_download(iid: str, mid: int):
     """Retrieve (or retry) one inbound MMS now, whatever the line's auto-download setting."""

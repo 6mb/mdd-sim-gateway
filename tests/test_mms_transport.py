@@ -318,5 +318,61 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(store.get_message(out["id"])["status"], "unknown")
 
 
+class SendTests(DownloadTests):
+    def compose(self, text="hello", attachments=None):
+        return mms.create_outgoing("1", ["+447700900123"], text,
+                                   attachments if attachments is not None else
+                                   [{"name": "p.jpg", "content_type": "image/jpeg",
+                                     "data": b"\xff\xd8" * 10}])
+
+    def test_validation(self):
+        settings = {"max_size": 1024}
+        self.assertIn("recipient", mms.validate_outgoing([], "x", [], settings))
+        self.assertIn("not a phone", mms.validate_outgoing(["12; rm"], "x", [], settings))
+        self.assertIn("text or an attachment", mms.validate_outgoing(["+447700900123"], " ",
+                                                                      [], settings))
+        self.assertIn("cannot be sent", mms.validate_outgoing(
+            ["+447700900123"], "", [{"content_type": "text/html", "data": b"x"}], settings))
+        self.assertIn("allows 1 KB", mms.validate_outgoing(
+            ["+447700900123"], "", [{"content_type": "image/png", "data": b"x" * 2000}],
+            settings))
+        self.assertIsNone(mms.validate_outgoing(["+447700900123", "a@example.test"], "hi", [],
+                                                settings))
+        self.assertEqual(mms.parse_recipients("+447700900123; +447700900124,+447700900123"),
+                         ["+447700900123", "+447700900124"])
+
+    def test_accepted_send_records_the_mmsc_message_id(self):
+        rec = self.compose()
+        self.assertEqual((rec["status"], rec["mms"]["state"]), ("pending", "sending"))
+        conf = bytes([0x8C, 0x81, 0x98]) + m.write_text_string("x") + b"\x8D\x92" + \
+            bytes([0x92, 0x80]) + b"\x8B" + m.write_text_string("MSG-7")
+        client = FakeClient([t.HttpResponse(200, {}, conf)])
+        result = mms.send(self.inst, rec["id"], client=client)
+        self.assertEqual(result["status"], "sent")
+        sent = m.decode_pdu(client.requests[0][2])
+        self.assertEqual(sent.message_type, m.M_SEND_REQ)
+        self.assertEqual(sent.to, ["+447700900123"])
+        self.assertEqual([p.content_type for p in sent.parts],
+                         ["application/smil", "text/plain", "image/jpeg"])
+        stored = store.get_message(rec["id"])
+        self.assertEqual((stored["status"], stored["mms"]["state"], stored["mms"]["message_ref"]),
+                         ("sent", "sent", "MSG-7"))
+
+    def test_refusal_is_failed_and_a_lost_answer_is_unknown(self):
+        rec = self.compose()
+        refused = bytes([0x8C, 0x81, 0x98]) + m.write_text_string("x") + b"\x8D\x92" + \
+            bytes([0x92, 0xE3])
+        result = mms.send(self.inst, rec["id"],
+                          client=FakeClient([t.HttpResponse(200, {}, refused)]))
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.get_message(rec["id"])["status"], "failed")
+
+        rec = self.compose("again")
+        lost = t.MmsTransportError("timed out waiting for the MMSC", after_send=True)
+        result = mms.send(self.inst, rec["id"], client=FakeClient([lost]))
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(store.get_message(rec["id"])["status"], "unknown")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1522,6 +1522,22 @@ def mms_part_file(instance: str, message_id: int, part_id: int) -> dict | None:
     return {**dict(row), "file": path}
 
 
+def mms_parts_with_data(message_id: int) -> list[dict]:
+    """Every stored part of an MMS with its content read back, in order."""
+    with _lock, _conn() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT p.*, m.instance FROM mms_parts p JOIN messages m ON m.id=p.message_id "
+            "WHERE p.message_id=? ORDER BY p.seq", (int(message_id),))]
+    parts = []
+    for row in rows:
+        found = mms_part_file(row["instance"], message_id, row["id"])
+        if not found:
+            raise OSError(f"MMS part {row['id']} is missing its content")
+        with open(found["file"], "rb") as handle:
+            parts.append({**row, "data": handle.read()})
+    return parts
+
+
 def create_outgoing_mms(instance: str, peer: str, *, to_addrs: list[str], subject: str,
                         body: str, transaction_id: str, transport: str = "") -> dict:
     now = int(time.time())

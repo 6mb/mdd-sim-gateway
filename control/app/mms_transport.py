@@ -42,9 +42,12 @@ MMS_CONTENT_TYPE = "application/vnd.wap.mms-message"
 class MmsTransportError(Exception):
     """A failed MMSC exchange. `retryable` is False when trying again cannot help."""
 
-    def __init__(self, message: str, *, retryable: bool = True):
+    def __init__(self, message: str, *, retryable: bool = True, after_send: bool = False):
         super().__init__(message)
         self.retryable = retryable
+        # The request reached the network before this failed: for a send, the MMSC may
+        # have accepted the message, so the outcome is unknown rather than failed.
+        self.after_send = after_send
 
 
 @dataclass
@@ -215,7 +218,9 @@ class HostHttp:
                                             headers=headers or {}, proxies=proxies,
                                             timeout=timeout, allow_redirects=False)
         except Exception as exc:
-            raise MmsTransportError(f"MMSC request from the host failed: {exc}") from None
+            after_send = type(exc).__name__ in ("ReadTimeout", "ChunkedEncodingError")
+            raise MmsTransportError(f"MMSC request from the host failed: {exc}",
+                                    after_send=after_send) from None
         return HttpResponse(response.status_code,
                             {k.lower(): v for k, v in response.headers.items()},
                             response.content)
@@ -326,7 +331,11 @@ class ModemSocketHttp:
             self._require(f'AT+QIOPEN={cid},{sid},"TCP","{host}",{port},0,0', 10)
             self._wait_connected(sid, deadline)
             self._send(sid, payload, deadline)
-            return self._receive(sid, deadline)
+            try:
+                return self._receive(sid, deadline)
+            except MmsTransportError as exc:
+                exc.after_send = True
+                raise
         finally:
             self.at(f"AT+QICLOSE={sid},1", 3)
             if activated:

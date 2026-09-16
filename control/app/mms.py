@@ -7,10 +7,13 @@ the WAP Push payload to handle_wap_push(), which stores one pending MMS per MMSC
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 import subprocess
 import threading
 import time
+import uuid
 
 from . import cellular_sms, mms_pdu, mms_transport, store
 
@@ -192,3 +195,121 @@ def download(inst: dict, message_id: int, *, client=None, now: int | None = None
         store.set_mms_state(message_id, "expired" if expired else "failed", error=str(exc),
                             next_attempt_ts=None, attempts_increment=1)
         return {"ok": False, "error": str(exc), "final": True}
+
+
+# What a phone would attach: pictures, sound, video, contact and calendar cards, plain text.
+SENDABLE_TYPES = ("image/", "audio/", "video/", "text/plain", "text/x-vcard", "text/vcard",
+                  "text/x-vcalendar", "text/calendar")
+_RECIPIENT_RE = re.compile(r"^\+?\d{3,32}$|^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def parse_recipients(value) -> list[str]:
+    items = value if isinstance(value, (list, tuple)) else str(value or "").replace(";", ",").split(",")
+    recipients = []
+    for item in items:
+        text = "".join(str(item).split())
+        if text and text not in recipients:
+            recipients.append(text)
+    return recipients
+
+
+def validate_outgoing(recipients: list[str], text: str, attachments: list[dict],
+                      settings: dict) -> str | None:
+    """Why this MMS cannot be sent as composed, or None."""
+    if not recipients:
+        return "at least one recipient is required"
+    if len(recipients) > 20:
+        return "at most 20 recipients"
+    bad = [r for r in recipients if not _RECIPIENT_RE.match(r)]
+    if bad:
+        return f"not a phone number or email address: {bad[0]}"
+    if not (text or "").strip() and not attachments:
+        return "an MMS needs text or an attachment"
+    for item in attachments:
+        content_type = str(item.get("content_type") or "").split(";")[0].strip().lower()
+        if not content_type.startswith(SENDABLE_TYPES):
+            return f"{item.get('name') or 'attachment'}: {content_type or 'unknown'} " \
+                   "cannot be sent by MMS"
+    size = len((text or "").encode("utf-8")) + sum(len(a.get("data") or b"") for a in attachments)
+    if size > int(settings.get("max_size") or mms_transport.DEFAULT_MAX_SIZE):
+        return f"the MMS is {size // 1024} KB; this line allows " \
+               f"{int(settings.get('max_size')) // 1024} KB"
+    return None
+
+
+def create_outgoing(instance: str, recipients: list[str], text: str, attachments: list[dict],
+                    subject: str = "") -> dict:
+    """Store a composed MMS (state "sending") and return its message record."""
+    peer = store.canonical_peer(instance, recipients[0]) if len(recipients) == 1 \
+        else ", ".join(recipients)
+    rec = store.create_outgoing_mms(instance, peer, to_addrs=recipients, subject=subject,
+                                    body=text or subject,
+                                    transaction_id=uuid.uuid4().hex[:20])
+    parts = []
+    if (text or "").strip():
+        parts.append({"content_type": "text/plain", "data": text.encode("utf-8"),
+                      "name": "text.txt", "content_id": "text", "charset": "utf-8",
+                      "text": text})
+    for index, item in enumerate(attachments):
+        content_type = str(item.get("content_type") or "").split(";")[0].strip().lower()
+        extension = content_type.split("/")[-1].split("+")[0][:8] or "bin"
+        name = str(item.get("name") or f"attachment{index + 1}.{extension}")
+        parts.append({"content_type": content_type, "data": bytes(item["data"]),
+                      "name": name, "content_id": f"part{index + 1}"})
+    store.save_mms_content(rec["id"], parts, subject=subject, body=text or subject,
+                           size=sum(len(p["data"]) for p in parts))
+    return store.get_message(rec["id"])
+
+
+def send(inst: dict, message_id: int, *, client=None, runner=subprocess.run) -> dict:
+    """Submit one stored outgoing MMS to the MMSC.
+
+    The result is "sent" once the MMSC accepts it (m-send-conf OK), "failed" when it refuses
+    or nothing reached it, and "unknown" when the request went out but no answer came back --
+    never retried automatically, since a second submission would deliver a second MMS.
+    """
+    row = store.mms_for_download(message_id)
+    if not row or row["direction"] != "out":
+        return {"ok": False, "status": "failed", "error": "no such MMS"}
+    settings = mms_transport.resolve_settings(inst)
+    try:
+        stored = store.mms_parts_with_data(message_id)
+        parts = [mms_pdu.MmsPart(p["content_type"], p["data"], name=p["name"],
+                                 content_id=p["content_id"] or f"p{p['seq']}",
+                                 content_location=p["name"], charset=p["charset"])
+                 for p in stored]
+        parts.insert(0, mms_pdu.build_smil(parts))
+        request = mms_pdu.encode_send_req(
+            transaction_id=row["transaction_id"], to=json.loads(row["to_addrs"] or "[]"),
+            parts=parts, subject=row["subject"] or "", delivery_report=True)
+        with io_lock:
+            if client is None:
+                client = open_client(inst, settings, runner=runner)
+            response = client.request(
+                "POST", settings["mmsc"], body=request,
+                headers=_request_headers(settings, mms_transport.MMS_CONTENT_TYPE),
+                timeout=max(180.0, len(request) / 100.0))
+        if response.status != 200:
+            raise mms_transport.MmsTransportError(f"the MMSC answered HTTP {response.status}",
+                                                  after_send=True)
+        conf = mms_pdu.decode_pdu(response.body)
+        if conf.message_type != mms_pdu.M_SEND_CONF:
+            raise mms_transport.MmsTransportError(
+                f"the MMSC answered with MMS message type {conf.message_type:#x}",
+                after_send=True)
+        if conf.response_status not in (None, mms_pdu.RESPONSE_STATUS_OK):
+            reason = conf.headers.get("response-text") or mms_pdu.RESPONSE_STATUS_DESCRIPTIONS.get(
+                conf.response_status, f"status {conf.response_status:#x}")
+            error = f"the MMSC refused the MMS: {reason}"
+            store.set_mms_state(message_id, "failed", error=error, message_status="failed")
+            return {"ok": False, "status": "failed", "error": error}
+        store.set_mms_state(message_id, "sent", error="", message_ref=conf.message_id,
+                            message_status="sent")
+        return {"ok": True, "status": "sent", "error": None}
+    except (mms_transport.MmsTransportError, mms_pdu.MmsDecodeError, OSError) as exc:
+        status = "unknown" if getattr(exc, "after_send", False) or \
+            isinstance(exc, mms_pdu.MmsDecodeError) else "failed"
+        store.set_mms_state(message_id, "failed", error=str(exc), message_status=status)
+        if status == "unknown":
+            store.set_message_status(message_id, "unknown", str(exc))
+        return {"ok": False, "status": status, "error": str(exc)}

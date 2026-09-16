@@ -6,6 +6,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- MMS can be sent: text, pictures, audio, video or contact cards to one or several
+  recipients, with a delivery report shown on the message when the carrier sends one. The
+  size limit is per line (300 KB by default). Over the modem an upload is slow -- roughly
+  200 bytes a second, because of how ModemManager relays the module's socket commands -- so a
+  large picture takes minutes; the message shows as sending meanwhile. A send whose answer is
+  lost is marked unknown and never repeated automatically.
 - Received MMS are downloaded and shown: text, pictures, audio and video, in the sender's
   conversation, and a push notification carries the text once it is known. A carrier's MMSC
   normally answers only on its MMS APN, so a modem with Quectel's embedded TCP/IP stack opens
