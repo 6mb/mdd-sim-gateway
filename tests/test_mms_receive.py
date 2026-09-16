@@ -132,8 +132,8 @@ class InboundEventTests(unittest.IsolatedAsyncioTestCase, TempStore):
         self.assertEqual(store.list_binary_sms("1"), [])
         threads = store.list_threads("1")
         self.assertEqual(threads[0]["last_kind"], "mms")
-        self.assertEqual(self.push.call_count, 1)
-        self.assertTrue(self.push.call_args[0][3].startswith("[MMS]"))
+        self.assertEqual(self.push.call_count, 0, "pushed once the worker knows the content")
+        self.assertTrue(main.hub.mms_wakeup.is_set())
 
     async def test_long_wap_push_is_reassembled_from_its_parts(self):
         payload = notification_push()

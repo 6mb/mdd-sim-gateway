@@ -1,0 +1,322 @@
+import json
+import re
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from control.app import mms, mms_pdu as m, mms_transport as t, store
+
+PROVIDERS = """<?xml version="1.0"?>
+<serviceproviders format="2.0">
+  <country code="xx">
+    <provider><name>Virtual</name>
+      <gsm><network-id mcc="001" mnc="01"/><apn value="internet"><usage type="internet"/></apn></gsm>
+    </provider>
+    <provider><name>Example Mobile</name>
+      <gsm><network-id mcc="001" mnc="01"/>
+        <apn value="mms"><usage type="mms"/><mmsc>http://mmsc.example.test:8002/</mmsc>
+          <mmsproxy>192.0.2.10:8070</mmsproxy></apn>
+      </gsm>
+    </provider>
+  </country>
+</serviceproviders>
+"""
+
+
+class SettingsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Path(self.temp.name) / "serviceproviders.xml"
+        self.db.write_text(PROVIDERS)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_provider_database_supplies_mms_settings_by_network_code(self):
+        found = t.lookup_provider("001", "001", str(self.db))
+        self.assertEqual((found["apn"], found["mmsc"], found["proxy"]),
+                         ("mms", "http://mmsc.example.test:8002/", "192.0.2.10:8070"))
+        self.assertIsNone(t.lookup_provider("002", "01", str(self.db)))
+        self.assertIsNone(t.lookup_provider("001", "01", "/nonexistent.xml"))
+
+    def test_line_values_override_detection_as_a_whole(self):
+        inst = {"mcc": "001", "mnc": "01"}
+        detected = t.resolve_settings(inst, provider_path=str(self.db))
+        self.assertEqual((detected["source"], detected["apn"]), ("provider", "mms"))
+        self.assertTrue(detected["configured"])
+        inst["mms"] = {"mmsc": "http://other.example.test/", "apn": "wap", "auto_download": False}
+        own = t.resolve_settings(inst, provider_path=str(self.db))
+        self.assertEqual((own["source"], own["apn"], own["proxy"]), ("line", "wap", ""))
+        self.assertFalse(own["auto_download"])
+
+    def test_proxy_parsing(self):
+        self.assertEqual(t.parse_proxy("192.0.2.10:8070"), ("192.0.2.10", 8070))
+        self.assertEqual(t.parse_proxy("http://proxy.example.test:3128"),
+                         ("proxy.example.test", 3128))
+        self.assertIsNone(t.parse_proxy(""))
+        self.assertIsNone(t.parse_proxy("host:notaport"))
+
+
+class FramingTests(unittest.TestCase):
+    def test_request_uses_absolute_uri_through_a_proxy(self):
+        raw, host, port = t.build_request("GET", "http://mmsc.example.test:8002/?id=1",
+                                          headers={"Accept": "*/*"}, via_proxy=True)
+        self.assertTrue(raw.startswith(b"GET http://mmsc.example.test:8002/?id=1 HTTP/1.1\r\n"))
+        self.assertIn(b"Host: mmsc.example.test:8002\r\n", raw)
+        direct, _h, _p = t.build_request("POST", "http://mmsc.example.test/", body=b"xy",
+                                         via_proxy=False)
+        self.assertTrue(direct.startswith(b"POST / HTTP/1.1\r\n"))
+        self.assertTrue(direct.endswith(b"Content-Length: 2\r\n\r\nxy"))
+        with self.assertRaises(t.MmsTransportError):
+            t.build_request("GET", "https://mmsc.example.test/", via_proxy=False)
+
+    def test_response_framings(self):
+        head = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"
+        self.assertEqual(t.parse_response(head + b"abc")[1], False)
+        response, complete = t.parse_response(head + b"abcde")
+        self.assertTrue(complete)
+        self.assertEqual(response.body, b"abcde")
+        chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n"
+        response, complete = t.parse_response(chunked)
+        self.assertEqual((response.body, complete), (b"abcde", True))
+        self.assertEqual(t.parse_response(b"HTTP/1.1 200")[0], None)
+
+
+class FakeQuectel:
+    """A Quectel module behind ModemManager's command channel, with one MMSC behind it."""
+
+    def __init__(self, reply: bytes, *, contexts=None, supported=True, active=False):
+        self.reply = reply
+        self.contexts = contexts or {1: "internet", 2: "ims"}
+        self.supported = supported
+        self.active = {c for c, a in self.contexts.items() if active and a.casefold() == "mms"}
+        self.commands = []
+        self.sent = bytearray()
+        self.unread = b""
+        self.state = 0
+        self.connected_to = None
+
+    def __call__(self, args, **kwargs):
+        command, timeout = args[-2], int(args[-1])
+        self.commands.append(command)
+        ok, text = self.handle(command, timeout)
+        if not ok:
+            return Result("", 1, f"Call failed: {text}")
+        return Result(json.dumps({"type": "s", "data": [text]}))
+
+    def handle(self, command, timeout):
+        if command == "AT+QICSGP=?":
+            return (True, '+QICSGP: (1-16),(1-3)') if self.supported else (False, "Unknown error")
+        if command == "AT+CGDCONT?":
+            return True, "\r\n".join(f'+CGDCONT: {c},"IP","{a}","0.0.0.0",0,0'
+                                     for c, a in sorted(self.contexts.items()))
+        match = re.fullmatch(r'AT\+QICSGP=(\d+),1,"([^"]*)".*', command)
+        if match:
+            self.contexts[int(match.group(1))] = match.group(2)
+            return True, ""
+        if command == "AT+QIACT?":
+            return True, "\r\n".join(f'+QIACT: {c},1,1,"10.0.0.2"' for c in sorted(self.active))
+        if command.startswith("AT+QIACT="):
+            self.active.add(int(command.split("=")[1]))
+            return True, ""
+        if command.startswith("AT+QIDEACT="):
+            self.active.discard(int(command.split("=")[1]))
+            return True, ""
+        if command.startswith('AT+QICFG="dataformat"'):
+            return True, ""
+        if command.startswith("AT+QICLOSE="):
+            self.state = 0
+            return True, ""
+        match = re.fullmatch(r'AT\+QIOPEN=(\d+),11,"TCP","([^"]+)",(\d+),0,0', command)
+        if match:
+            self.connected_to = (match.group(2), int(match.group(3)))
+            self.state = 2
+            return True, ""
+        if command == "AT+QISTATE=1,11":
+            if not self.state:
+                return True, ""
+            return True, f'+QIOPEN: 11,0\r\n\r\n+QISTATE: 11,"TCP","{self.connected_to[0]}",' \
+                         f'{self.connected_to[1]},9000,{self.state},5,11,0,"usbat"'
+        match = re.fullmatch(r'AT\+QISENDEX=11,"([0-9a-f]+)"', command)
+        if match:
+            data = bytes.fromhex(match.group(1))
+            if len(data) > 256:
+                return False, "Unknown error"
+            self.sent += data
+            if self.sent.endswith(b"\r\n\r\n") or b"Content-Length" not in self.sent or \
+                    len(self.sent) >= self._expected_length():
+                self.unread, self.state = self.reply, 4
+            return False, "Response timeout: Serial command timed out"
+        if command == "AT+QISEND=11,0":
+            return True, f"SEND OK\r\n\r\n+QISEND: {len(self.sent)},0,{len(self.sent)}"
+        if command.startswith("AT+QIRD=11,"):
+            size = int(command.split(",")[1])
+            chunk, self.unread = self.unread[:size], self.unread[size:]
+            return True, f"+QIRD: {len(chunk)}" + (f"\r\n{chunk.hex().upper()}" if chunk else "")
+        return False, "Unknown error"
+
+    def _expected_length(self):
+        head, _, body = bytes(self.sent).partition(b"\r\n\r\n")
+        match = re.search(rb"Content-Length: (\d+)", head)
+        return len(head) + 4 + int(match.group(1)) if match else 0
+
+
+class Result:
+    def __init__(self, stdout="", returncode=0, stderr=""):
+        self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+
+
+SETTINGS = {"enabled": True, "configured": True, "apn": "mms", "mmsc": "http://mmsc.example.test:8002/",
+            "proxy": "192.0.2.10:8070", "username": "", "password": "", "transport": "auto",
+            "user_agent": "Android-Mms/2.0"}
+
+
+def http_reply(body: bytes) -> bytes:
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.wap.mms-message\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+
+
+class ModemSocketTests(unittest.TestCase):
+    def client(self, fake):
+        return t.ModemSocketHttp(t.ModemCommand("/org/freedesktop/ModemManager1/Modem/0", fake),
+                                 SETTINGS, sleep=lambda _s: None)
+
+    def test_get_through_proxy_on_a_new_mms_context(self):
+        payload = bytes(range(256)) * 12           # longer than one QIRD read
+        fake = FakeQuectel(http_reply(payload))
+        response = self.client(fake).request("GET", "http://mmsc.example.test:8002/?id=1",
+                                             headers={"Accept": "*/*"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, payload)
+        self.assertEqual(fake.contexts[4], "mms", "first free context above the defaults")
+        self.assertEqual(fake.connected_to, ("192.0.2.10", 8070))
+        self.assertTrue(fake.sent.startswith(b"GET http://mmsc.example.test:8002/?id=1 "))
+        self.assertIn("AT+QIDEACT=4", fake.commands, "a context it activated is released")
+        self.assertEqual(fake.commands[-1], "AT+QIDEACT=4")
+
+    def test_existing_mms_context_is_reused_and_left_active(self):
+        fake = FakeQuectel(http_reply(b"ok"), contexts={1: "internet", 5: "MMS"}, active=True)
+        self.client(fake).request("POST", "http://mmsc.example.test:8002/", body=b"x" * 700)
+        self.assertNotIn(4, fake.contexts)
+        self.assertFalse(any(c.startswith("AT+QICSGP=5") for c in fake.commands))
+        self.assertFalse(any(c.startswith("AT+QIDEACT") for c in fake.commands))
+        self.assertTrue(fake.sent.endswith(b"x" * 700))
+        chunks = [c for c in fake.commands if c.startswith("AT+QISENDEX")]
+        self.assertTrue(all(len(c) <= len('AT+QISENDEX=11,""') + 512 for c in chunks))
+
+    def test_short_send_is_an_error(self):
+        fake = FakeQuectel(http_reply(b"ok"))
+        original = fake.handle
+
+        def lossy(command, timeout):
+            if command == "AT+QISEND=11,0":
+                return True, "+QISEND: 1,0,1"
+            return original(command, timeout)
+
+        fake.handle = lossy
+        with self.assertRaises(t.MmsTransportError):
+            self.client(fake).request("GET", "http://mmsc.example.test:8002/?id=1")
+
+    def test_unsupported_modem_falls_back_to_host_in_auto(self):
+        fake = FakeQuectel(b"", supported=False)
+        client = t.client_for(SETTINGS, "/org/freedesktop/ModemManager1/Modem/0", runner=fake)
+        self.assertIsInstance(client, t.HostHttp)
+        with self.assertRaises(t.MmsTransportError):
+            t.client_for({**SETTINGS, "transport": "modem"}, None, runner=fake)
+
+
+class FakeClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def request(self, method, url, *, body=b"", headers=None, timeout=60):
+        self.requests.append((method, url, body, headers))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def retrieve_conf(text="你好", image=b"\xff\xd8\xff\xe0", status=None) -> bytes:
+    parts = [m.MmsPart("text/plain", text.encode(), name="text.txt", content_id="text",
+                       content_location="text.txt", charset="utf-8"),
+             m.MmsPart("image/jpeg", image, name="photo.jpg", content_id="photo",
+                       content_location="photo.jpg")]
+    parts.insert(0, m.build_smil(parts))
+    raw = bytearray(m.encode_send_req(transaction_id="R1", to=["+447700900123"], parts=parts,
+                                      subject="Hi"))
+    raw[1] = m.M_RETRIEVE_CONF
+    if status is not None:
+        index = raw.index(b"\x8d") + 2
+        raw[index:index] = bytes([0x99, status])
+    return bytes(raw)
+
+
+class DownloadTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.patch = patch.multiple(store, DATA_DIR=str(root),
+                                    DB_PATH=str(root / "mdd-sim-gateway.sqlite"),
+                                    PREVIOUS_DB_PATH=str(root / "vowifi.sqlite"))
+        self.patch.start()
+        store.init()
+        from tests.test_mms_receive import notification_push
+        self.rec = mms.handle_wap_push("1", "99", notification_push(), transport="vowifi",
+                                       sent_ts=1_000, now=1_000)["message"]
+        self.inst = {"id": "1", "mms": {k: SETTINGS[k] for k in ("apn", "mmsc", "proxy")}}
+
+    def tearDown(self):
+        self.patch.stop()
+        self.temp.cleanup()
+
+    def test_retrieved_mms_is_stored_and_acknowledged(self):
+        client = FakeClient([t.HttpResponse(200, {}, retrieve_conf()),
+                             t.HttpResponse(204, {}, b"")])
+        result = mms.download(self.inst, self.rec["id"], client=client, now=2_000)
+        self.assertTrue(result["ok"])
+        rec = store.get_message(self.rec["id"])
+        self.assertEqual(rec["body"], "你好")
+        self.assertEqual(rec["mms"]["state"], "retrieved")
+        self.assertEqual([p["content_type"] for p in rec["mms"]["parts"]],
+                         ["application/smil", "text/plain", "image/jpeg"])
+        method, url, body, headers = client.requests[1]
+        self.assertEqual((method, url), ("POST", SETTINGS["mmsc"]))
+        ack = m.decode_pdu(body)
+        self.assertEqual((ack.message_type, ack.transaction_id, ack.status),
+                         (m.M_NOTIFYRESP_IND, "T1", m.STATUS_RETRIEVED))
+        self.assertEqual(store.due_mms_downloads(now=10**10), [])
+
+    def test_transient_failure_is_rescheduled_and_permanent_one_is_final(self):
+        client = FakeClient([t.MmsTransportError("timed out")])
+        result = mms.download(self.inst, self.rec["id"], client=client, now=2_000)
+        self.assertFalse(result["final"])
+        row = store.mms_for_download(self.rec["id"])
+        self.assertEqual((row["state"], row["next_attempt_ts"]), ("failed", 2_060))
+
+        gone = FakeClient([t.HttpResponse(200, {}, retrieve_conf(status=0xE2))])
+        result = mms.download(self.inst, self.rec["id"], client=gone, now=2_100)
+        self.assertTrue(result["final"])
+        row = store.mms_for_download(self.rec["id"])
+        self.assertEqual((row["state"], row["next_attempt_ts"]), ("failed", None))
+        self.assertTrue(store.schedule_mms_download("1", self.rec["id"], now=3_000))
+
+    def test_expired_notification_is_not_retried(self):
+        client = FakeClient([t.MmsTransportError("timed out")])
+        result = mms.download(self.inst, self.rec["id"], client=client, now=10**9 * 3)
+        self.assertTrue(result["final"])
+        self.assertEqual(store.mms_for_download(self.rec["id"])["state"], "expired")
+
+    def test_interrupted_work_is_recovered_after_restart(self):
+        store.set_mms_state(self.rec["id"], "downloading")
+        out = store.create_outgoing_mms("1", "+447700900123", to_addrs=["+447700900123"],
+                                        subject="", body="x", transaction_id="TX")
+        self.assertEqual(store.reset_interrupted_mms(now=5_000), 2)
+        self.assertEqual(store.mms_for_download(self.rec["id"])["state"], "notified")
+        self.assertEqual(store.get_message(out["id"])["status"], "unknown")
+
+
+if __name__ == "__main__":
+    unittest.main()

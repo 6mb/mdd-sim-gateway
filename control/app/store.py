@@ -1385,6 +1385,35 @@ def mms_for_download(message_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def reset_interrupted_mms(now: int | None = None) -> int:
+    """After a restart: a download that was in flight is simply due again; a send that was
+    in flight may or may not have reached the MMSC, so it is reported, never repeated."""
+    now = int(now or time.time())
+    with _lock, _conn() as c:
+        count = c.execute("UPDATE mms SET state='notified', next_attempt_ts=?, updated_ts=? "
+                          "WHERE state='downloading'", (now, now)).rowcount
+        ids = [r[0] for r in c.execute("SELECT message_id FROM mms WHERE state='sending'")]
+        if ids:
+            marks = _placeholders(len(ids))
+            c.execute(f"UPDATE mms SET state='failed', updated_ts=?, last_error=? "
+                      f"WHERE message_id IN ({marks})",
+                      (now, "Interrupted while sending; it may or may not have been sent.", *ids))
+            c.execute(f"UPDATE messages SET status='unknown', error=? WHERE id IN ({marks})",
+                      ("Interrupted while sending; it may or may not have been sent.", *ids))
+    return count + len(ids)
+
+
+def schedule_mms_download(instance: str, message_id: int, now: int | None = None) -> bool:
+    """Queue an inbound MMS for retrieval now (a manual download or retry)."""
+    now = int(now or time.time())
+    with _lock, _conn() as c:
+        cur = c.execute("UPDATE mms SET state='notified', next_attempt_ts=?, updated_ts=? "
+                        "WHERE message_id=? AND instance=? AND direction='in' "
+                        "AND state IN ('notified','failed','expired')",
+                        (now, now, int(message_id), str(instance)))
+    return cur.rowcount == 1
+
+
 def due_mms_downloads(now: int | None = None, limit: int = 5) -> list[dict]:
     now = int(now or time.time())
     with _lock, _conn() as c:

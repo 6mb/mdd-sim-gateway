@@ -32,7 +32,8 @@ from fastapi.staticfiles import StaticFiles
 from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
-               sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms)
+               sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
+               mms_transport)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -448,6 +449,9 @@ class Hub:
         # ``auto`` requests must not both decide that the preferred route is unavailable and
         # submit the same user action through different transports.
         self.sms_send_locks: dict[str, asyncio.Lock] = {}
+        # Inbound MMS a user asked to download although the line does not auto-download.
+        self.mms_forced: set[int] = set()
+        self.mms_wakeup = asyncio.Event()
         # Per-line exit failover ledger. Persisted: a control-plane restart must not
         # re-announce a give-up it already reported, nor re-walk an exhausted pool.
         self.exit_ledgers: dict[str, dict] = _load_exit_ledgers()
@@ -1546,7 +1550,9 @@ async def _publish_incoming_sms(rec: dict) -> None:
     iid = str(rec["instance"])
     await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
     if (rec.get("kind") or "sms") == "mms":
-        _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"], _mms_push_text(rec))
+        # Pushed by the MMS worker once there is content to show, or once it is clear there
+        # will not be; a push now could only say "an MMS is on its way".
+        hub.mms_wakeup.set()
         return
     await asyncio.to_thread(_harvest_allowance_reply, iid, rec["peer"])
     _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"], rec["body"])
@@ -1563,9 +1569,63 @@ def _mms_push_text(rec: dict) -> str:
         summary += f"\n{rec['body']}"
     if parts:
         summary += f"\n({len(parts)} attachment{'s' if len(parts) != 1 else ''})"
-    elif mms_state.get("state") == "notified" and mms_state.get("size"):
-        summary += f" ({int(mms_state['size']) // 1024 or 1} KB)"
+    elif mms_state.get("state") in ("notified", "failed", "expired") and mms_state.get("size"):
+        summary += f" ({int(mms_state['size']) // 1024 or 1} KB, not downloaded)"
     return summary
+
+
+async def mms_worker():
+    """Retrieve notified MMS from the MMSC, retrying on the schedule mms.download() sets."""
+    try:
+        await asyncio.to_thread(store.reset_interrupted_mms)
+    except Exception as exc:  # noqa
+        log.debug("MMS state recovery failed: %r", exc)
+    while True:
+        try:
+            await asyncio.wait_for(hub.mms_wakeup.wait(), timeout=20)
+        except asyncio.TimeoutError:
+            pass
+        hub.mms_wakeup.clear()
+        try:
+            due = await asyncio.to_thread(store.due_mms_downloads)
+        except Exception as exc:  # noqa
+            log.debug("MMS queue read failed: %r", exc)
+            continue
+        for row in due:
+            await _process_mms_download(row)
+
+
+async def _process_mms_download(row: dict) -> None:
+    mid, iid = int(row["message_id"]), str(row["instance"])
+    try:
+        inst = await asyncio.to_thread(cfg.get_instance, iid)
+        settings = (mms_transport.resolve_settings(inst) if inst else {})
+        forced = mid in hub.mms_forced
+        if not inst or not settings.get("enabled") or not (settings.get("auto_download")
+                                                           or forced):
+            # Parked until someone asks for it; say once that it arrived.
+            await asyncio.to_thread(store.set_mms_state, mid, row["state"],
+                                    next_attempt_ts=None)
+            rec = await asyncio.to_thread(store.get_message, mid)
+            if rec and int(row.get("attempts") or 0) == 0:
+                _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"], _mms_push_text(rec))
+            return
+        hub.mms_forced.discard(mid)
+        result = await asyncio.to_thread(mms.download, inst, mid)
+        rec = await asyncio.to_thread(store.get_message, mid)
+        if not rec:
+            return
+        await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
+        if result.get("ok"):
+            log.info("retrieved MMS %d on line %s", mid, iid)
+            _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"], _mms_push_text(rec))
+        else:
+            log.info("MMS %d on line %s not retrieved: %s", mid, iid, result.get("error"))
+            if result.get("final") and not forced and int(row.get("attempts") or 0) == 0:
+                _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"],
+                               _mms_push_text(rec))
+    except Exception as exc:  # noqa
+        log.warning("MMS download %d failed unexpectedly: %r", mid, exc)
 
 
 async def _publish_binary_sms(result: dict) -> None:
@@ -2471,6 +2531,7 @@ async def lifespan(app: FastAPI):
     sms_poller = asyncio.create_task(cellular_sms_poller())
     host_poller = asyncio.create_task(host_health_poller())
     segment_reaper = asyncio.create_task(sms_segment_reaper())
+    mms_runner = asyncio.create_task(mms_worker())
     update_poller = asyncio.create_task(update_automation_poller())
     for iid in recovered_modem_lines:
         asyncio.create_task(_auto_start_hotplugged_line(iid))
@@ -2480,11 +2541,12 @@ async def lifespan(app: FastAPI):
     sms_poller.cancel()
     host_poller.cancel()
     segment_reaper.cancel()
+    mms_runner.cancel()
     update_poller.cancel()
     # Reap the cancelled tasks (the monitor may be parked in a to_thread wait for up to
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
     await asyncio.gather(poller, monitor, sms_poller, host_poller,
-                         segment_reaper, update_poller, return_exceptions=True)
+                         segment_reaper, mms_runner, update_poller, return_exceptions=True)
     await hub.runtime.close()
     for c in hub.ami.values():
         await c.close()
@@ -5194,6 +5256,104 @@ def api_binary_sms(iid: str, limit: int = 200):
 @app.get("/api/instances/{iid}/messages/{peer}")
 def api_messages(iid: str, peer: str):
     return {"messages": store.list_messages(iid, peer)}
+
+
+@app.post("/api/instances/{iid}/messages/{mid}/mms/download")
+async def api_mms_download(iid: str, mid: int):
+    """Retrieve (or retry) one inbound MMS now, whatever the line's auto-download setting."""
+    if not await asyncio.to_thread(store.schedule_mms_download, iid, mid):
+        raise HTTPException(409, "this MMS cannot be downloaded")
+    hub.mms_forced.add(int(mid))
+    hub.mms_wakeup.set()
+    rec = await asyncio.to_thread(store.get_message, mid)
+    await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
+    return {"ok": True, "message": rec}
+
+
+# Served inline only for media the browser renders without running anything. SVG and HTML
+# can carry script, so like every other type they are downloads.
+_MMS_INLINE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp",
+                     "audio/", "video/", "text/plain")
+
+
+@app.get("/api/instances/{iid}/messages/{mid}/mms/parts/{pid}")
+def api_mms_part(iid: str, mid: int, pid: int, download: bool = False):
+    part = store.mms_part_file(iid, mid, pid)
+    if not part:
+        raise HTTPException(404, "no such MMS part")
+    content_type = str(part["content_type"] or "").split(";")[0].strip().lower()
+    inline = not download and content_type.startswith(_MMS_INLINE_TYPES)
+    media_type = content_type if inline else "application/octet-stream"
+    if inline and content_type == "text/plain":
+        media_type = f"text/plain; charset={part['charset'] or 'utf-8'}"
+    name = part["name"] or os.path.basename(part["file"])
+    return FileResponse(part["file"], media_type=media_type, filename=name,
+                        content_disposition_type="inline" if inline else "attachment",
+                        headers={"X-Content-Type-Options": "nosniff",
+                                 "Content-Security-Policy": "sandbox; default-src 'none'",
+                                 "Cache-Control": "private, max-age=86400"})
+
+
+_MMS_SETTING_KEYS = ("enabled", "auto_download", "transport", "apn", "mmsc", "proxy",
+                     "username", "password", "user_agent", "max_size")
+
+
+def _mms_settings_view(inst: dict) -> dict:
+    effective = mms_transport.resolve_settings(inst)
+    effective.pop("password", None)
+    own = dict(inst.get("mms") or {})
+    own["password_set"] = bool(own.pop("password", ""))
+    return {"effective": effective, "line": own}
+
+
+@app.get("/api/instances/{iid}/mms/settings")
+async def api_mms_settings(iid: str):
+    inst = await asyncio.to_thread(cfg.get_instance, iid)
+    if not inst:
+        raise HTTPException(404, "no such line")
+    return await asyncio.to_thread(_mms_settings_view, inst)
+
+
+@app.put("/api/instances/{iid}/mms/settings")
+async def api_mms_settings_save(iid: str, body: dict):
+    inst = await asyncio.to_thread(cfg.get_instance, iid)
+    if not inst:
+        raise HTTPException(404, "no such line")
+    current = dict(inst.get("mms") or {})
+    clean = {}
+    for key in _MMS_SETTING_KEYS:
+        if key not in (body or {}):
+            if key in current:
+                clean[key] = current[key]
+            continue
+        value = body[key]
+        if key in ("enabled", "auto_download"):
+            clean[key] = bool(value)
+        elif key == "transport":
+            if value not in mms_transport.TRANSPORTS:
+                raise HTTPException(422, "transport must be auto, modem or host")
+            clean[key] = value
+        elif key == "max_size":
+            try:
+                clean[key] = max(30 * 1024, min(5 * 1024 * 1024, int(value)))
+            except (TypeError, ValueError):
+                raise HTTPException(422, "max_size must be a number of bytes") from None
+        else:
+            text = str(value or "").strip()
+            if any(ch in text for ch in "\"\r\n\0"):
+                raise HTTPException(422, f"{key} contains characters that are not allowed")
+            if key == "mmsc" and text and not text.startswith("http://"):
+                raise HTTPException(422, "the MMSC must be an http:// URL")
+            if key == "proxy" and text and mms_transport.parse_proxy(text) is None:
+                raise HTTPException(422, "the MMS proxy must be host:port")
+            if key == "password" and not text and current.get("password") \
+                    and not body.get("clear_password"):
+                clean[key] = current["password"]      # blank means "unchanged"
+                continue
+            clean[key] = text
+    updated = await asyncio.to_thread(cfg.upsert_instance, {"id": str(iid), "mms": clean})
+    hub.mms_wakeup.set()
+    return await asyncio.to_thread(_mms_settings_view, updated)
 
 
 @app.post("/api/instances/{iid}/messages/delete")

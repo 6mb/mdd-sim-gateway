@@ -1,0 +1,407 @@
+"""HTTP to a carrier's MMSC, over whichever network can reach it.
+
+An MMSC (and the WAP proxy in front of it) is normally reachable only from the carrier's MMS
+APN: the WAP proxy is commonly unreachable from the internet APN and the MMSC's hostname
+does not resolve in public DNS. Two clients are provided:
+
+- ModemSocketHttp opens the MMS APN inside the modem itself, with Quectel's embedded TCP/IP
+  stack (AT+QICSGP/QIACT/QIOPEN), driven through ModemManager's command channel. The host's
+  own data connection on the modem is untouched and nothing new appears in the host routing
+  table. It needs ModemManager running with --debug, as the SIM bridge does.
+- HostHttp is a plain HTTP client from the host, for a carrier whose MMSC is reachable from
+  wherever the host is (or a deployment that routes the MMS APN itself).
+
+Limits of the command channel: ModemManager accepts a command only when it ends with a final
+result it recognises, and AT+QISENDEX ends with "SEND OK". Every upload chunk therefore waits
+out the shortest command timeout (one second) and is verified afterwards with AT+QISEND's
+byte counters. Uploads run at roughly 200 bytes a second; downloads are unaffected.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import subprocess
+import time
+import xml.etree.ElementTree as ElementTree
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
+
+log = logging.getLogger("vowifi.mms")
+
+PROVIDER_DB = os.environ.get(
+    "MDD_MOBILE_BROADBAND_PROVIDER_INFO",
+    "/usr/share/mobile-broadband-provider-info/serviceproviders.xml")
+TRANSPORTS = ("auto", "modem", "host")
+DEFAULT_MAX_SIZE = 300 * 1024
+DEFAULT_USER_AGENT = "Android-Mms/2.0"
+MMS_CONTENT_TYPE = "application/vnd.wap.mms-message"
+
+
+class MmsTransportError(Exception):
+    """A failed MMSC exchange. `retryable` is False when trying again cannot help."""
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+@dataclass
+class HttpResponse:
+    status: int
+    headers: dict = field(default_factory=dict)
+    body: bytes = b""
+
+
+# ----------------------------- settings -----------------------------
+
+def lookup_provider(mcc, mnc, path: str | None = None) -> dict | None:
+    """MMS APN, MMSC and proxy for a network from mobile-broadband-provider-info.
+
+    Several providers can share one network code (an MVNO rides its host network's code); the
+    first one that publishes an MMS APN is used, which is normally the host network itself.
+    """
+    mcc, mnc = str(mcc or "").strip(), str(mnc or "").strip()
+    if not mcc or not mnc:
+        return None
+    try:
+        root = ElementTree.parse(path or PROVIDER_DB).getroot()
+    except (OSError, ElementTree.ParseError):
+        return None
+    wanted = {(mcc, mnc.lstrip("0") or "0")}
+    for provider in root.iter("provider"):
+        gsm = provider.find("gsm")
+        if gsm is None:
+            continue
+        codes = {(n.get("mcc", ""), (n.get("mnc", "").lstrip("0") or "0"))
+                 for n in gsm.findall("network-id")}
+        if not codes & wanted:
+            continue
+        for apn in gsm.findall("apn"):
+            usage = apn.find("usage")
+            if usage is None or usage.get("type") != "mms":
+                continue
+            mmsc = (apn.findtext("mmsc") or "").strip()
+            if not mmsc:
+                continue
+            return {"name": (provider.findtext("name") or "").strip(),
+                    "apn": apn.get("value", ""), "mmsc": mmsc,
+                    "proxy": (apn.findtext("mmsproxy") or "").strip(),
+                    "username": (apn.findtext("username") or "").strip(),
+                    "password": (apn.findtext("password") or "").strip()}
+    return None
+
+
+def resolve_settings(inst: dict, *, provider_path: str | None = None) -> dict:
+    """The line's effective MMS settings: its own values, gaps filled from the provider DB."""
+    own = inst.get("mms") if isinstance(inst.get("mms"), dict) else {}
+    detected = lookup_provider(inst.get("mcc"), inst.get("mnc"), provider_path) or {}
+    settings = {"enabled": bool(own.get("enabled", True)),
+                "auto_download": bool(own.get("auto_download", True)),
+                "transport": own.get("transport") if own.get("transport") in TRANSPORTS
+                else "auto",
+                "user_agent": str(own.get("user_agent") or DEFAULT_USER_AGENT),
+                "detected": detected or None}
+    try:
+        settings["max_size"] = max(30 * 1024, int(own.get("max_size") or DEFAULT_MAX_SIZE))
+    except (TypeError, ValueError):
+        settings["max_size"] = DEFAULT_MAX_SIZE
+    manual = bool(str(own.get("mmsc") or "").strip())
+    source = own if manual else detected
+    for key in ("apn", "mmsc", "proxy", "username", "password"):
+        settings[key] = str((source or {}).get(key) or "").strip()
+    settings["source"] = "line" if manual else ("provider" if detected else "")
+    settings["configured"] = bool(settings["mmsc"])
+    return settings
+
+
+def parse_proxy(value: str) -> tuple[str, int] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if "://" in text:
+        parts = urlsplit(text)
+        host, port = parts.hostname or "", parts.port or 80
+    else:
+        host, _, port_text = text.rpartition(":") if ":" in text else (text, "", "80")
+        try:
+            port = int(port_text)
+        except ValueError:
+            return None
+    if not host or not 0 < port < 65536:
+        return None
+    return host, port
+
+
+# ----------------------------- HTTP framing -----------------------------
+
+def build_request(method: str, url: str, *, body: bytes = b"", headers: dict | None = None,
+                  via_proxy: bool) -> tuple[bytes, str, int]:
+    """Serialise one HTTP/1.1 request. Returns (bytes, connect host, connect port)."""
+    parts = urlsplit(url)
+    if parts.scheme != "http" or not parts.hostname:
+        raise MmsTransportError(f"unsupported MMSC URL scheme: {parts.scheme or url!r}",
+                                retryable=False)
+    port = parts.port or 80
+    host_header = parts.hostname + (f":{parts.port}" if parts.port else "")
+    target = url if via_proxy else (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    lines = [f"{method} {target} HTTP/1.1", f"Host: {host_header}", "Connection: close"]
+    for name, value in (headers or {}).items():
+        lines.append(f"{name}: {value}")
+    if method != "GET" or body:
+        lines.append(f"Content-Length: {len(body)}")
+    head = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+    return head + body, parts.hostname, port
+
+
+def parse_response(raw: bytes) -> tuple[HttpResponse | None, bool]:
+    """(response, complete). The response is None until the header block has arrived."""
+    end = raw.find(b"\r\n\r\n")
+    if end < 0:
+        return None, False
+    lines = raw[:end].decode("latin-1").split("\r\n")
+    match = re.match(r"HTTP/\d\.\d\s+(\d{3})", lines[0])
+    if not match:
+        raise MmsTransportError("the MMSC sent a malformed HTTP response")
+    headers = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        headers[name.strip().lower()] = value.strip()
+    body = raw[end + 4:]
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        decoded, pos = bytearray(), 0
+        while True:
+            line_end = body.find(b"\r\n", pos)
+            if line_end < 0:
+                return HttpResponse(int(match.group(1)), headers, bytes(decoded)), False
+            try:
+                size = int(body[pos:line_end].split(b";")[0], 16)
+            except ValueError:
+                raise MmsTransportError("the MMSC sent a malformed chunked body") from None
+            if size == 0:
+                return HttpResponse(int(match.group(1)), headers, bytes(decoded)), True
+            start = line_end + 2
+            if len(body) < start + size + 2:
+                return HttpResponse(int(match.group(1)), headers, bytes(decoded)), False
+            decoded += body[start:start + size]
+            pos = start + size + 2
+    length = headers.get("content-length")
+    if length is not None and length.isdigit():
+        complete = len(body) >= int(length)
+        return HttpResponse(int(match.group(1)), headers, body[:int(length)]), complete
+    # Neither framing: the body runs until the connection closes.
+    return HttpResponse(int(match.group(1)), headers, body), False
+
+
+# ----------------------------- clients -----------------------------
+
+class HostHttp:
+    """MMSC HTTP from the host's own network stack."""
+
+    name = "host"
+
+    def __init__(self, settings: dict, session=None):
+        import requests  # deferred: only this client needs it
+        self.settings = settings
+        self.session = session or requests.Session()
+
+    def request(self, method: str, url: str, *, body: bytes = b"", headers: dict | None = None,
+                timeout: float = 60.0) -> HttpResponse:
+        proxy = parse_proxy(self.settings.get("proxy"))
+        proxies = {"http": f"http://{proxy[0]}:{proxy[1]}"} if proxy else None
+        try:
+            response = self.session.request(method, url, data=body or None,
+                                            headers=headers or {}, proxies=proxies,
+                                            timeout=timeout, allow_redirects=False)
+        except Exception as exc:
+            raise MmsTransportError(f"MMSC request from the host failed: {exc}") from None
+        return HttpResponse(response.status_code,
+                            {k.lower(): v for k, v in response.headers.items()},
+                            response.content)
+
+
+class ModemCommand:
+    """One AT command through ModemManager's Modem.Command D-Bus method."""
+
+    def __init__(self, modem_path: str, runner=subprocess.run):
+        self.modem_path = modem_path
+        self.runner = runner
+
+    def __call__(self, command: str, timeout: int = 5) -> tuple[bool, str]:
+        args = ["busctl", "--system", "--json=short", f"--timeout={int(timeout) + 5}", "call",
+                "org.freedesktop.ModemManager1", self.modem_path,
+                "org.freedesktop.ModemManager1.Modem", "Command", "su", command,
+                str(max(1, int(timeout)))]
+        try:
+            result = self.runner(args, capture_output=True, text=True,
+                                 timeout=int(timeout) + 10, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
+        if result.returncode:
+            return False, " ".join(str(result.stderr or result.stdout or "").split())
+        try:
+            data = json.loads(result.stdout or "{}").get("data") or [""]
+            return True, str(data[0])
+        except (ValueError, AttributeError, IndexError):
+            return False, "unreadable ModemManager reply"
+
+
+_CGDCONT_RE = re.compile(r'\+CGDCONT:\s*(\d+)\s*,\s*"[^"]*"\s*,\s*"([^"]*)"')
+_QIACT_RE = re.compile(r'\+QIACT:\s*(\d+)\s*,\s*(\d)')
+_QISTATE_RE = re.compile(r'\+QISTATE:\s*(\d+)\s*,\s*"[^"]*"\s*,\s*"[^"]*"\s*,\s*\d+\s*,'
+                         r'\s*\d+\s*,\s*(\d)')
+_QIOPEN_RE = re.compile(r'\+QIOPEN:\s*(\d+)\s*,\s*(\d+)')
+_QIRD_RE = re.compile(r'\+QIRD:\s*(\d+)\s*(?:\r?\n)?([0-9A-Fa-f]*)')
+_QISEND_RE = re.compile(r'\+QISEND:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)')
+
+
+class ModemSocketHttp:
+    """MMSC HTTP through the modem's own PDP context on the MMS APN (Quectel QI* commands)."""
+
+    name = "modem"
+    CONNECT_ID = 11          # the highest socket id, well away from anything else using QI*
+    CHUNK = 256              # the longest AT+QISENDEX payload the module accepted
+    READ = 1500
+
+    def __init__(self, command: ModemCommand, settings: dict, *, sleep=time.sleep,
+                 clock=time.monotonic):
+        self.at = command
+        self.settings = settings
+        self.sleep = sleep
+        self.clock = clock
+
+    def _require(self, command: str, timeout: int = 5) -> str:
+        ok, text = self.at(command, timeout)
+        if not ok:
+            raise MmsTransportError(f"modem rejected {command.split('=')[0]}: {text[:120]}")
+        return text
+
+    def supported(self) -> bool:
+        ok, text = self.at("AT+QICSGP=?", 3)
+        return ok and "+QICSGP" in text
+
+    def _context(self) -> tuple[int, bool]:
+        """(cid, activated_here) for a PDP context on the MMS APN, activating it if needed."""
+        apn = self.settings.get("apn") or ""
+        if not apn:
+            raise MmsTransportError("no MMS APN is configured for this line", retryable=False)
+        defined = {int(cid): name for cid, name in _CGDCONT_RE.findall(
+            self._require("AT+CGDCONT?"))}
+        cid = next((c for c, name in sorted(defined.items())
+                    if name.casefold() == apn.casefold()), None)
+        if cid is None:
+            cid = next((c for c in range(4, 16) if c not in defined), None)
+            if cid is None:
+                raise MmsTransportError("the modem has no free PDP context for the MMS APN",
+                                        retryable=False)
+            user, password = self.settings.get("username", ""), self.settings.get("password", "")
+            auth = 3 if user or password else 0
+            self._require(f'AT+QICSGP={cid},1,"{apn}","{user}","{password}",{auth}')
+        active = {int(c): state == "1" for c, state in _QIACT_RE.findall(
+            self._require("AT+QIACT?"))}
+        if active.get(cid):
+            return cid, False
+        ok, text = self.at(f"AT+QIACT={cid}", 60)
+        if not ok:
+            raise MmsTransportError(f"could not activate the MMS APN: {text[:120]}")
+        return cid, True
+
+    def request(self, method: str, url: str, *, body: bytes = b"", headers: dict | None = None,
+                timeout: float = 120.0) -> HttpResponse:
+        if not self.supported():
+            raise MmsTransportError("this modem has no embedded TCP/IP stack that the gateway "
+                                    "can drive (Quectel AT+QICSGP)", retryable=False)
+        proxy = parse_proxy(self.settings.get("proxy"))
+        payload, host, port = build_request(method, url, body=body, headers=headers,
+                                            via_proxy=bool(proxy))
+        if proxy:
+            host, port = proxy
+        deadline = self.clock() + timeout
+        cid, activated = self._context()
+        sid = self.CONNECT_ID
+        try:
+            self.at(f"AT+QICLOSE={sid},1", 3)
+            self._require('AT+QICFG="dataformat",1,1')
+            self._require(f'AT+QIOPEN={cid},{sid},"TCP","{host}",{port},0,0', 10)
+            self._wait_connected(sid, deadline)
+            self._send(sid, payload, deadline)
+            return self._receive(sid, deadline)
+        finally:
+            self.at(f"AT+QICLOSE={sid},1", 3)
+            if activated:
+                self.at(f"AT+QIDEACT={cid}", 40)
+
+    def _wait_connected(self, sid: int, deadline: float) -> None:
+        while True:
+            ok, text = self.at(f"AT+QISTATE=1,{sid}", 3)
+            for opened, error in _QIOPEN_RE.findall(text):
+                if int(opened) == sid and int(error):
+                    raise MmsTransportError(f"MMSC connection failed (error {error})")
+            states = {int(s): int(state) for s, state in _QISTATE_RE.findall(text)}
+            if states.get(sid) == 2:
+                return
+            if self.clock() > deadline:
+                raise MmsTransportError("timed out connecting to the MMSC")
+            self.sleep(0.5)
+
+    def _sent(self, sid: int) -> int:
+        ok, text = self.at(f"AT+QISEND={sid},0", 3)
+        match = _QISEND_RE.search(text) if ok else None
+        return int(match.group(1)) if match else -1
+
+    def _send(self, sid: int, payload: bytes, deadline: float) -> None:
+        for offset in range(0, len(payload), self.CHUNK):
+            chunk = payload[offset:offset + self.CHUNK]
+            # Answered with "SEND OK", which ModemManager does not treat as a final result:
+            # the call times out after its one-second minimum. The counters below decide.
+            self.at(f'AT+QISENDEX={sid},"{chunk.hex()}"', 1)
+            if self.clock() > deadline:
+                raise MmsTransportError("timed out sending to the MMSC")
+        sent = self._sent(sid)
+        if sent != len(payload):
+            raise MmsTransportError(f"the modem sent {sent} of {len(payload)} request bytes")
+
+    def _receive(self, sid: int, deadline: float) -> HttpResponse:
+        raw = bytearray()
+        idle = 0
+        while True:
+            ok, text = self.at(f"AT+QIRD={sid},{self.READ}", 5)
+            match = _QIRD_RE.search(text) if ok else None
+            count = int(match.group(1)) if match else 0
+            if count:
+                raw += bytes.fromhex(match.group(2)[:count * 2])
+                idle = 0
+                response, complete = parse_response(bytes(raw))
+                if complete:
+                    return response
+                continue
+            ok, state_text = self.at(f"AT+QISTATE=1,{sid}", 3)
+            states = {int(s): int(state) for s, state in _QISTATE_RE.findall(state_text)}
+            closed = states.get(sid) in (None, 4) or '"closed"' in state_text or \
+                '"closed"' in text
+            if closed and idle:
+                response, _complete = parse_response(bytes(raw))
+                if response is None:
+                    raise MmsTransportError("the MMSC closed the connection without a reply")
+                return response
+            if self.clock() > deadline:
+                raise MmsTransportError("timed out waiting for the MMSC")
+            idle += 1
+            self.sleep(0.3 if closed else 0.5)
+
+
+def client_for(settings: dict, modem_path: str | None, *, runner=subprocess.run):
+    """The client a line's MMS goes through: the modem holding its SIM where it can, else
+    the host. An explicit transport choice is honoured even when it cannot work, so the
+    failure is reported instead of silently taking another network."""
+    transport = settings.get("transport") or "auto"
+    if transport == "host":
+        return HostHttp(settings)
+    if modem_path:
+        client = ModemSocketHttp(ModemCommand(modem_path, runner), settings)
+        if transport == "modem" or client.supported():
+            return client
+    if transport == "modem":
+        raise MmsTransportError("no modem holds this line's SIM", retryable=False)
+    return HostHttp(settings)

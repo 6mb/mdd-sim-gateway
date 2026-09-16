@@ -6,6 +6,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Received MMS are downloaded and shown: text, pictures, audio and video, in the sender's
+  conversation, and a push notification carries the text once it is known. A carrier's MMSC
+  normally answers only on its MMS APN, so a modem with Quectel's embedded TCP/IP stack opens
+  that APN inside the module for the duration of one exchange, leaving the host's own data
+  connection and routing untouched (this uses ModemManager's command channel, i.e. `--debug`,
+  as the SIM bridge already does). Where the MMSC is reachable from the host's network, the
+  line can use the host instead. The MMS APN, MMSC and proxy are looked up from the
+  `mobile-broadband-provider-info` database by the SIM's network code and can be set per line.
+  A failed download is retried with backoff until the notification expires; auto-download can
+  be turned off per line, and any MMS can be downloaded or retried by hand.
 - An MMS notification is recognised and kept as a pending MMS in its conversation, from
   VoWiFi and from the modem alike. 1.9.4 looked for the text `application/vnd.wap.mms-message`
   in the payload, but carriers send that content type as its one-byte binary code, so real
