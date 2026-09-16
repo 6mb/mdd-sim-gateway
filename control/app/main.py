@@ -1621,7 +1621,8 @@ async def _process_mms_download(row: dict) -> None:
             _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"], _mms_push_text(rec))
         else:
             log.info("MMS %d on line %s not retrieved: %s", mid, iid, result.get("error"))
-            if result.get("final") and not forced and int(row.get("attempts") or 0) == 0:
+            if (result.get("final") and not result.get("expired") and not forced
+                    and int(row.get("attempts") or 0) == 0):
                 _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"],
                                _mms_push_text(rec))
     except Exception as exc:  # noqa

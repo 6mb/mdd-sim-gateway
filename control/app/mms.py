@@ -143,6 +143,12 @@ def download(inst: dict, message_id: int, *, client=None, now: int | None = None
         return {"ok": False, "error": "no such MMS", "final": True}
     settings = mms_transport.resolve_settings(inst)
     expired = bool(row.get("expiry_ts")) and now > int(row["expiry_ts"])
+    if expired and not int(row.get("attempts") or 0):
+        # Already past the MMSC's retention when first seen (a backlog on a modem that was
+        # offline): nothing to fetch, and nothing worth announcing.
+        store.set_mms_state(message_id, "expired", error="The MMS expired before it could "
+                            "be downloaded.", next_attempt_ts=None)
+        return {"ok": False, "error": "expired", "final": True, "expired": True}
     store.set_mms_state(message_id, "downloading")
     try:
         with io_lock:

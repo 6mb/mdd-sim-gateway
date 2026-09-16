@@ -303,11 +303,18 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual((row["state"], row["next_attempt_ts"]), ("failed", None))
         self.assertTrue(store.schedule_mms_download("1", self.rec["id"], now=3_000))
 
-    def test_expired_notification_is_not_retried(self):
+    def test_expired_notification_is_neither_fetched_nor_retried(self):
+        client = FakeClient([])
+        result = mms.download(self.inst, self.rec["id"], client=client, now=10**9 * 3)
+        self.assertTrue(result["final"] and result["expired"])
+        self.assertEqual(client.requests, [])
+        self.assertEqual(store.mms_for_download(self.rec["id"])["state"], "expired")
+        store.schedule_mms_download("1", self.rec["id"], now=10**9 * 3)
+        store.set_mms_state(self.rec["id"], "notified", attempts_increment=1)
         client = FakeClient([t.MmsTransportError("timed out")])
         result = mms.download(self.inst, self.rec["id"], client=client, now=10**9 * 3)
-        self.assertTrue(result["final"])
-        self.assertEqual(store.mms_for_download(self.rec["id"])["state"], "expired")
+        self.assertEqual(len(client.requests), 1, "a manual retry still asks the MMSC")
+        self.assertEqual(store.mms_for_download(self.rec["id"])["next_attempt_ts"], None)
 
     def test_interrupted_work_is_recovered_after_restart(self):
         store.set_mms_state(self.rec["id"], "downloading")
