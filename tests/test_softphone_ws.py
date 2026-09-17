@@ -1,123 +1,126 @@
 """The browser softphone reaches its line's engine through the control surface, by path."""
 import asyncio
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from jinja2 import Environment, FileSystemLoader
-
-from starlette.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.server import serve
 
 from control.app import main, softphone_ws
 
 
-class _EngineStub:
-    """A stand-in for Asterisk's WS listener: echoes each message back with a prefix."""
+class _Browser:
+    """The parts of starlette's WebSocket the endpoint uses, driven by the test.
 
-    def __init__(self):
-        self.subprotocols = []
-        self.closed = threading.Event()
-        self.loop = asyncio.new_event_loop()
-        self.ready = threading.Event()
-        self.thread = threading.Thread(target=self._run, daemon=True)
+    starlette.testclient needs httpx, which is not a runtime dependency; the endpoint is small
+    enough to exercise directly."""
 
-    async def _handler(self, connection):
-        self.subprotocols.append(connection.subprotocol)
-        async for message in connection:
-            await connection.send(f"engine:{message}")
-        self.closed.set()
+    def __init__(self, subprotocols=("sip",)):
+        self.cookies = {main.auth.SESSION_COOKIE: "token"}
+        self.headers = {"sec-websocket-protocol": ", ".join(subprotocols)} if subprotocols else {}
+        self.accepted = None
+        self.close_code = None
+        self.inbox = asyncio.Queue()    # what the browser sends
+        self.outbox = asyncio.Queue()   # what the relay delivers to the browser
 
-    def _run(self):
-        asyncio.set_event_loop(self.loop)
+    async def accept(self, subprotocol=None):
+        self.accepted = subprotocol
 
-        async def main_():
-            self.stop = asyncio.Event()
-            async with serve(self._handler, "127.0.0.1", 0, subprotocols=["sip"]) as server:
-                self.port = server.sockets[0].getsockname()[1]
-                self.ready.set()
-                await self.stop.wait()
+    async def close(self, code=1000):
+        if self.close_code is None:
+            self.close_code = code
 
-        self.loop.run_until_complete(main_())
+    async def receive(self):
+        return await self.inbox.get()
 
-    def __enter__(self):
-        self.thread.start()
-        self.ready.wait(5)
-        return self
+    async def send_text(self, data):
+        await self.outbox.put(data)
 
-    def __exit__(self, *exc):
-        self.loop.call_soon_threadsafe(self.stop.set)
-        self.thread.join(5)
+    async def send_bytes(self, data):
+        await self.outbox.put(data)
+
+    def say(self, text):
+        self.inbox.put_nowait({"type": "websocket.receive", "text": text})
+
+    def hang_up(self):
+        self.inbox.put_nowait({"type": "websocket.disconnect", "code": 1000})
 
 
-class SoftphoneRelayTests(unittest.TestCase):
-    def client(self, *, session=True, instance=None, runtime=None, port=None):
+class SoftphoneRelayTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.engine_subprotocols = []
+        self.engine_closed = asyncio.Event()
+
+        async def handler(connection):
+            self.engine_subprotocols.append(connection.subprotocol)
+            async for message in connection:
+                await connection.send(f"engine:{message}")
+            self.engine_closed.set()
+
+        self.server = await serve(handler, "127.0.0.1", 0, subprotocols=["sip"])
+        self.port = self.server.sockets[0].getsockname()[1]
+
+    async def asyncTearDown(self):
+        self.server.close()
+        await self.server.wait_closed()
+
+    def patched(self, *, session=True, instance=None, runtime=None, port=None):
         instance = {"id": "sim1", "sip": {"webrtc": {"enable": True}}} if instance is None else instance
         runtime = runtime or {"running": True, "ip": "127.0.0.1", "container_id": "c1"}
-        stack = [
+        for p in (
             patch.object(main.auth, "session", return_value={"csrf": "x"} if session else None),
             patch.object(main.cfg, "get_instance", return_value=instance),
             patch.object(main.engine, "container_runtime", return_value=runtime),
-        ]
-        if port is not None:
-            stack.append(patch.object(softphone_ws, "ENGINE_WS_PORT", port))
-        for p in stack:
+            patch.object(softphone_ws, "ENGINE_WS_PORT", self.port if port is None else port),
+        ):
             p.start()
             self.addCleanup(p.stop)
-        return TestClient(main.app)
 
-    def test_sip_messages_flow_both_ways_on_the_sip_subprotocol(self):
-        with _EngineStub() as engine:
-            client = self.client(port=engine.port)
-            with client.websocket_connect(softphone_ws.path("sim1"), subprotocols=["sip"]) as ws:
-                self.assertEqual(ws.accepted_subprotocol, "sip")
-                ws.send_text("REGISTER sip:ims SIP/2.0")
-                self.assertEqual(ws.receive_text(), "engine:REGISTER sip:ims SIP/2.0")
-                # Closing the browser side must close the engine side too, or every page
-                # reload would leave a registered socket behind in Asterisk.
-                ws.close(1000)
-                self.assertTrue(engine.closed.wait(5))
-            self.assertEqual(engine.subprotocols, ["sip"])
+    async def test_sip_messages_flow_both_ways_on_the_sip_subprotocol(self):
+        self.patched()
+        browser = _Browser()
+        call = asyncio.create_task(main.ws_softphone(browser, "sim1"))
+        browser.say("REGISTER sip:ims SIP/2.0")
+        reply = await asyncio.wait_for(browser.outbox.get(), 5)
+        self.assertEqual(browser.accepted, "sip")
+        self.assertEqual(reply, "engine:REGISTER sip:ims SIP/2.0")
+        self.assertEqual(self.engine_subprotocols, ["sip"])
+        # Closing the browser side must close the engine side too, or every page reload would
+        # leave a registered socket behind in Asterisk.
+        browser.hang_up()
+        await asyncio.wait_for(call, 5)
+        await asyncio.wait_for(self.engine_closed.wait(), 5)
 
-    def test_signed_out_browser_is_refused(self):
-        client = self.client(session=False)
-        with self.assertRaises(WebSocketDisconnect) as closed:
-            with client.websocket_connect(softphone_ws.path("sim1"), subprotocols=["sip"]):
-                pass
-        self.assertEqual(closed.exception.code, 4401)
+    async def refused(self, browser=None, **patches):
+        self.patched(**patches)
+        browser = browser or _Browser()
+        await asyncio.wait_for(main.ws_softphone(browser, "sim1"), 10)
+        self.assertIsNone(browser.accepted)
+        return browser.close_code
 
-    def test_unknown_line_disabled_softphone_or_missing_subprotocol_is_refused(self):
+    async def test_signed_out_browser_is_refused(self):
+        self.assertEqual(await self.refused(session=False), 4401)
+
+    async def test_unknown_line_disabled_softphone_or_missing_subprotocol_is_refused(self):
         cases = [
-            ({}, ["sip"]),
-            ({"id": "sim1", "sip": {"webrtc": {"enable": False}}}, ["sip"]),
-            (None, []),
+            ({}, ("sip",)),
+            ({"id": "sim1", "sip": {"webrtc": {"enable": False}}}, ("sip",)),
+            (None, ()),
         ]
         for instance, subprotocols in cases:
             with self.subTest(instance=instance, subprotocols=subprotocols):
-                client = self.client(instance=instance)
-                with self.assertRaises(WebSocketDisconnect) as closed:
-                    with client.websocket_connect(softphone_ws.path("sim1"),
-                                                  subprotocols=subprotocols):
-                        pass
-                self.assertEqual(closed.exception.code, 1008)
+                code = await self.refused(_Browser(subprotocols), instance=instance)
+                self.assertEqual(code, 1008)
 
-    def test_stopped_engine_is_refused(self):
-        client = self.client(runtime={"running": False, "ip": None, "container_id": None})
-        with self.assertRaises(WebSocketDisconnect) as closed:
-            with client.websocket_connect(softphone_ws.path("sim1"), subprotocols=["sip"]):
-                pass
-        self.assertEqual(closed.exception.code, 1013)
+    async def test_stopped_engine_is_refused(self):
+        code = await self.refused(runtime={"running": False, "ip": None, "container_id": None})
+        self.assertEqual(code, 1013)
 
-    def test_unreachable_engine_fails_the_handshake(self):
-        with _EngineStub() as engine:
-            port = engine.port
-        client = self.client(port=port)  # stub is gone, nothing listens there now
-        with self.assertRaises(WebSocketDisconnect) as closed:
-            with client.websocket_connect(softphone_ws.path("sim1"), subprotocols=["sip"]):
-                pass
-        self.assertEqual(closed.exception.code, 1011)
+    async def test_unreachable_engine_fails_the_handshake(self):
+        self.server.close()
+        await self.server.wait_closed()
+        self.assertEqual(await self.refused(), 1011)
 
     def test_path_is_per_line_and_escaped(self):
         self.assertEqual(softphone_ws.path("sim1"), "/api/instances/sim1/softphone/ws")
