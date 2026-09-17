@@ -349,5 +349,69 @@ class UpgradeStoragePolicyTests(unittest.TestCase):
             self.assertEqual(store.schema_version(), len(store._MIGRATIONS))
 
 
+class MigrationBackupTests(unittest.TestCase):
+    OLD_SCHEMA = """
+        CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, instance TEXT NOT NULL,
+            direction TEXT NOT NULL, peer TEXT NOT NULL, body TEXT NOT NULL,
+            status TEXT DEFAULT 'ok', ts INTEGER NOT NULL, error TEXT,
+            transport TEXT DEFAULT 'vowifi');
+        INSERT INTO messages(instance,direction,peer,body,ts,transport) VALUES
+            ('1','in','+447700900123','twice',1000,'vowifi'),
+            ('1','in','+447700900123','twice',1000,'cellular');
+    """
+
+    def test_database_is_backed_up_before_the_first_destructive_step(self):
+        with TempStore() as ctx:
+            with sqlite3.connect(ctx.db) as db:
+                db.executescript(self.OLD_SCHEMA)
+            store.init()
+            backups = sorted(Path(store.backup_dir()).glob("*.sqlite"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn(".v0-before-v", backups[0].name)
+            with sqlite3.connect(backups[0]) as copy:
+                self.assertEqual(copy.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 2,
+                                 "the copy holds the rows the migration folded")
+                self.assertEqual(copy.execute("PRAGMA user_version").fetchone()[0], 0)
+            with sqlite3.connect(ctx.db) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
+            self.assertEqual(oct(backups[0].stat().st_mode & 0o777), "0o600")
+            store.init()
+            self.assertEqual(len(list(Path(store.backup_dir()).glob("*.sqlite"))), 1,
+                             "a current database is not copied again")
+
+    def test_new_installation_needs_no_backup(self):
+        with TempStore():
+            store.init()
+            self.assertFalse(Path(store.backup_dir()).exists())
+
+    def test_failed_backup_stops_the_upgrade_before_anything_changes(self):
+        with TempStore() as ctx:
+            with sqlite3.connect(ctx.db) as db:
+                db.executescript(self.OLD_SCHEMA)
+            Path(store.backup_dir()).parent.mkdir(parents=True, exist_ok=True)
+            Path(store.backup_dir()).write_text("not a directory")    # makedirs fails
+            with self.assertRaises(store.MigrationBackupError):
+                store.init()
+            with sqlite3.connect(ctx.db) as db:
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 2)
+                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master")}
+            self.assertNotIn("message_identities", tables)
+
+    def test_a_copy_that_does_not_verify_is_discarded_and_stops_the_upgrade(self):
+        with TempStore() as ctx:
+            with sqlite3.connect(ctx.db) as db:
+                db.executescript(self.OLD_SCHEMA)
+            with patch.object(store, "_verify_backup",
+                              side_effect=OSError("the backup does not match the database")):
+                with self.assertRaises(store.MigrationBackupError):
+                    store.init()
+            self.assertEqual(list(Path(store.backup_dir()).iterdir()), [],
+                             "no partial or unverified copy is left behind")
+            with sqlite3.connect(ctx.db) as db:
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

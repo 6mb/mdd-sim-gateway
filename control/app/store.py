@@ -57,6 +57,73 @@ def schema_version() -> int | None:
         return None
 
 
+class MigrationBackupError(RuntimeError):
+    """The history database could not be backed up, so it was not migrated."""
+
+
+def backup_dir() -> str:
+    return os.path.join(DATA_DIR, "backups")
+
+
+def _backup_before_migration() -> str | None:
+    """Copy the history database aside before any pending schema step touches it.
+
+    Transactions keep a step from being half applied, but several steps delete rows by
+    design -- folded duplicates, retired tables, filed payloads turned into MMS -- and a
+    deduplication that is wrong for some installation cannot be undone from inside the
+    database. The copy is taken with SQLite's online backup API, checked (integrity, schema
+    version, message count) and only then moved into place; any failure raises, and init()
+    stops before changing anything. Nothing is copied for a database already current or not
+    yet created, and existing copies are never removed automatically.
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+    with sqlite3.connect(DB_PATH) as source:
+        version = int(source.execute("PRAGMA user_version").fetchone()[0])
+        has_history = source.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                     "AND name='messages'").fetchone() is not None
+    if version >= len(_MIGRATIONS) or not has_history:
+        return None
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    target = os.path.join(backup_dir(), f"mdd-sim-gateway.v{version}-before-v"
+                                        f"{len(_MIGRATIONS)}.{stamp}.sqlite")
+    partial = target + ".partial"
+    try:
+        os.makedirs(backup_dir(), mode=0o700, exist_ok=True)
+        source = sqlite3.connect(DB_PATH)
+        copy = sqlite3.connect(partial)
+        try:
+            source.backup(copy)
+            expected = source.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        finally:
+            copy.close()
+            source.close()
+        _verify_backup(partial, version, expected)
+        os.chmod(partial, 0o600)
+        os.replace(partial, target)
+    except Exception as exc:
+        try:
+            os.remove(partial)
+        except OSError:
+            pass
+        raise MigrationBackupError(
+            f"could not back up the history database before upgrading it from schema "
+            f"version {version}; nothing was migrated: {exc}") from exc
+    return target
+
+
+def _verify_backup(path: str, version: int, messages: int) -> None:
+    check = sqlite3.connect(path)
+    try:
+        if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise OSError("the backup failed its integrity check")
+        if int(check.execute("PRAGMA user_version").fetchone()[0]) != version or \
+                check.execute("SELECT COUNT(*) FROM messages").fetchone()[0] != messages:
+            raise OSError("the backup does not match the database")
+    finally:
+        check.close()
+
+
 def init():
     with _lock:
         # Preserve call/SMS history when upgrading an installation that used the former
@@ -64,6 +131,7 @@ def init():
         if not os.path.exists(DB_PATH) and os.path.isfile(PREVIOUS_DB_PATH):
             os.makedirs(DATA_DIR, exist_ok=True)
             shutil.copy2(PREVIOUS_DB_PATH, DB_PATH)
+        _backup_before_migration()
         with _conn() as c:
             c.executescript(
                 """

@@ -18,8 +18,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - **The history database is migrated in place, including deletions.** Duplicate inbound
   messages (the same text imported more than once, or received over both VoWiFi and the modem)
   are folded into one, and the `--` rows 1.9.3 stored for an unreadable body are removed. Each
-  step is transactional and runs once. Back up `mdd-sim-gateway.sqlite` before upgrading if you
-  want to keep the raw rows. MMS notifications that earlier versions filed among the non-text
+  step is transactional and runs once. Before the first step runs, a verified copy of the
+  database is written to `backups/` in the data directory (never removed automatically); if
+  that copy cannot be made, the control plane stops without migrating anything and says why. MMS notifications that earlier versions filed among the non-text
   payloads are decoded again from their stored PDU: each becomes the MMS it announced, or is
   dropped as a copy of one already in its conversation, and leaves the payload list. Rolling
   back to an earlier version keeps working; returning to this version afterwards repairs what

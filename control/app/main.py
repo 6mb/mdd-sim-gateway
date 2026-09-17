@@ -2540,7 +2540,13 @@ async def update_automation_poller():
 async def lifespan(app: FastAPI):
     _keep_modem_storage_on_upgrade(store.schema_version())
     store.set_subscriber_resolver(_line_subscriber)
-    store.init()
+    try:
+        store.init()
+    except store.MigrationBackupError as exc:
+        # Refusing to start is deliberate: the upgrade deletes rows, and it only runs once a
+        # verified copy exists. Free space in the data directory, then start again.
+        log.critical("%s", exc)
+        raise
     # An upgrade from an older/self-use build may inherit more than five running containers.
     # Keep every saved record, but stop excess engines before background recovery begins.
     for saved_line in cfg.list_instances():
