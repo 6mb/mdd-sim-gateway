@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-18
+
 ### Upgrade notes
 
 - **Modem SMS storage is not emptied on upgrade.** This version can delete an SMS from the
