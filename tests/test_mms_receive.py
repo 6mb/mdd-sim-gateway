@@ -163,5 +163,63 @@ class InboundEventTests(unittest.IsolatedAsyncioTestCase, TempStore):
         self.assertEqual(self.push.call_count, 0)
 
 
+def filed_push_tpdu(payload: bytes, scts: str = "62304151906280") -> str:
+    """An SMS-DELIVER from short code 99 carrying `payload` to the WAP Push port."""
+    user_data = bytes.fromhex("0605040b8423f0") + payload
+    return (bytes([0x44, 0x02, 0x81, 0x99, 0x00, 0x04]) + bytes.fromhex(scts)
+            + bytes([len(user_data)]) + user_data).hex()
+
+
+class FiledPushConversionTests(TempStore):
+    def file_row(self, payload=None, *, udh="05040b8423f0", concat=None, tpdu=None):
+        payload = notification_push() if payload is None else payload
+        return store.add_binary_sms(
+            "1", "99", ts=1_000, transport="vowifi", tp_pid=0, tp_dcs=4, concat=concat,
+            udh_hex=udh, tpdu_hex=filed_push_tpdu(payload) if tpdu is None else tpdu,
+            # What 1.9.x stored: the body cut at the first 0x00.
+            body_hex=payload[:payload.index(b"\x00")].hex() if b"\x00" in payload else payload.hex())
+
+    def restart_at_version(self, version):
+        import sqlite3
+        with sqlite3.connect(store.DB_PATH) as db:
+            db.execute(f"PRAGMA user_version={version}")
+        store.init()
+
+    def test_upgrade_turns_filed_notifications_into_mms_and_keeps_other_payloads(self):
+        self.file_row()
+        other = self.file_row(b"\x00\x01\x02\x7f", udh="")
+        part = self.file_row(concat=(7, 2, 1))
+        self.restart_at_version(4)
+        remaining = [row["id"] for row in store.list_binary_sms("1")]
+        self.assertEqual(sorted(remaining), sorted([other["id"], part["id"]]))
+        threads = store.list_threads("1")
+        self.assertEqual([t["last_kind"] for t in threads], ["mms"])
+        mms_row = store.due_mms_downloads(now=10**10)[0]
+        self.assertEqual(mms_row["content_location"], LOCATION)
+        self.assertEqual(mms_row["transport"], "vowifi")
+        self.assertEqual(store.get_message(mms_row["message_id"])["ts"], 1773493766,
+                         "dated by the notification's own SCTS")
+
+    def test_notification_already_held_is_not_duplicated(self):
+        mms.handle_wap_push("1", "99", notification_push(), transport="cellular", sent_ts=500)
+        self.file_row()
+        self.restart_at_version(4)
+        self.assertEqual(store.list_binary_sms("1"), [])
+        self.assertEqual(len(store.list_threads("1")), 1)
+        self.assertEqual(store.list_threads("1")[0]["n"], 1)
+
+    def test_rows_filed_again_by_an_older_version_are_converted_on_the_next_start(self):
+        store.init()
+        self.file_row(notification_push("http://mmsc.example.test/?id=later"))
+        store.init()                                  # already current: the reconciliation does it
+        self.assertEqual(store.list_binary_sms("1"), [])
+        self.assertEqual(len(store.due_mms_downloads(now=10**10)), 1)
+
+    def test_row_without_a_complete_tpdu_stays_filed(self):
+        self.file_row(tpdu="")
+        self.restart_at_version(4)
+        self.assertEqual(len(store.list_binary_sms("1")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

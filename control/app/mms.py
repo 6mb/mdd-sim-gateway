@@ -36,15 +36,6 @@ def io_lock(key: str) -> threading.Lock:
     with _io_locks_guard:
         return _io_locks.setdefault(str(key), threading.Lock())
 
-_STATUS_NAMES = {
-    mms_pdu.STATUS_EXPIRED: "expired", mms_pdu.STATUS_RETRIEVED: "retrieved",
-    mms_pdu.STATUS_REJECTED: "rejected", mms_pdu.STATUS_DEFERRED: "deferred",
-    mms_pdu.STATUS_UNRECOGNISED: "unrecognised",
-    mms_pdu.STATUS_INDETERMINATE: "indeterminate",
-    mms_pdu.STATUS_FORWARDED: "forwarded", mms_pdu.STATUS_UNREACHABLE: "unreachable",
-}
-
-
 def is_wap_push_udh(udh_hex: str) -> bool:
     """Whether an SMS User Data Header addresses the WAP Push port."""
     try:
@@ -62,39 +53,21 @@ def handle_wap_push(instance: str, sender: str, data: bytes, *, transport: str,
     binary SMS). Otherwise "message" is a newly stored pending MMS (None for a notification
     already held), or "delivery" the outgoing MMS a delivery report updated.
     """
-    try:
-        push = mms_pdu.parse_wap_push(bytes(data))
-    except mms_pdu.MmsDecodeError:
+    result = store.apply_mms_push(instance, sender, data, transport=transport,
+                                  sent_ts=sent_ts, now=now)
+    if not result.get("handled"):
+        if result.get("error"):
+            log.info("undecodable MMS push on line %s: %s", instance, result["error"])
         return {"handled": False}
-    if push.content_type != "application/vnd.wap.mms-message":
-        return {"handled": False}
-    try:
-        pdu = mms_pdu.decode_pdu(push.body, now=sent_ts or now)
-    except mms_pdu.MmsDecodeError as exc:
-        log.info("undecodable MMS push on line %s: %s", instance, exc)
-        return {"handled": False}
-
-    if pdu.message_type == mms_pdu.M_NOTIFICATION_IND:
-        location = pdu.content_location
-        if not location:
-            log.info("MMS notification without a content location on line %s", instance)
-            return {"handled": False}
-        peer = store.canonical_peer(instance, pdu.from_address or sender)
-        rec = store.ingest_mms_notification(
-            instance, peer=peer, transport=transport, content_location=location,
-            transaction_id=pdu.transaction_id, subject=pdu.subject, size=pdu.message_size,
-            expiry_ts=pdu.expiry, sent_ts=sent_ts, to_addrs=pdu.to)
+    if result["kind"] == "notification":
+        rec = store.get_message(result["message_id"]) if result["message_id"] else None
         if rec:
-            log.info("MMS notification on line %s from %s (%s bytes)", instance, peer,
-                     pdu.message_size)
+            log.info("MMS notification on line %s from %s (%s bytes)", instance,
+                     result["peer"], result["size"])
         return {"handled": True, "message": rec}
-
-    if pdu.message_type == mms_pdu.M_DELIVERY_IND:
-        status = _STATUS_NAMES.get(pdu.status, "indeterminate")
-        recipient = pdu.to[0] if pdu.to else ""
-        rec = store.record_mms_delivery(instance, pdu.message_id, recipient, status, pdu.date)
+    if result["kind"] == "delivery":
+        rec = store.get_message(result["message_id"]) if result["message_id"] else None
         return {"handled": True, "delivery": rec}
-
     # A read report or anything else the MMS user agent receives: nothing to show.
     return {"handled": True}
 

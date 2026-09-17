@@ -533,8 +533,9 @@ def _identity_indexes(c) -> None:
               "ON message_identities(message_id)")
 
 
+# The last step is defined further down with the MMS store it relies on, hence the lambda.
 _MIGRATIONS = (_migration_message_identity, _migration_modem_object_on_message, _migration_mms,
-               _migration_identity_scope)
+               _migration_identity_scope, lambda c: _migration_filed_mms_pushes(c))
 
 
 def _sweep_binary_messages(c) -> int:
@@ -941,6 +942,7 @@ def _reconcile(c) -> list[int]:
             c.execute("DROP TABLE message_imports")
         else:
             c.execute("ALTER TABLE message_imports RENAME TO legacy_message_imports")
+    _convert_filed_mms_pushes(c)
     orphans = [int(r[0]) for r in c.execute(
         "SELECT message_id FROM mms WHERE message_id NOT IN (SELECT id FROM messages)")]
     if orphans:
@@ -1024,6 +1026,18 @@ def ingest_message(instance: str, direction: str, peer: str, body: str, *,
     identified by its MMSC location before any text is known); `on_insert(c, record)` runs in
     the same transaction as the insert.
     """
+    with _lock, _conn() as c:
+        return _ingest(c, instance, direction, peer, body, transport=transport,
+                       sent_ts=sent_ts, received_ts=received_ts, kind=kind, status=status,
+                       identity=identity, on_insert=on_insert,
+                       legacy_fingerprint=legacy_fingerprint)
+
+
+def _ingest(c, instance: str, direction: str, peer: str, body: str, *, transport: str,
+            sent_ts: int | None = None, received_ts: int | None = None, kind: str = "sms",
+            status: str = "ok", identity: str | None = None, on_insert=None,
+            legacy_fingerprint: str | None = None) -> dict | None:
+    """ingest_message() on the caller's connection, inside the caller's lock and transaction."""
     instance = str(instance)
     now = int(time.time())
     received_ts = int(received_ts or now)
@@ -1041,39 +1055,38 @@ def ingest_message(instance: str, direction: str, peer: str, body: str, *,
     fingerprint = message_fingerprint(direction, peer, key, identity_ts, kind)
     content = message_content_hash(direction, peer, key, kind)
     scope, line_scope = _identity_scopes(instance)
-    with _lock, _conn() as c:
-        if c.execute("SELECT 1 FROM message_identities WHERE scope IN (?,?) AND fingerprint=?",
-                     (scope, line_scope, fingerprint)).fetchone():
-            return None
-        if legacy_fingerprint and _legacy_imported(c, instance, legacy_fingerprint):
-            # Imported by a version before message identities, and not in the history now:
-            # the user deleted it. Remember it under the current identity and keep it deleted.
-            c.execute(
-                "INSERT OR IGNORE INTO message_identities(scope,instance,fingerprint,"
-                "content_hash,transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?,?)",
-                (scope, instance, fingerprint, content, str(transport), identity_ts, None, now))
-            return None
-        window = _CROSS_TRANSPORT_WINDOW
-        twin = c.execute(
-            "SELECT message_id FROM message_identities WHERE scope IN (?,?) AND content_hash=? "
-            "AND transport<>? AND ts BETWEEN ? AND ? LIMIT 1",
-            (scope, line_scope, content, str(transport), identity_ts - window,
-             identity_ts + window)).fetchone() if identity_ts else None
-        if twin:
-            # Remember this copy's exact identity too, so its next re-delivery is an exact hit.
-            c.execute(
-                "INSERT OR IGNORE INTO message_identities(scope,instance,fingerprint,"
-                "content_hash,transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?,?)",
-                (scope, instance, fingerprint, content, str(transport), identity_ts,
-                 twin["message_id"], now))
-            return None
-        record = _insert_message(c, instance, direction, peer, body, status=status,
-                                 transport=transport, ts=ts, received_ts=received_ts,
-                                 sent_ts=network_ts, kind=kind, identity_ts=identity_ts,
-                                 identity=identity)
-        if on_insert is not None:
-            on_insert(c, record)
-        return record
+    if c.execute("SELECT 1 FROM message_identities WHERE scope IN (?,?) AND fingerprint=?",
+                 (scope, line_scope, fingerprint)).fetchone():
+        return None
+    if legacy_fingerprint and _legacy_imported(c, instance, legacy_fingerprint):
+        # Imported by a version before message identities, and not in the history now:
+        # the user deleted it. Remember it under the current identity and keep it deleted.
+        c.execute(
+            "INSERT OR IGNORE INTO message_identities(scope,instance,fingerprint,"
+            "content_hash,transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?,?)",
+            (scope, instance, fingerprint, content, str(transport), identity_ts, None, now))
+        return None
+    window = _CROSS_TRANSPORT_WINDOW
+    twin = c.execute(
+        "SELECT message_id FROM message_identities WHERE scope IN (?,?) AND content_hash=? "
+        "AND transport<>? AND ts BETWEEN ? AND ? LIMIT 1",
+        (scope, line_scope, content, str(transport), identity_ts - window,
+         identity_ts + window)).fetchone() if identity_ts else None
+    if twin:
+        # Remember this copy's exact identity too, so its next re-delivery is an exact hit.
+        c.execute(
+            "INSERT OR IGNORE INTO message_identities(scope,instance,fingerprint,"
+            "content_hash,transport,ts,message_id,created_ts) VALUES(?,?,?,?,?,?,?,?)",
+            (scope, instance, fingerprint, content, str(transport), identity_ts,
+             twin["message_id"], now))
+        return None
+    record = _insert_message(c, instance, direction, peer, body, status=status,
+                             transport=transport, ts=ts, received_ts=received_ts,
+                             sent_ts=network_ts, kind=kind, identity_ts=identity_ts,
+                             identity=identity)
+    if on_insert is not None:
+        on_insert(c, record)
+    return record
 
 
 ALLOWANCE_FIELDS = ("balance", "valid_until", "sms_remaining", "data_remaining",
@@ -1510,12 +1523,16 @@ def _with_mms(c, messages: list[dict]) -> list[dict]:
 def canonical_peer(instance: str, peer: str) -> str:
     """The spelling this line's history already uses for `peer`, so one correspondent keeps
     one conversation. An MMSC often writes the sender without "+" where the SMS path had it."""
+    with _lock, _conn() as c:
+        return _canonical_peer(c, instance, peer)
+
+
+def _canonical_peer(c, instance: str, peer: str) -> str:
     key = normalize_peer(peer)
     if not key:
         return str(peer or "")
-    with _lock, _conn() as c:
-        rows = c.execute("SELECT DISTINCT peer FROM messages WHERE instance=? "
-                         "ORDER BY peer", (str(instance),)).fetchall()
+    rows = c.execute("SELECT DISTINCT peer FROM messages WHERE instance=? "
+                     "ORDER BY peer", (str(instance),)).fetchall()
     for row in rows:
         if normalize_peer(row["peer"]) == key:
             return str(row["peer"])
@@ -1532,6 +1549,19 @@ def ingest_mms_notification(instance: str, *, peer: str, transport: str,
     The MMSC location identifies the MMS: the same notification reaches a SIM registered over
     VoWiFi and on its modem, and a carrier resends it when a notify-response goes missing.
     """
+    with _lock, _conn() as c:
+        mid = _ingest_mms_notification(
+            c, instance, peer=peer, transport=transport, content_location=content_location,
+            transaction_id=transaction_id, subject=subject, size=size, expiry_ts=expiry_ts,
+            sent_ts=sent_ts, to_addrs=to_addrs)
+    return get_message(mid) if mid else None
+
+
+def _ingest_mms_notification(c, instance: str, *, peer: str, transport: str,
+                             content_location: str, transaction_id: str = "",
+                             subject: str = "", size: int | None = None,
+                             expiry_ts: int | None = None, sent_ts: int | None = None,
+                             to_addrs: list[str] | None = None) -> int | None:
     now = int(time.time())
 
     def create(c, record):
@@ -1543,10 +1573,10 @@ def ingest_mms_notification(instance: str, *, peer: str, transport: str,
              str(content_location), str(subject or ""), str(peer or ""),
              json.dumps(list(to_addrs or [])), size, expiry_ts, str(transport), now, now))
 
-    rec = ingest_message(instance, "in", peer, subject or "", transport=transport,
-                         sent_ts=sent_ts, kind="mms", identity=f"mms:{content_location}",
-                         on_insert=create)
-    return get_message(rec["id"]) if rec else None
+    rec = _ingest(c, instance, "in", peer, subject or "", transport=transport,
+                  sent_ts=sent_ts, kind="mms", identity=f"mms:{content_location}",
+                  on_insert=create)
+    return int(rec["id"]) if rec else None
 
 
 def mms_for_download(message_id: int) -> dict | None:
@@ -1554,6 +1584,94 @@ def mms_for_download(message_id: int) -> dict | None:
     with _lock, _conn() as c:
         row = c.execute("SELECT * FROM mms WHERE message_id=?", (int(message_id),)).fetchone()
     return dict(row) if row else None
+
+
+_MMS_PUSH_STATUS = {0x80: "expired", 0x81: "retrieved", 0x82: "rejected", 0x83: "deferred",
+                    0x84: "unrecognised", 0x85: "indeterminate", 0x86: "forwarded",
+                    0x87: "unreachable"}
+WAP_PUSH_PORT = 2948
+
+
+def apply_mms_push(instance: str, sender: str, data: bytes, *, transport: str,
+                   sent_ts: int | None = None, now: int | None = None) -> dict:
+    """Consume one WAP Push payload addressed to the MMS user agent; see _apply_mms_push."""
+    with _lock, _conn() as c:
+        return _apply_mms_push(c, instance, sender, data, transport=transport,
+                               sent_ts=sent_ts, now=now)
+
+
+def _apply_mms_push(c, instance: str, sender: str, data: bytes, *, transport: str,
+                    sent_ts: int | None = None, now: int | None = None) -> dict:
+    """The one implementation of what a WAP Push does to the store, for live deliveries and
+    for payloads filed before MMS existed.
+
+    {"handled": False, "error"?} when the payload is not an MMS push; otherwise "kind" is
+    "notification" (with "message_id", None when already held), "delivery" (the outgoing MMS
+    it updated, if any) or "other" (a read report and the like, consumed without a trace).
+    """
+    from . import mms_pdu  # pure codec; imported here to keep store importable on its own
+    try:
+        push = mms_pdu.parse_wap_push(bytes(data))
+    except mms_pdu.MmsDecodeError:
+        return {"handled": False}
+    if push.content_type != "application/vnd.wap.mms-message":
+        return {"handled": False}
+    try:
+        pdu = mms_pdu.decode_pdu(push.body, now=sent_ts or now)
+    except mms_pdu.MmsDecodeError as exc:
+        return {"handled": False, "error": str(exc)}
+    if pdu.message_type == mms_pdu.M_NOTIFICATION_IND:
+        if not pdu.content_location:
+            return {"handled": False, "error": "notification without a content location"}
+        peer = _canonical_peer(c, instance, pdu.from_address or sender)
+        mid = _ingest_mms_notification(
+            c, instance, peer=peer, transport=transport, content_location=pdu.content_location,
+            transaction_id=pdu.transaction_id, subject=pdu.subject, size=pdu.message_size,
+            expiry_ts=pdu.expiry, sent_ts=sent_ts, to_addrs=pdu.to)
+        return {"handled": True, "kind": "notification", "message_id": mid, "peer": peer,
+                "size": pdu.message_size}
+    if pdu.message_type == mms_pdu.M_DELIVERY_IND:
+        mid = _record_mms_delivery(c, instance, pdu.message_id, pdu.to[0] if pdu.to else "",
+                                   _MMS_PUSH_STATUS.get(pdu.status, "indeterminate"), pdu.date)
+        return {"handled": True, "kind": "delivery", "message_id": mid}
+    return {"handled": True, "kind": "other", "message_id": None}
+
+
+def _convert_filed_mms_pushes(c) -> int:
+    """Turn MMS pushes filed among the non-text payloads into what they are.
+
+    Before MMS support every notification delivered over VoWiFi was filed in binary_sms, and
+    until the TPDU fix a truncated body filed one even afterwards. The complete PDU is in
+    tpdu_hex, so each such row is decoded again: a notification becomes (or matches) its MMS,
+    a delivery report is applied, and the row is removed. Rows that are not MMS pushes, that
+    lack a complete TPDU, or that are one part of a concatenated payload stay filed. Runs
+    once as a schema step and on every start, since an older version files them again.
+    """
+    from . import mms_pdu
+    converted = 0
+    rows = c.execute("SELECT id,instance,peer,ts,transport,udh_hex,tpdu_hex FROM binary_sms "
+                     "WHERE tpdu_hex<>'' AND concat_ref IS NULL ORDER BY id").fetchall()
+    for row in rows:
+        try:
+            dest, _src = mms_pdu.extract_wdp_port(bytes.fromhex(row["udh_hex"] or ""))
+        except ValueError:
+            continue
+        if dest != WAP_PUSH_PORT:
+            continue
+        payload = sms_pdu.deliver_user_data(row["tpdu_hex"])
+        if not payload:
+            continue
+        sent_ts = sms_pdu.deliver_timestamp(row["tpdu_hex"]) or int(row["ts"] or 0) or None
+        result = _apply_mms_push(c, str(row["instance"]), row["peer"], payload,
+                                 transport=row["transport"] or "vowifi", sent_ts=sent_ts)
+        if result.get("handled"):
+            c.execute("DELETE FROM binary_sms WHERE id=?", (int(row["id"]),))
+            converted += 1
+    return converted
+
+
+def _migration_filed_mms_pushes(c) -> None:
+    _convert_filed_mms_pushes(c)
 
 
 def reset_interrupted_mms(now: int | None = None) -> int:
@@ -1730,32 +1848,38 @@ def create_outgoing_mms(instance: str, peer: str, *, to_addrs: list[str], subjec
 def record_mms_delivery(instance: str, message_ref: str, recipient: str, status: str,
                         ts: int | None = None) -> dict | None:
     """Apply one delivery report to the outgoing MMS it belongs to; None if none matches."""
+    with _lock, _conn() as c:
+        mid = _record_mms_delivery(c, instance, message_ref, recipient, status, ts)
+    return get_message(mid) if mid else None
+
+
+def _record_mms_delivery(c, instance: str, message_ref: str, recipient: str, status: str,
+                         ts: int | None = None) -> int | None:
     if not message_ref:
         return None
-    with _lock, _conn() as c:
-        row = c.execute("SELECT message_id,delivery FROM mms WHERE instance=? AND direction='out' "
-                        "AND message_ref=? ORDER BY message_id DESC LIMIT 1",
-                        (str(instance), str(message_ref))).fetchone()
-        if not row:
-            return None
-        try:
-            delivery = json.loads(row["delivery"] or "{}")
-        except ValueError:
-            delivery = {}
-        delivery[str(recipient or "")] = {"status": str(status), "ts": int(ts or time.time())}
-        delivered = status == "retrieved"
-        c.execute("UPDATE mms SET delivery=?, state=CASE WHEN ? THEN 'delivered' ELSE state END, "
-                  "updated_ts=? WHERE message_id=?",
-                  (json.dumps(delivery), 1 if delivered else 0, int(time.time()),
-                   int(row["message_id"])))
-        if delivered:
-            c.execute("UPDATE messages SET status='delivered', error=NULL WHERE id=?",
-                      (int(row["message_id"]),))
-        elif status in ("rejected", "unreachable", "expired"):
-            c.execute("UPDATE messages SET status='failed', error=? WHERE id=? "
-                      "AND status<>'delivered'",
-                      (f"MMS {status}", int(row["message_id"])))
-    return get_message(int(row["message_id"]))
+    row = c.execute("SELECT message_id,delivery FROM mms WHERE instance=? AND direction='out' "
+                    "AND message_ref=? ORDER BY message_id DESC LIMIT 1",
+                    (str(instance), str(message_ref))).fetchone()
+    if not row:
+        return None
+    try:
+        delivery = json.loads(row["delivery"] or "{}")
+    except ValueError:
+        delivery = {}
+    delivery[str(recipient or "")] = {"status": str(status), "ts": int(ts or time.time())}
+    delivered = status == "retrieved"
+    c.execute("UPDATE mms SET delivery=?, state=CASE WHEN ? THEN 'delivered' ELSE state END, "
+              "updated_ts=? WHERE message_id=?",
+              (json.dumps(delivery), 1 if delivered else 0, int(time.time()),
+               int(row["message_id"])))
+    if delivered:
+        c.execute("UPDATE messages SET status='delivered', error=NULL WHERE id=?",
+                  (int(row["message_id"]),))
+    elif status in ("rejected", "unreachable", "expired"):
+        c.execute("UPDATE messages SET status='failed', error=? WHERE id=? "
+                  "AND status<>'delivered'",
+                  (f"MMS {status}", int(row["message_id"])))
+    return int(row["message_id"])
 
 
 def list_threads(instance: str) -> list:
