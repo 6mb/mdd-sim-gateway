@@ -6045,19 +6045,19 @@ async def api_cellular_call_hangup(iid: str):
 
 @app.get("/api/instances/{iid}/softphone")
 def api_softphone(iid: str, request: Request):
-    """Provisioning for the browser softphone (JsSIP over WSS)."""
+    """Provisioning for the browser softphone (JsSIP over the same-origin WebSocket relay)."""
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
     sip = inst.get("sip", {}) or {}
     wr = sip.get("webrtc", {}) or {}
-    ports = inst.get("ports", {})
     host = (request.headers.get("host") or "").split(":")[0] or request.url.hostname
     return {
         "enabled": bool(wr.get("enable", True)),
         "username": wr.get("username", "webrtc"),
         "password": wr.get("password", ""),
-        "ws_port": ports.get("webrtc", 8089),
+        # Same origin as the WebUI, so it works unchanged behind a reverse proxy.
+        "ws_path": softphone_ws.path(iid),
         "host": host,
         "realm": cfg.ims_realm(inst["mcc"], inst["mnc"]),
     }

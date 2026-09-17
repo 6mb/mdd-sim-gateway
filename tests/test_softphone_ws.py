@@ -2,7 +2,10 @@
 import asyncio
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+from jinja2 import Environment, FileSystemLoader
 
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -121,6 +124,35 @@ class SoftphoneRelayTests(unittest.TestCase):
         self.assertEqual(softphone_ws.path("a/b"), "/api/instances/a%2Fb/softphone/ws")
         self.assertTrue(softphone_ws.offers_sip("chat, SIP"))
         self.assertFalse(softphone_ws.offers_sip(None))
+
+
+class EngineListenerTests(unittest.TestCase):
+    """What the relay connects to: plain WS on the bridge address, never on the tunnel."""
+
+    @staticmethod
+    def http_conf(**ctx):
+        root = Path(__file__).resolve().parents[1]
+        env = Environment(loader=FileSystemLoader(str(root / "engine" / "templates")),
+                          trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=True)
+        return env.get_template("http.conf.j2").render(
+            **{"webrtc_enable": True, "local_addr": "172.17.0.3",
+               "webrtc_ws_port": softphone_ws.ENGINE_WS_PORT, **ctx})
+
+    def test_listens_in_plain_on_the_bridge_address_at_the_relay_port(self):
+        conf = self.http_conf()
+        self.assertIn("bindaddr=172.17.0.3\n", conf)
+        self.assertIn(f"bindport={softphone_ws.ENGINE_WS_PORT}\n", conf)
+        self.assertNotIn("tls", conf)
+        self.assertNotIn("0.0.0.0", conf)
+
+    def test_stays_on_loopback_without_a_softphone_or_bridge_address(self):
+        for ctx in ({"webrtc_enable": False}, {"local_addr": ""}):
+            with self.subTest(**ctx):
+                self.assertIn("bindaddr=127.0.0.1\n", self.http_conf(**ctx))
+
+    def test_render_uses_the_relay_port(self):
+        render = (Path(__file__).resolve().parents[1] / "engine" / "render.py").read_text()
+        self.assertIn(f'"webrtc_ws_port": {softphone_ws.ENGINE_WS_PORT},', render)
 
 
 if __name__ == "__main__":

@@ -2385,7 +2385,7 @@ class swu():
 
         Without this, every reply the container sources from its docker-bridge address (SWU_SOURCE,
         e.g. 172.17.0.3) — DNS lookups AND, crucially, the SYN-ACK/return traffic of any published
-        port (the WebRTC WSS softphone on 8089, the manager AMI) — matches a /1 route
+        port or bridge peer (the softphone WS relay, the manager AMI) — matches a /1 route
         and is sent into the ePDG, which drops it. Symptom: a LAN client's TCP to the mapped WSS port
         never completes its handshake (SYN in on eth0, SYN-ACK out on ipsec0, lost), so the softphone
         can't connect; and container DNS times out (40s).

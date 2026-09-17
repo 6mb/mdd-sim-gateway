@@ -1156,7 +1156,6 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
                 "enable": bool(webrtc.get("enable", True)),
                 "username": webrtc.get("username", "webrtc"),
                 "password": webrtc_password,
-                "port": 8089,
             },
         },
         # Defence in depth for instance.json files rendered from old or imported configs.
