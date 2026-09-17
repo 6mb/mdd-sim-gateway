@@ -32,7 +32,8 @@ from fastapi.staticfiles import StaticFiles
 from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
-               sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd)
+               sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd,
+               softphone_ws)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -6060,6 +6061,29 @@ def api_softphone(iid: str, request: Request):
         "host": host,
         "realm": cfg.ims_realm(inst["mcc"], inst["mnc"]),
     }
+
+
+@app.websocket("/api/instances/{iid}/softphone/ws")
+async def ws_softphone(ws: WebSocket, iid: str):
+    """The browser softphone's SIP-over-WebSocket, relayed to the line's engine.
+
+    WebSocket handshakes bypass the HTTP middleware, so the session check is repeated here.
+    The session cookie is SameSite=Strict, so a cross-site page cannot open this socket as the
+    admin. Rejections close before accepting (the browser sees a failed handshake)."""
+    if not auth.session(ws.cookies.get(auth.SESSION_COOKIE)):
+        await ws.close(code=4401)
+        return
+    inst = cfg.get_instance(iid)
+    webrtc = ((inst or {}).get("sip") or {}).get("webrtc") or {}
+    if not inst or not webrtc.get("enable", True) or \
+            not softphone_ws.offers_sip(ws.headers.get("sec-websocket-protocol")):
+        await ws.close(code=1008)
+        return
+    runtime = await asyncio.to_thread(engine.container_runtime, str(iid))
+    if not runtime["running"] or not runtime["ip"]:
+        await ws.close(code=1013)
+        return
+    await softphone_ws.relay(ws, softphone_ws.engine_url(runtime["ip"]))
 
 
 # ----------------------------- engine event hook -----------------------------
