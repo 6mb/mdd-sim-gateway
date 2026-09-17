@@ -780,9 +780,9 @@ handoff_release_images() {
 prepare_release_images() {
   [ "${MDD_BUILD_IMAGES:-0}" != 1 ] || {
     info "building images from source (MDD_BUILD_IMAGES=1)"
-    return
+    return 0
   }
-  [ -f "$ENGINE_HANDOFF_MANIFEST" ] || return
+  [ -f "$ENGINE_HANDOFF_MANIFEST" ] || return 0
   have python3 || die "python3 is required to import Release image assets"
   MDD_REUSE_WEBUI=1
   MDD_PRUNE_BUILD_CACHE=1
@@ -790,13 +790,13 @@ prepare_release_images() {
   if engine_matches_checkout; then
     if [ "$MODE" = local ]; then
       info "installed Engine already matches the official release — reusing images"
-      return
+      return 0
     fi
     if control_image_matches_checkout; then
       MDD_REUSE_CONTROL_IMAGE=1
       export MDD_REUSE_CONTROL_IMAGE
       info "installed Engine and Control already match the official release — reusing images"
-      return
+      return 0
     fi
   fi
   version=$(tr -d '\n' < "$REPO_DIR/VERSION")
