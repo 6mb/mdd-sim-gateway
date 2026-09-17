@@ -229,9 +229,25 @@ ensure_cellular_tools() {
 # releases only a port ModemManager itself classifies as a Quectel module's *secondary* AT
 # port; the primary AT port and QMI/MBIM stay with ModemManager, and a module with a single
 # AT port has no secondary one to match.
+MMS_AT_PORT_RULE="${MDD_UDEV_RULES_DIR:-/etc/udev/rules.d}/78-mdd-mms-at-port.rules"
+
+# Re-evaluate tty udev properties and let ModemManager re-probe with them. Both are needed: a
+# changed rules file only reaches the udev database on the next event for the device, and
+# ModemManager reads ID_MM_PORT_IGNORE when it probes a port.
+reapply_modem_port_rules() {
+  if have udevadm; then
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger --action=change --subsystem-match=tty 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || true
+  fi
+  if have systemctl && systemctl is-active ModemManager.service >/dev/null 2>&1; then
+    systemctl restart ModemManager.service
+  fi
+}
+
 ensure_mms_at_port_rule() {
-  [ -d /etc/udev/rules.d ] || return 0
-  rule_file=/etc/udev/rules.d/78-mdd-mms-at-port.rules
+  [ -d "$(dirname "$MMS_AT_PORT_RULE")" ] || return 0
+  rule_file=$MMS_AT_PORT_RULE
   temporary=$(mktemp /tmp/mdd-udev.XXXXXX)
   cat >"$temporary" <<'RULE'
 # MDD Sim Gateway: let the gateway own a Quectel module's secondary AT port for MMS uploads.
@@ -240,16 +256,19 @@ ACTION!="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="2c7c", ENV{ID_MM_PORT_TYPE
 RULE
   if [ ! -f "$rule_file" ] || ! cmp -s "$temporary" "$rule_file"; then
     install -m 0644 "$temporary" "$rule_file"
-    if have udevadm; then
-      udevadm control --reload-rules 2>/dev/null || true
-      udevadm trigger --action=change --subsystem-match=tty 2>/dev/null || true
-    fi
-    if have systemctl && systemctl is-active ModemManager.service >/dev/null 2>&1; then
-      info "releasing the modem's secondary AT port for MMS (ModemManager restarts)…"
-      systemctl restart ModemManager.service
-    fi
+    info "releasing the modem's secondary AT port for MMS (ModemManager restarts)…"
+    reapply_modem_port_rules
   fi
   rm -f "$temporary"
+}
+
+# Uninstall: give the port back. Removing the file alone would leave ID_MM_PORT_IGNORE in the
+# udev database, and the port ignored, until the next reboot.
+remove_mms_at_port_rule() {
+  [ -f "$MMS_AT_PORT_RULE" ] || return 0
+  rm -f "$MMS_AT_PORT_RULE"
+  info "returning the modem's secondary AT port to ModemManager (ModemManager restarts)…"
+  reapply_modem_port_rules
 }
 
 # The module SIM bridge sends APDUs through ModemManager's guarded AT command API.  Upstream
@@ -1432,10 +1451,7 @@ cmd_uninstall() {
   info "removing native control plane (if any)…"
   remove_control_local
   remove_orchestrator
-  if [ -f /etc/udev/rules.d/78-mdd-mms-at-port.rules ]; then
-    rm -f /etc/udev/rules.d/78-mdd-mms-at-port.rules
-    if have udevadm; then udevadm control --reload-rules 2>/dev/null || true; fi
-  fi
+  remove_mms_at_port_rule
   if [ -f /etc/systemd/system/ModemManager.service.d/90-mdd-command-interface.conf ]; then
     rm -f /etc/systemd/system/ModemManager.service.d/90-mdd-command-interface.conf
     systemctl daemon-reload >/dev/null 2>&1 || true
