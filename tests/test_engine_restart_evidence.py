@@ -160,11 +160,24 @@ class PcscfApplyModeTests(unittest.TestCase):
         start = self.source.index("def swu_apply_pcscf")
         self.func = self.source[start:self.source.index("\ndef ", start + 10)]
 
-    def test_default_mode_is_unchanged_behaviour(self):
-        """The correlation between the reload and the exit is strong but not proof — one
-        teardown reloaded and survived. The default must not change ahead of the evidence."""
-        self.assertIn('os.environ.get("SWU_PCSCF_APPLY_MODE") or "reload"', self.func)
-        self.assertIn("module reload res_pjsip.so", self.func)
+    def test_default_mode_is_restart(self):
+        """The reload path is a confirmed use-after-free (same core-dump stack on two
+        carriers); the default must not be the path that crashes."""
+        self.assertIn('os.environ.get("SWU_PCSCF_APPLY_MODE") or "restart"', self.func)
+        # `reload` stays available for comparison.
+        self.assertIn('_asterisk_cli("module reload res_pjsip.so")', self.func)
+
+    def test_nothing_is_applied_before_asterisk_is_running(self):
+        """On first bring-up the tunnel beats the entrypoint to pcscf.applied, so every fresh
+        start looked like a change. Applying then would cold-restart an Asterisk that has only
+        just started; with none running, rendering the config is all there is to do."""
+        guard = self.func.index("if not _asterisk_running():")
+        self.assertLess(guard, self.func.index('swu_notify("pcscf_apply_start"'))
+        self.assertLess(guard, self.func.index('_asterisk_cli("core restart now")'))
+        early = self.func[guard:self.func.index('swu_notify("pcscf_apply_start"')]
+        self.assertIn("render", early)
+        self.assertIn('"pcscf.applied"), "w"', early)
+        self.assertIn("return", early)
 
     def test_restart_mode_is_available_and_validated(self):
         self.assertIn("core restart now", self.func)
@@ -183,12 +196,12 @@ class PcscfApplyModeTests(unittest.TestCase):
         line proves nothing unless the others stay on the old path as a control group."""
         source = (REPO / "control" / "app" / "engine.py").read_text()
         start = source.index('"SWU_PCSCF_APPLY_MODE"')
-        clause = source[start:start + 260]
+        clause = source[start:start + 320]
         self.assertIn('inst.get("pcscf_apply_mode")', clause)
         # Per-line value must win over the global one.
         self.assertLess(clause.index('inst.get("pcscf_apply_mode")'),
                         clause.index('settings.get("engine")'))
-        self.assertIn('or "reload"', clause)
+        self.assertIn('or "restart"', clause)
 
     def test_peer_initiated_teardown_is_reported_with_its_duration(self):
         """Which side ended the tunnel, and after how long, is the whole story behind the

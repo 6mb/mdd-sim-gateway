@@ -271,6 +271,15 @@ def _pcscf_debug_window(seconds):
         _asterisk_cli("core set debug 0")
 
 
+def _asterisk_running():
+    """True when an Asterisk accepts remote-console commands in this container."""
+    try:
+        return subprocess.call(["asterisk", "-rx", "core show uptime"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    except Exception:
+        return False
+
+
 def swu_apply_pcscf(addr):
     """Re-render pjsip.conf for a (possibly new) P-CSCF and make Asterisk pick it up, but only
     when the P-CSCF actually changed. The ePDG can hand out a DIFFERENT P-CSCF on every
@@ -281,15 +290,15 @@ def swu_apply_pcscf(addr):
 
     How the new value is applied is selectable via SWU_PCSCF_APPLY_MODE:
 
-      reload  (default) - `module reload res_pjsip.so`, the long-standing behaviour.
-      restart           - `core restart now`, an Asterisk-internal cold restart.
+      restart (default) - `core restart now`, an Asterisk-internal cold restart.
+      reload            - `module reload res_pjsip.so`, the previous behaviour.
 
-    The reason for the switch: across the observed teardowns, Asterisk went away shortly after
-    the reload in almost every case, taking the container with it and turning a ~12s tunnel
-    blip into a ~40s outage while the container rebuilt from scratch. The correlation is strong
-    but not proof — one teardown reloaded and survived — so the default stays on the current
-    behaviour until the instrumentation above says what is actually happening. `restart` is
-    here so that verdict can be acted on per line without another image build.
+    `reload` crashes Asterisk. Core dumps from two lines on two carriers show the same stack:
+    after the reload, the first REGISTER challenged with 401 hands a freed auth credential to
+    pjsip_auth_clt_set_credentials(), and pj_strdup's memcpy faults on it. It does not fire on
+    every reload, but when it does Docker rebuilds the whole container (~40s+). A cold restart
+    builds every object fresh, so the stale credential never exists; measured at ~21-24s from
+    the ePDG teardown to re-registration, with the container and tunnel kept.
     """
     if not addr:
         return
@@ -304,11 +313,23 @@ def swu_apply_pcscf(addr):
     render = os.environ.get("SWU_RENDER", "/usr/local/bin/render.py")
     if not os.path.exists(render):
         return
-    mode = (os.environ.get("SWU_PCSCF_APPLY_MODE") or "reload").strip().lower()
+    mode = (os.environ.get("SWU_PCSCF_APPLY_MODE") or "restart").strip().lower()
     if mode not in ("reload", "restart"):
-        swu_log("unknown SWU_PCSCF_APPLY_MODE %r; falling back to reload" % mode)
-        mode = "reload"
+        swu_log("unknown SWU_PCSCF_APPLY_MODE %r; falling back to restart" % mode)
+        mode = "restart"
     try:
+        # On a container's first bring-up the tunnel connects before the entrypoint has written
+        # pcscf.applied, so every fresh start looked like a P-CSCF change. With no Asterisk yet
+        # there is nothing to apply to: the config written here is what it will start with.
+        # Under `restart` the old behaviour could otherwise cold-restart an Asterisk that had
+        # only just come up.
+        if not _asterisk_running():
+            subprocess.call(["python3", render],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(os.path.join(SWU_RUNDIR, "pcscf.applied"), "w") as f:
+                f.write(addr)
+            swu_log("P-CSCF %s rendered; Asterisk not running yet, nothing to apply" % addr)
+            return
         swu_log("P-CSCF changed (%s -> %s); re-rendering pjsip + applying via %s"
                 % (last, addr, mode))
         swu_notify("pcscf_apply_start", mode)
@@ -325,14 +346,11 @@ def swu_apply_pcscf(addr):
             # has just been torn down anyway.
             _asterisk_cli("core restart now")
         else:
-            # Reload just the parts affected by the P-CSCF change. res_pjsip reload re-reads
-            # pjsip.conf (identify/resolve/registration/endpoint) without dropping the tunnel.
             _asterisk_cli("module reload res_pjsip.so")
             _asterisk_cli("pjsip send register volte_ims")
         swu_notify("pcscf_apply_done", mode)
     except Exception as e:
         swu_log("pcscf apply failed: %r" % e)
-
 
 '''
 
