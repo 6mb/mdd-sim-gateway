@@ -1872,12 +1872,43 @@ def record_mms_delivery(instance: str, message_ref: str, recipient: str, status:
     return get_message(mid) if mid else None
 
 
+# X-Mms-Status values after which that recipient's outcome will not change.
+_MMS_FINAL_DELIVERY = {"retrieved", "rejected", "unreachable", "expired", "unrecognised"}
+
+
+def _mms_delivery_summary(recipients: list[str], delivery: dict) -> tuple[str, str | None]:
+    """(message status, error) for an outgoing MMS from its per-recipient reports.
+
+    One delivery report speaks for one recipient only. The message is "delivered" when every
+    recipient retrieved it, "failed" once every recipient has a final outcome and at least one
+    of them is not a retrieval (the error names who was not reached), and stays "sent" while
+    any recipient's outcome is still open -- so a later rejection is never hidden by an
+    earlier retrieval, whichever order the reports arrive in.
+    """
+    targets = [normalize_peer(r) for r in recipients if str(r or "").strip()]
+    by_peer = {normalize_peer(k): v.get("status") for k, v in delivery.items()}
+    if not targets:
+        targets = list(by_peer) or [""]
+    outcomes = {t: by_peer.get(t) for t in targets}
+    if all(status == "retrieved" for status in outcomes.values()):
+        return "delivered", None
+    if all(status in _MMS_FINAL_DELIVERY for status in outcomes.values()):
+        reached = sum(1 for status in outcomes.values() if status == "retrieved")
+        missed = [f"{r}: {delivery_status}" for r, delivery_status in
+                  ((r, by_peer.get(normalize_peer(r))) for r in recipients)
+                  if delivery_status != "retrieved"]
+        prefix = (f"Delivered to {reached} of {len(outcomes)} recipients; "
+                  if len(outcomes) > 1 else "")
+        return "failed", f"{prefix}MMS not delivered ({', '.join(missed)})"
+    return "sent", None
+
+
 def _record_mms_delivery(c, instance: str, message_ref: str, recipient: str, status: str,
                          ts: int | None = None) -> int | None:
     if not message_ref:
         return None
-    row = c.execute("SELECT message_id,delivery FROM mms WHERE instance=? AND direction='out' "
-                    "AND message_ref=? ORDER BY message_id DESC LIMIT 1",
+    row = c.execute("SELECT message_id,delivery,to_addrs FROM mms WHERE instance=? "
+                    "AND direction='out' AND message_ref=? ORDER BY message_id DESC LIMIT 1",
                     (str(instance), str(message_ref))).fetchone()
     if not row:
         return None
@@ -1885,19 +1916,24 @@ def _record_mms_delivery(c, instance: str, message_ref: str, recipient: str, sta
         delivery = json.loads(row["delivery"] or "{}")
     except ValueError:
         delivery = {}
-    delivery[str(recipient or "")] = {"status": str(status), "ts": int(ts or time.time())}
-    delivered = status == "retrieved"
-    c.execute("UPDATE mms SET delivery=?, state=CASE WHEN ? THEN 'delivered' ELSE state END, "
-              "updated_ts=? WHERE message_id=?",
-              (json.dumps(delivery), 1 if delivered else 0, int(time.time()),
-               int(row["message_id"])))
-    if delivered:
-        c.execute("UPDATE messages SET status='delivered', error=NULL WHERE id=?",
-                  (int(row["message_id"]),))
-    elif status in ("rejected", "unreachable", "expired"):
-        c.execute("UPDATE messages SET status='failed', error=? WHERE id=? "
-                  "AND status<>'delivered'",
-                  (f"MMS {status}", int(row["message_id"])))
+    try:
+        recipients = [str(r) for r in json.loads(row["to_addrs"] or "[]")]
+    except ValueError:
+        recipients = []
+    key = str(recipient or "")
+    if not key and len(recipients) == 1:
+        key = recipients[0]              # a report naming no recipient is about the only one
+    for known in recipients:
+        if normalize_peer(known) == normalize_peer(key):
+            key = known                  # keep one entry per recipient, however it is spelled
+            break
+    delivery[key] = {"status": str(status), "ts": int(ts or time.time())}
+    message_status, error = _mms_delivery_summary(recipients, delivery)
+    state = {"delivered": "delivered", "failed": "failed"}.get(message_status, "sent")
+    c.execute("UPDATE mms SET delivery=?, state=?, updated_ts=? WHERE message_id=?",
+              (json.dumps(delivery), state, int(time.time()), int(row["message_id"])))
+    c.execute("UPDATE messages SET status=?, error=? WHERE id=?",
+              (message_status, error, int(row["message_id"])))
     return int(row["message_id"])
 
 

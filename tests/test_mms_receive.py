@@ -79,6 +79,53 @@ class HandleWapPushTests(TempStore):
         self.assertEqual(result["delivery"]["mms"]["state"], "delivered")
         self.assertIn("+447700900123", result["delivery"]["mms"]["delivery"])
 
+    def outgoing(self, recipients):
+        rec = store.create_outgoing_mms("1", ", ".join(recipients), to_addrs=recipients,
+                                        subject="", body="hi", transaction_id="TX")
+        store.set_mms_state(rec["id"], "sent", message_ref="MSG-9", message_status="sent")
+        return rec
+
+    @staticmethod
+    def report(recipient, status):
+        body = (bytes([0x8C, 0x86]) + b"\x8D\x92" + b"\x8B" + m.write_text_string("MSG-9")
+                + (b"\x97" + m.write_text_string(f"{recipient}/TYPE=PLMN") if recipient else b"")
+                + b"\x85" + m.write_long_integer(1_800_000_000) + bytes([0x95, status]))
+        return bytes([0x03, 0x06, 0x01, 0xBE]) + body
+
+    def deliver(self, recipient, status):
+        return mms.handle_wap_push("1", "99", self.report(recipient, status),
+                                   transport="vowifi")["delivery"]
+
+    def test_group_mms_is_delivered_only_when_every_recipient_retrieved_it(self):
+        self.outgoing(["+447700900123", "+447700900124"])
+        first = self.deliver("447700900123", m.STATUS_RETRIEVED)
+        self.assertEqual((first["status"], first["mms"]["state"]), ("sent", "sent"))
+        both = self.deliver("+447700900124", m.STATUS_RETRIEVED)
+        self.assertEqual((both["status"], both["mms"]["state"]), ("delivered", "delivered"))
+        self.assertEqual(sorted(both["mms"]["delivery"]), ["+447700900123", "+447700900124"],
+                         "one entry per recipient, whatever spelling the report used")
+
+    def test_a_rejection_after_a_retrieval_is_not_hidden(self):
+        self.outgoing(["+447700900123", "+447700900124"])
+        self.deliver("+447700900123", m.STATUS_RETRIEVED)
+        rec = self.deliver("+447700900124", m.STATUS_REJECTED)
+        self.assertEqual(rec["status"], "failed")
+        self.assertIn("Delivered to 1 of 2", rec["error"])
+        self.assertIn("+447700900124: rejected", rec["error"])
+
+    def test_retrieval_after_a_rejection_does_not_mark_the_group_delivered(self):
+        self.outgoing(["+447700900123", "+447700900124"])
+        self.deliver("+447700900124", m.STATUS_REJECTED)
+        rec = self.deliver("+447700900123", m.STATUS_RETRIEVED)
+        self.assertEqual(rec["status"], "failed")
+
+    def test_non_final_report_keeps_the_message_sent(self):
+        self.outgoing(["+447700900123"])
+        rec = self.deliver("+447700900123", m.STATUS_DEFERRED)
+        self.assertEqual((rec["status"], rec["error"]), ("sent", None))
+        rec = self.deliver("", m.STATUS_RETRIEVED)
+        self.assertEqual(rec["status"], "delivered", "a report without To is the sole recipient's")
+
     def test_wap_push_udh_detection(self):
         self.assertTrue(mms.is_wap_push_udh("05040b8423f0"))
         self.assertFalse(mms.is_wap_push_udh("0003a70201"))
