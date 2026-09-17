@@ -101,6 +101,54 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     }))])
   }
 
+  // Files that can travel in an MMS; the same set the attach button's picker offers.
+  const isSendableFile = (file) => /^(image|audio|video)\//.test(file.type)
+    || ['text/vcard', 'text/x-vcard'].includes(file.type)
+
+  // Clipboard images (screenshots, "copy image") all arrive named image.png or with no name
+  // at all; give each a distinct, dated name so several pasted pictures stay tellable apart.
+  const nameClipboardFile = (file, index) => {
+    if (file.name && file.name !== 'image.png') return file
+    const extension = (file.type.split('/')[1] || 'bin').split('+')[0]
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '')
+    return new File([file], `pasted-${stamp}${index ? `-${index + 1}` : ''}.${extension}`,
+      { type: file.type, lastModified: file.lastModified })
+  }
+
+  // Paste or drop files anywhere in the composer. Plain text still pastes as text: only the
+  // file items of the clipboard are taken, and the default is prevented only when the
+  // clipboard holds nothing but files.
+  const takeFiles = (files, event) => {
+    const usable = files.filter(isSendableFile)
+    if (!usable.length) return false
+    if (sending) { event.preventDefault(); return true }
+    if (mmsDisabled) {
+      event.preventDefault()
+      toast(tr('MMS is not configured for this line'))
+      return true
+    }
+    addAttachments(usable.map(nameClipboardFile))
+    return true
+  }
+
+  const onComposerPaste = (event) => {
+    const data = event.clipboardData
+    if (!data) return
+    const files = Array.from(data.items || [])
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter(Boolean)
+    const hasText = Array.from(data.types || []).includes('text/plain')
+    if (takeFiles(files, event) && !hasText) event.preventDefault()
+  }
+
+  const onComposerDrop = (event) => {
+    const files = Array.from(event.dataTransfer?.files || [])
+    if (!files.length) return
+    event.preventDefault()
+    takeFiles(files, event)
+  }
+
   const removeAttachment = (index) => {
     setAttachments((prev) => {
       const next = prev.slice()
@@ -416,7 +464,9 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
             )
           })}
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+        <div onPaste={onComposerPaste} onDrop={onComposerDrop}
+          onDragOver={(e) => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) e.preventDefault() }}
+          style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderTop: '1px solid var(--border)', flexShrink: 0 }}>
           {attachments.length > 0 && (
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {attachments.map((a, i) => (
@@ -442,7 +492,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
               style={{ display: 'none' }}
               onChange={(e) => { addAttachments(e.target.files); e.target.value = '' }} />
             <button className="btn btn-ghost" type="button" disabled={sending || mmsDisabled}
-              title={mmsDisabled ? tr('MMS is not configured for this line') : ''}
+              title={mmsDisabled ? tr('MMS is not configured for this line') : tr('Attach files, or paste or drop them here')}
               aria-label={tr('Attach files')}
               onClick={() => fileInputRef.current?.click()} style={{ padding: '6px 10px' }}>📎</button>
             {attachments.length === 0 ? (

@@ -28,7 +28,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 - The Messages page shows MMS: pictures inline, audio and video players, other attachments
   as downloads, and a Download/Retry button for an MMS that is not downloaded yet. Attaching
-  files to a message sends it as MMS; pictures are scaled down in the browser to fit the line's
+  files to a message sends it as MMS -- through the attach button, or by pasting a screenshot or
+  copied picture into the message box, or by dropping files onto it; pictures are scaled down in the browser to fit the line's
   size limit. An "MMS settings" dialog shows the detected carrier settings and lets each line
   override them or turn auto-download off.
 - MMS can be sent: text, pictures, audio, video or contact cards to one or several

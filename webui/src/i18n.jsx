@@ -554,6 +554,7 @@ const zh = {
   'Sending MMS…': '正在发送彩信…', 'Sent as MMS': '将以彩信发送',
   'MMS is not configured for this line': '此线路尚未配置彩信',
   'Subject (optional)': '主题（可选）', 'Remove attachment': '删除附件', 'Attach files': '添加附件',
+  'Attach files, or paste or drop them here': '添加附件，也可直接粘贴或拖入图片',
   'The attachments are too large for an MMS ({size} KB; limit {limit} KB)': '附件对于彩信来说太大了（{size} KB；上限 {limit} KB）',
   'Waiting to download': '等待下载', Expired: '已过期',
   'Auto-download': '自动下载', Transport: '传输方式',
