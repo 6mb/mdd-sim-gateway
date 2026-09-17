@@ -384,6 +384,49 @@ class DownloadTests(unittest.TestCase):
                          (m.M_NOTIFYRESP_IND, "T1", m.STATUS_RETRIEVED))
         self.assertEqual(store.due_mms_downloads(now=10**10), [])
 
+    def test_storage_failure_while_saving_parts_leaves_the_mms_retryable(self):
+        import errno
+        client = FakeClient([t.HttpResponse(200, {}, retrieve_conf())])
+        full = OSError(errno.ENOSPC, "No space left on device")
+        with patch.object(store, "save_mms_content", side_effect=full):
+            result = mms.download(self.inst, self.rec["id"], client=client, now=2_000)
+        self.assertEqual((result["ok"], result["final"]), (False, False))
+        row = store.mms_for_download(self.rec["id"])
+        self.assertEqual((row["state"], row["next_attempt_ts"]), ("failed", 2_060))
+        self.assertIn("No space left", row["last_error"])
+        self.assertEqual([r["message_id"] for r in store.due_mms_downloads(now=2_060)],
+                         [self.rec["id"]], "the queue picks it up again")
+
+        retry = FakeClient([t.HttpResponse(200, {}, retrieve_conf()),
+                            t.HttpResponse(204, {}, b"")])
+        self.assertTrue(mms.download(self.inst, self.rec["id"], client=retry, now=2_060)["ok"])
+        self.assertEqual(store.mms_for_download(self.rec["id"])["state"], "retrieved")
+
+    def test_worker_requeues_a_download_whose_failure_could_not_be_recorded(self):
+        import asyncio
+        from control.app import main
+
+        def crash(inst, mid):
+            store.set_mms_state(mid, "downloading")
+            raise RuntimeError("database is locked")
+
+        row = store.mms_for_download(self.rec["id"])
+        inst = {"id": "1", "mms": {"mmsc": SETTINGS["mmsc"], "apn": "mms"}}
+        with patch.object(main.cfg, "get_instance", return_value=inst), \
+                patch.object(main.mms, "download", side_effect=crash):
+            asyncio.run(main._process_mms_download(row))
+        row = store.mms_for_download(self.rec["id"])
+        self.assertEqual(row["state"], "failed")
+        self.assertIsNotNone(row["next_attempt_ts"])
+
+    def test_a_download_stuck_in_progress_can_be_retried_by_hand_once_stale(self):
+        store.set_mms_state(self.rec["id"], "downloading")
+        updated = store.mms_for_download(self.rec["id"])["updated_ts"]
+        self.assertFalse(store.schedule_mms_download("1", self.rec["id"], now=updated + 5),
+                         "a download in progress is not restarted underneath itself")
+        self.assertTrue(store.schedule_mms_download(
+            "1", self.rec["id"], now=updated + store.STUCK_DOWNLOAD_SECONDS))
+
     def test_transient_failure_is_rescheduled_and_permanent_one_is_final(self):
         client = FakeClient([t.MmsTransportError("timed out")])
         result = mms.download(self.inst, self.rec["id"], client=client, now=2_000)

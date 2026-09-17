@@ -182,7 +182,13 @@ def download(inst: dict, message_id: int, *, client=None, now: int | None = None
                     log.info("MMS %s retrieved but the MMSC acknowledgement failed: %s",
                              message_id, exc)
         return {"ok": True}
-    except (mms_transport.MmsTransportError, mms_pdu.MmsDecodeError) as exc:
+    except Exception as exc:  # noqa: BLE001 -- every failure must leave "downloading"
+        # Transport and decoding errors are expected; anything else -- a full disk while the
+        # parts are written, a database error -- is treated as transient. What matters is
+        # that the MMS leaves "downloading": neither the queue nor a manual retry picks up
+        # an MMS in that state, so an escape here would strand it until a restart.
+        if not isinstance(exc, (mms_transport.MmsTransportError, mms_pdu.MmsDecodeError)):
+            log.warning("MMS %s download failed unexpectedly: %r", message_id, exc)
         attempts = int(row.get("attempts") or 0) + 1
         retryable = getattr(exc, "retryable", True) and not expired
         if retryable and attempts <= len(RETRY_DELAYS):

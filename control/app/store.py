@@ -1692,6 +1692,11 @@ def reset_interrupted_mms(now: int | None = None) -> int:
     return count + len(ids)
 
 
+# A download holds its MMS in "downloading" for one MMSC exchange -- minutes at most. One
+# still there after this long was abandoned by a failure that could not even be recorded.
+STUCK_DOWNLOAD_SECONDS = 600
+
+
 def schedule_mms_download(instance: str, message_id: int, now: int | None = None) -> bool:
     """Queue an inbound MMS for retrieval now (a manual download or retry)."""
     now = int(now or time.time())
@@ -1701,8 +1706,22 @@ def schedule_mms_download(instance: str, message_id: int, now: int | None = None
         cur = c.execute("UPDATE mms SET state='notified', next_attempt_ts=?, updated_ts=?, "
                         "attempts=MAX(attempts,1) "
                         "WHERE message_id=? AND instance=? AND direction='in' "
-                        "AND state IN ('notified','failed','expired')",
-                        (now, now, int(message_id), str(instance)))
+                        "AND (state IN ('notified','failed','expired') "
+                        "OR (state='downloading' AND updated_ts<=?))",
+                        (now, now, int(message_id), str(instance),
+                         now - STUCK_DOWNLOAD_SECONDS))
+    return cur.rowcount == 1
+
+
+def release_stuck_mms_download(message_id: int, now: int | None = None,
+                               delay: int = 60) -> bool:
+    """Return an MMS left in "downloading" to the retry schedule."""
+    now = int(now or time.time())
+    with _lock, _conn() as c:
+        cur = c.execute("UPDATE mms SET state='failed', next_attempt_ts=?, updated_ts=?, "
+                        "last_error=CASE WHEN last_error='' THEN 'Download interrupted' "
+                        "ELSE last_error END WHERE message_id=? AND state='downloading'",
+                        (now + int(delay), now, int(message_id)))
     return cur.rowcount == 1
 
 

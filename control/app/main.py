@@ -1662,6 +1662,12 @@ async def _process_mms_download(row: dict) -> None:
                                _mms_push_text(rec))
     except Exception as exc:  # noqa
         log.warning("MMS download %d failed unexpectedly: %r", mid, exc)
+        # Last resort when mms.download() could not record the failure itself (the database
+        # was unavailable too): put the MMS back on the retry schedule.
+        try:
+            await asyncio.to_thread(store.release_stuck_mms_download, mid)
+        except Exception as inner:  # noqa
+            log.warning("MMS %d could not be requeued: %r", mid, inner)
 
 
 async def _publish_binary_sms(result: dict) -> None:
