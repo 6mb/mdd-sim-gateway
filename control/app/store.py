@@ -43,6 +43,20 @@ def _conn():
     return c
 
 
+def schema_version() -> int | None:
+    """The history database's schema version before init() touches it; None if it does not
+    exist yet (a new installation, or one whose history lives only in the former file)."""
+    path = DB_PATH if os.path.exists(DB_PATH) else (
+        PREVIOUS_DB_PATH if os.path.isfile(PREVIOUS_DB_PATH) else None)
+    if path is None:
+        return None
+    try:
+        with sqlite3.connect(path) as c:
+            return int(c.execute("PRAGMA user_version").fetchone()[0])
+    except sqlite3.Error:
+        return None
+
+
 def init():
     with _lock:
         # Preserve call/SMS history when upgrading an installation that used the former

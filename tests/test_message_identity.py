@@ -321,5 +321,33 @@ class MigrationSafetyTests(unittest.TestCase):
             self.assertEqual(len(store.list_threads("1")), 1)
 
 
+class UpgradeStoragePolicyTests(unittest.TestCase):
+    def run_with(self, version, settings, env=None):
+        from control.app import main
+        saved = []
+        with patch.object(main.cfg, "get_settings", return_value=settings), \
+                patch.object(main.cfg, "update_settings", side_effect=saved.append), \
+                patch.dict("os.environ", env or {}, clear=False):
+            changed = main._keep_modem_storage_on_upgrade(version)
+        return changed, saved
+
+    def test_only_an_upgraded_installation_without_a_choice_gets_keep(self):
+        self.assertEqual(self.run_with(0, {}), (True, [{"cellular_sms_storage": "keep"}]))
+        self.assertEqual(self.run_with(None, {}), (False, []), "new installation")
+        self.assertEqual(self.run_with(4, {}), (False, []), "already on this version")
+        self.assertEqual(self.run_with(0, {"cellular_sms_storage": "delete"}), (False, []))
+        self.assertEqual(self.run_with(0, {}, {"MDD_CELLULAR_SMS_STORAGE": "delete"}),
+                         (False, []))
+
+    def test_schema_version_is_read_without_creating_the_database(self):
+        with TempStore() as ctx:
+            self.assertIsNone(store.schema_version())
+            self.assertFalse(ctx.db.exists())
+            sqlite3.connect(ctx.db).close()
+            self.assertEqual(store.schema_version(), 0)
+            store.init()
+            self.assertEqual(store.schema_version(), len(store._MIGRATIONS))
+
+
 if __name__ == "__main__":
     unittest.main()

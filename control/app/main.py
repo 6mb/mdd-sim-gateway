@@ -1545,6 +1545,30 @@ def _join_sms_parts(bodies: list[str], seqs: list[int], total: int) -> str:
     return "".join(out)
 
 
+def _keep_modem_storage_on_upgrade(previous_schema: int | None) -> bool:
+    """Leave modem SMS storage alone on an installation upgraded from before the policy existed.
+
+    Deleting imported objects is the right default, but switching it on silently during an
+    upgrade would empty every modem the first time the scanner runs -- including texts the
+    operator deliberately kept on a SIM. An upgraded installation therefore gets "keep" written
+    into its settings, visibly, and the release notes explain how to opt in to "delete". A new
+    installation (no history database yet) and an explicit choice, in settings or in
+    MDD_CELLULAR_SMS_STORAGE, are left as they are. Runs before the schema migration, so a
+    crash in between cannot lose the distinction.
+    """
+    if previous_schema is None or previous_schema >= 1:
+        return False
+    if os.environ.get(cellular_sms.STORAGE_POLICY_ENV, "").strip():
+        return False
+    if "cellular_sms_storage" in (cfg.get_settings() or {}):
+        return False
+    cfg.update_settings({"cellular_sms_storage": "keep"})
+    log.warning("upgraded installation: modem SMS storage policy set to 'keep'; set "
+                "settings.cellular_sms_storage to 'delete' to empty modem storage as "
+                "messages are imported")
+    return True
+
+
 def _line_subscriber(iid: str) -> str:
     """The SIM a line's messages belong to, for message identity: ICCID, else IMSI."""
     inst = cfg.get_instance(iid) or {}
@@ -2508,6 +2532,7 @@ async def update_automation_poller():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _keep_modem_storage_on_upgrade(store.schema_version())
     store.set_subscriber_resolver(_line_subscriber)
     store.init()
     # An upgrade from an older/self-use build may inherit more than five running containers.
