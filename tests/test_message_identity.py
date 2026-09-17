@@ -412,6 +412,34 @@ class MigrationBackupTests(unittest.TestCase):
                 self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 0)
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 2)
 
+    def test_a_failed_migration_reuses_one_backup_across_service_restarts(self):
+        with TempStore() as ctx:
+            with sqlite3.connect(ctx.db) as db:
+                db.executescript(self.OLD_SCHEMA)
+            with patch.object(store, "_migrate", side_effect=RuntimeError("migration failed")), \
+                    patch.object(store.time, "strftime",
+                                 side_effect=["20260101T000000Z", "20260101T000001Z"]):
+                with self.assertRaisesRegex(RuntimeError, "migration failed"):
+                    store.init()
+                with self.assertRaisesRegex(RuntimeError, "migration failed"):
+                    store.init()
+            backups = list(Path(store.backup_dir()).glob("*.sqlite"))
+            self.assertEqual(len(backups), 1,
+                             "a service restart must not copy the database again")
+            self.assertIn("20260101T000000Z", backups[0].name)
+
+    def test_a_damaged_existing_backup_is_never_silently_replaced(self):
+        with TempStore() as ctx:
+            with sqlite3.connect(ctx.db) as db:
+                db.executescript(self.OLD_SCHEMA)
+            backup = Path(store._backup_before_migration())
+            backup.write_bytes(b"not a sqlite database")
+            with self.assertRaisesRegex(store.MigrationBackupError,
+                                        "existing migration backup.*refusing to overwrite"):
+                store.init()
+            self.assertEqual(list(Path(store.backup_dir()).glob("*.sqlite")), [backup])
+            self.assertEqual(backup.read_bytes(), b"not a sqlite database")
+
 
 if __name__ == "__main__":
     unittest.main()

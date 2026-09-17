@@ -7,6 +7,7 @@ layer by the caller (main.py).
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -73,8 +74,9 @@ def _backup_before_migration() -> str | None:
     deduplication that is wrong for some installation cannot be undone from inside the
     database. The copy is taken with SQLite's online backup API, checked (integrity, schema
     version, message count) and only then moved into place; any failure raises, and init()
-    stops before changing anything. Nothing is copied for a database already current or not
-    yet created, and existing copies are never removed automatically.
+    stops before changing anything. A verified copy for the same version transition is reused
+    after a failed migration, so a service restart loop cannot fill the disk with backups.
+    Nothing is copied for a current or new database, and copies are never removed automatically.
     """
     if not os.path.exists(DB_PATH):
         return None
@@ -84,9 +86,23 @@ def _backup_before_migration() -> str | None:
                                      "AND name='messages'").fetchone() is not None
     if version >= len(_MIGRATIONS) or not has_history:
         return None
+    prefix = f"mdd-sim-gateway.v{version}-before-v{len(_MIGRATIONS)}."
+    existing = sorted(glob.glob(os.path.join(backup_dir(), f"{prefix}*.sqlite")))
+    if existing:
+        # A failed migration makes the service manager restart the control plane. Reuse the
+        # first verified pre-migration copy instead of writing the whole database every few
+        # seconds until the disk fills. Never replace an existing but damaged backup: that is
+        # evidence requiring operator attention, not permission to discard the recovery point.
+        candidate = existing[0]
+        try:
+            _verify_backup(candidate, version)
+        except Exception as exc:
+            raise MigrationBackupError(
+                f"existing migration backup {candidate} could not be verified; refusing to "
+                f"overwrite it or migrate the database: {exc}") from exc
+        return candidate
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    target = os.path.join(backup_dir(), f"mdd-sim-gateway.v{version}-before-v"
-                                        f"{len(_MIGRATIONS)}.{stamp}.sqlite")
+    target = os.path.join(backup_dir(), f"{prefix}{stamp}.sqlite")
     partial = target + ".partial"
     try:
         os.makedirs(backup_dir(), mode=0o700, exist_ok=True)
@@ -112,13 +128,14 @@ def _backup_before_migration() -> str | None:
     return target
 
 
-def _verify_backup(path: str, version: int, messages: int) -> None:
+def _verify_backup(path: str, version: int, messages: int | None = None) -> None:
     check = sqlite3.connect(path)
     try:
         if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise OSError("the backup failed its integrity check")
+        copied_messages = check.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         if int(check.execute("PRAGMA user_version").fetchone()[0]) != version or \
-                check.execute("SELECT COUNT(*) FROM messages").fetchone()[0] != messages:
+                (messages is not None and copied_messages != messages):
             raise OSError("the backup does not match the database")
     finally:
         check.close()
