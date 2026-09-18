@@ -232,3 +232,67 @@ class RestartBaselineTests(unittest.IsolatedAsyncioTestCase):
         # A later poll after the bounce must not swallow it by moving the baseline.
         hub.seed_restart_baseline("7", {"running": True, "restart_count": 1})
         self.assertEqual(hub._restart_counts["7"], 0)
+
+
+class TunnelRebuiltApplyTests(unittest.TestCase):
+    """A full attach gives the tunnel a new inner address even when the ePDG hands back the same
+    P-CSCF. Keyed on the P-CSCF alone that case did nothing, and line 7 stayed "Registered" but
+    unreachable for 17.5 minutes on 09-18 04:09. These run the real function with stubbed I/O."""
+
+    def _load(self, applied, asterisk_up=True):
+        import ast
+        source = (REPO / "engine" / "swu_ike.py").read_text()
+        tree = ast.parse(source)
+        wanted = {"_asterisk_cli", "_asterisk_running", "_pcscf_debug_window", "swu_apply_pcscf"}
+        code = "\n\n".join(ast.get_source_segment(source, node) for node in tree.body
+                           if isinstance(node, ast.FunctionDef) and node.name in wanted)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        run = Path(temp.name)
+        render = run / "render.py"
+        render.write_text("")
+        if applied is not None:
+            (run / "pcscf.applied").write_text(applied)
+        cli = []
+
+        def call(cmd, **_kwargs):
+            if cmd[:2] == ["asterisk", "-rx"]:
+                if cmd[2] == "core show uptime":
+                    return 0 if asterisk_up else 1
+                cli.append(cmd[2])
+            return 0
+
+        import os as _os
+        env = dict(_os.environ, SWU_RENDER=str(render), SWU_PCSCF_APPLY_MODE="restart",
+                   SWU_PCSCF_DEBUG_SECONDS="0")
+        ns = {"os": SimpleNamespace(path=_os.path, environ=env),
+              "subprocess": SimpleNamespace(call=call, DEVNULL=None),
+              "threading": None, "time": None, "SWU_RUNDIR": str(run),
+              "swu_log": lambda _msg: None, "swu_notify": lambda *_a: None}
+        exec(compile(code, "swu_ike_subset", "exec"), ns)
+        return ns["swu_apply_pcscf"], cli, run
+
+    def test_rebuilt_tunnel_with_same_pcscf_restarts_asterisk(self):
+        apply, cli, _ = self._load(applied="2001:db8::1")
+        apply("2001:db8::1", tunnel_rebuilt=True)
+        self.assertIn("core restart now", cli)
+
+    def test_same_pcscf_inside_a_live_tunnel_is_still_a_no_op(self):
+        apply, cli, _ = self._load(applied="2001:db8::1")
+        apply("2001:db8::1")
+        self.assertEqual(cli, [])
+
+    def test_first_bring_up_only_renders(self):
+        apply, cli, run = self._load(applied=None, asterisk_up=False)
+        apply("2001:db8::1", tunnel_rebuilt=True)
+        self.assertEqual(cli, [])
+        self.assertEqual((run / "pcscf.applied").read_text(), "2001:db8::1")
+
+    def test_only_the_full_attach_call_site_marks_the_tunnel_rebuilt(self):
+        source = (REPO / "engine" / "swu_ike.py").read_text()
+        self.assertEqual(source.count("swu_apply_pcscf(pcscf, tunnel_rebuilt=True)"), 1)
+        # P-CSCF restoration happens inside a live tunnel; it must stay keyed on the value.
+        self.assertIn("swu_apply_pcscf(new_pcscf)\n", source.replace("\r\n", "\n"))
+        connected = source[source.index("def state_connected"):]
+        connected = connected[:connected.index("\n    def ", 10)]
+        self.assertIn("tunnel_rebuilt=True", connected)

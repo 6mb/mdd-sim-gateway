@@ -280,7 +280,7 @@ def _asterisk_running():
         return False
 
 
-def swu_apply_pcscf(addr):
+def swu_apply_pcscf(addr, tunnel_rebuilt=False):
     """Re-render pjsip.conf for a (possibly new) P-CSCF and make Asterisk pick it up, but only
     when the P-CSCF actually changed. The ePDG can hand out a DIFFERENT P-CSCF on every
     (re)connect / reauth; pjsip's type=identify/type=resolve are pinned to the P-CSCF IP, so a
@@ -299,6 +299,13 @@ def swu_apply_pcscf(addr):
     every reload, but when it does Docker rebuilds the whole container (~40s+). A cold restart
     builds every object fresh, so the stale credential never exists; measured at ~21-24s from
     the ePDG teardown to re-registration, with the container and tunnel kept.
+
+    tunnel_rebuilt: the caller has just completed a full attach. The new tunnel has a new
+    inner address even when the ePDG hands back the same P-CSCF, and Asterisk's registration
+    still points at the old one. Keyed on the P-CSCF alone, that case did nothing: on
+    09-18 04:09 line 7 reconnected to the same P-CSCF and stayed "Registered" but unreachable
+    for 17.5 minutes, until the dead transport failed on its own. A rebuilt tunnel is applied
+    unconditionally; a P-CSCF change inside a live tunnel (restoration) still keys on the value.
     """
     if not addr:
         return
@@ -308,7 +315,7 @@ def swu_apply_pcscf(addr):
             last = f.read().strip()
     except Exception:
         last = None
-    if last == addr:
+    if last == addr and not tunnel_rebuilt:
         return
     render = os.environ.get("SWU_RENDER", "/usr/local/bin/render.py")
     if not os.path.exists(render):
@@ -330,8 +337,12 @@ def swu_apply_pcscf(addr):
                 f.write(addr)
             swu_log("P-CSCF %s rendered; Asterisk not running yet, nothing to apply" % addr)
             return
-        swu_log("P-CSCF changed (%s -> %s); re-rendering pjsip + applying via %s"
-                % (last, addr, mode))
+        if last == addr:
+            swu_log("tunnel re-established with the same P-CSCF %s; the inner address changed, "
+                    "re-applying via %s so Asterisk re-registers from it" % (addr, mode))
+        else:
+            swu_log("P-CSCF changed (%s -> %s); re-rendering pjsip + applying via %s"
+                    % (last, addr, mode))
         swu_notify("pcscf_apply_start", mode)
         _pcscf_debug_window(int(os.environ.get("SWU_PCSCF_DEBUG_SECONDS", "90") or 0))
         subprocess.call(["python3", render], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -5244,10 +5255,10 @@ class swu():
         swu_notify("tunnel_up")
         if pcscf:
             swu_notify("pcscf", pcscf)
-            # Keep pjsip's P-CSCF (identify/resolve/register) in sync when the ePDG assigns a
-            # different P-CSCF on reconnect/reauth. No-op on first bring-up (entrypoint seeds
-            # pcscf.applied after its own initial render, before Asterisk starts).
-            swu_apply_pcscf(pcscf)
+            # A full attach means a new inner address, so Asterisk must re-register from it
+            # whether or not the P-CSCF changed. On first bring-up Asterisk is not running yet
+            # and this only renders the config it will start with (see swu_apply_pcscf).
+            swu_apply_pcscf(pcscf, tunnel_rebuilt=True)
 
         # Headless control channel replaces interactive stdin. Open a FIFO O_RDWR so select()
         # never sees EOF (a plain stdin/EOF would busy-spin). The manager/entrypoint can echo
