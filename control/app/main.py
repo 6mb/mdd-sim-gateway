@@ -406,7 +406,7 @@ def _ensure_card_draft(info: dict) -> dict | None:
             "idr_mode": "apn",
             "cp_mode": "auto",
             "sip": {**cfg.carrier_sip_defaults(mcc, mnc, iccid),
-                    "listen_addr": "0.0.0.0", "transport": "udp", "external": [],
+                    "transport": "udp", "external": [],
                     "webrtc": {"enable": True}},
             "debug": {"asterisk": False, "charon": False},
         }, unique_name=True)
@@ -3592,8 +3592,7 @@ async def api_provision(body: dict):
         raise HTTPException(400, "could not read IMSI (is the PIN correct?)")
     sip = cfg.merge_carrier_sip_defaults(
         c.mcc, c.mnc, c.iccid or c.imsi,
-        body.get("sip") or {"listen_addr": "0.0.0.0", "transport": "udp",
-                            "external": []})
+        body.get("sip") or {"transport": "udp", "external": []})
     sip.setdefault("webrtc", {"enable": bool(body.get("webrtc", True))})
     # SMSC: manual override wins; otherwise read from the SIM (EF_SMSP, authoritative).
     # If the SIM can't provide it we ask the user to type it (no carrier presets).
