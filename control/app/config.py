@@ -220,9 +220,11 @@ def internal_event_token() -> str:
         save(data)
         return token
 
-# Port block allocation per instance index (avoids collisions across SIMs). The browser
-# softphone has no host port: it reaches the engine through the control surface relay
-# (softphone_ws), so a "webrtc" key in a block saved by an older version is ignored.
+# Port block allocation per instance index (avoids collisions across SIMs).
+# A block saved by an older version may also carry "webrtc". Despite the name, that was only
+# the browser softphone's WSS *signalling* port (8089, 8099, ...). Signalling now reaches the
+# engine through the control surface relay (softphone_ws), so the key is ignored. WebRTC
+# *media* (ICE, DTLS-SRTP) is unaffected and still uses the rtp_start..rtp_span range below.
 PORT_BASE = {"sip_udp": 5060, "sip_tls": 5061, "ami": 5038,
              "rtp_start": 10000, "rtp_end": 11000}
 PORT_STRIDE = {"sip_udp": 10, "sip_tls": 10, "ami": 10,
