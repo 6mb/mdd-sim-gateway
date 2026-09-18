@@ -12,3 +12,5 @@ requests==2.34.2
 PySocks==1.7.1
 pyserial==3.5
 phonenumberslite==9.0.39
+Pillow==12.3.0
+pillow-heif==1.7.0
