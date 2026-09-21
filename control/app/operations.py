@@ -339,8 +339,11 @@ def create_local_backup(system_name: str = "gateway") -> dict:
         shutil.rmtree(stale, ignore_errors=True)
     try:
         referenced = []
+        known_missing = set()
         if snapshot:
-            store.snapshot_history(str(staging / database_name), str(staging / "mms"))
+            snapshot_result = store.snapshot_history(
+                str(staging / database_name), str(staging / "mms"))
+            known_missing = set(snapshot_result.get("missing_parts", []))
             referenced = _referenced_parts(staging / database_name)
         with tarfile.open(target, "w:gz") as archive:
             for path in sorted(root.rglob("*")):
@@ -364,9 +367,10 @@ def create_local_backup(system_name: str = "gateway") -> dict:
             mms_name = str(mms_root.relative_to(root)) if mms_root.is_relative_to(root) \
                 else "mms"
             absent = [p for p in referenced if f"{mms_name}/{p}" not in names]
-            if absent:
-                raise RuntimeError(f"the backup is missing {len(absent)} MMS attachment(s), "
-                                   f"e.g. {absent[0]}")
+            copy_failures = [part for part in absent if part not in known_missing]
+            if copy_failures:
+                raise RuntimeError(f"the backup is missing {len(copy_failures)} MMS "
+                                   f"attachment(s), e.g. {copy_failures[0]}")
     except BaseException:
         target.unlink(missing_ok=True)
         raise
@@ -374,19 +378,19 @@ def create_local_backup(system_name: str = "gateway") -> dict:
         shutil.rmtree(staging, ignore_errors=True)
     os.chmod(target, 0o600)
     return {"ok": True, "name": target.name, "created_at": int(time.time()),
-            "size": target.stat().st_size, "location": "gateway-local"}
+            "size": target.stat().st_size, "location": "gateway-local",
+            "missing_attachments": len(known_missing)}
 
 
 def _referenced_parts(database: Path) -> list[str]:
-    """"<message id>/<file>" of every attachment the history snapshot refers to and had."""
+    """"<message id>/<file>" of every attachment the history snapshot refers to."""
     import sqlite3
     with sqlite3.connect(database) as check:
         if not check.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                              "AND name='mms_parts'").fetchone():
             return []
         rows = check.execute("SELECT message_id, path FROM mms_parts WHERE path!=''").fetchall()
-    staged = database.parent / "mms"
-    return [f"{int(m)}/{p}" for m, p in rows if (staged / str(int(m)) / p).is_file()]
+    return [f"{int(m)}/{p}" for m, p in rows]
 
 
 def list_local_backups() -> list[dict]:

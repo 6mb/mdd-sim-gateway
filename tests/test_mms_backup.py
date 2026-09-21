@@ -95,16 +95,32 @@ class LocalBackupTests(unittest.TestCase):
             self.assertNotIn(f"mms/{mid}/unreferenced.jpg", names)
             self.assertEqual(read_back(restored, mid), [b"hi", b"\xff\xd8\xff-picture"])
 
-    def test_an_archive_without_its_attachments_is_not_kept(self):
+    def test_a_live_attachment_omitted_from_the_snapshot_makes_the_backup_fail(self):
         with tempfile.TemporaryDirectory() as temp:
             live = Path(temp)
             with _Store(live), patch.object(config, "DATA_DIR", str(live)):
                 add_mms()
-                with patch.object(operations, "_referenced_parts",
-                                  return_value=["999/00-lost.jpg"]):
+                snapshot_history = store.snapshot_history
+
+                def omit_copied_part(database_target, mms_target, **kwargs):
+                    result = snapshot_history(database_target, mms_target, **kwargs)
+                    next(path for path in Path(mms_target).rglob("*") if path.is_file()).unlink()
+                    return result
+
+                with patch.object(store, "snapshot_history", side_effect=omit_copied_part):
                     with self.assertRaisesRegex(RuntimeError, "missing 1 MMS attachment"):
                         operations.create_local_backup("Test Gateway")
                 self.assertEqual(operations.list_local_backups(), [])
+
+    def test_an_attachment_already_missing_is_reported_without_blocking_the_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            live = Path(temp)
+            with _Store(live), patch.object(config, "DATA_DIR", str(live)):
+                mid = add_mms()
+                next((Path(store.mms_dir()) / str(mid)).iterdir()).unlink()
+                result = operations.create_local_backup("Test Gateway")
+                self.assertEqual(result["missing_attachments"], 1)
+                self.assertTrue((Path(store.backup_dir()) / result["name"]).is_file())
 
 
 if __name__ == "__main__":

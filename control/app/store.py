@@ -149,20 +149,22 @@ def snapshot_mms_files(database: str, source_root: str, target_root: str) -> dic
 
     Each copy is checked against the size its row records. A file the database refers to
     but that is already gone is counted in "missing" rather than failing the snapshot, so an
-    existing inconsistency cannot block a backup. Returns {"parts", "missing"}."""
+    existing inconsistency cannot block a backup. ``missing_parts`` identifies those known
+    pre-existing gaps so the archive verifier can distinguish them from a copy defect."""
     with sqlite3.connect(database) as check:
         has_parts = check.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                                   "AND name='mms_parts'").fetchone() is not None
         rows = check.execute("SELECT message_id, path, size FROM mms_parts WHERE path!=''"
                              ).fetchall() if has_parts else []
     os.makedirs(target_root, mode=0o700, exist_ok=True)
-    copied = missing = 0
+    copied = 0
+    missing_parts = []
     for message_id, name, size in rows:
         if os.path.basename(name) != name or name in ("", ".", ".."):
             continue
         source = os.path.join(source_root, str(int(message_id)), name)
         if not os.path.isfile(source):
-            missing += 1
+            missing_parts.append(f"{int(message_id)}/{name}")
             continue
         directory = os.path.join(target_root, str(int(message_id)))
         os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -172,7 +174,8 @@ def snapshot_mms_files(database: str, source_root: str, target_root: str) -> dic
             raise OSError(f"the backup copy of MMS part {message_id}/{name} does not match "
                           "its record")
         copied += 1
-    return {"parts": copied, "missing": missing}
+    return {"parts": copied, "missing": len(missing_parts),
+            "missing_parts": missing_parts}
 
 
 def snapshot_history(database_target: str, mms_target: str, *, attempts: int = 3) -> dict:
@@ -182,7 +185,7 @@ def snapshot_history(database_target: str, mms_target: str, *, attempts: int = 3
     A save that commits between the two steps removes files the database copy still points
     at; when that leaves files missing, both are taken again. Returns snapshot_mms_files()'s
     counts."""
-    result = {"parts": 0, "missing": 0}
+    result = {"parts": 0, "missing": 0, "missing_parts": []}
     for attempt in range(max(1, attempts)):
         for leftover in (database_target,):
             if os.path.exists(leftover):
