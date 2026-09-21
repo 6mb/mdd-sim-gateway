@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_transport, softphone_ws)
+               mms_media, mms_transport, softphone_ws)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
