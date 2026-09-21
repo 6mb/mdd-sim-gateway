@@ -2,6 +2,17 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **An upgraded gateway no longer serves the old WebUI from the browser's cache.** The page that
+  names which build to load is now marked `no-cache`, so every client revalidates it, and the
+  files it names -- whose names contain a hash of their contents -- are marked immutable. Before
+  this the answers carried an ETag but no caching rule at all, which let a client decide for
+  itself how long to reuse them; a web view, with no reload button, could keep showing the
+  previous build indefinitely.
+
 ## [1.11.0] - 2026-09-22
 
 ### Fixed
