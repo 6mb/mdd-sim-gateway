@@ -404,15 +404,18 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
         <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 10, fontSize: 12 }}
           onClick={() => setShowMmsSettings(true)}>{tr('MMS settings')}</button>
         {threads.map((t) => (
-          <div key={t.peer} onClick={() => setPeer(t.peer)} className="hover-row"
-            style={{ padding: 10, borderRadius: 10, cursor: 'pointer', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8,
-              background: peer === t.peer ? 'var(--active)' : 'transparent' }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600, fontSize: 14 }} className="mono">{t.peer}</div>
-              <div style={{ fontSize: 12, color: 'var(--text-mute)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          // The row is a button, not a div that happens to listen for clicks: a touch device
+          // delivers a click to an element that is actually interactive, and a keyboard can
+          // reach it. The delete button sits beside it rather than inside it, because a button
+          // within a button is not valid and behaves differently in every browser.
+          <div key={t.peer} className="hover-row u-thread-row"
+            style={{ background: peer === t.peer ? 'var(--active)' : 'transparent' }}>
+            <button type="button" className="u-thread-open" onClick={() => setPeer(t.peer)}>
+              <span style={{ fontWeight: 600, fontSize: 14 }} className="mono">{t.peer}</span>
+              <span style={{ fontSize: 12, color: 'var(--text-mute)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {t.last_kind === 'mms' ? `[${tr('MMS')}]${t.last_body ? ' ' + t.last_body : ''}` : t.last_body}
-              </div>
-            </div>
+              </span>
+            </button>
             <button className="row-del" title="Delete conversation" aria-label={`Delete conversation with ${t.peer}`}
               onClick={(e) => deleteThread(t.peer, e)}>🗑</button>
           </div>

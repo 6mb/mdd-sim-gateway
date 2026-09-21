@@ -383,6 +383,10 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
  .u-proxy-row,.u-proxy-row:has(.u-proxy-auth) { grid-template-columns:minmax(160px,210px) minmax(0,1fr) auto; }.u-proxy-secondary { grid-column:2; }.u-proxy-auth { grid-column:2; }.u-proxy-actions { grid-column:3; grid-row:1 / span 2; align-self:center; flex-direction:column; }
  .u-settings-grid { grid-template-columns:1fr; }
 }
+.u-thread-row { display:flex; align-items:center; gap:8px; margin-bottom:4px; padding:10px; border-radius:10px; }
+.u-thread-open { flex:1; min-width:0; display:flex; flex-direction:column; align-items:flex-start; gap:2px; border:0; padding:0; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+.u-thread-open>span { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
 /* Messages is two panes side by side on a desktop. The widths used to be an inline style, which
    no media query can reach -- so on a phone the conversation list and the conversation shared a
    440px screen and neither was usable. Below 760px they become one screen at a time: the list,
