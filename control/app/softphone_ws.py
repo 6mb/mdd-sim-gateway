@@ -51,7 +51,14 @@ async def relay(browser: WebSocket, url: str) -> None:
         await browser.close(code=1011)
         return
 
-    await browser.accept(subprotocol=SUBPROTOCOL)
+    try:
+        await browser.accept(subprotocol=SUBPROTOCOL)
+    except Exception:
+        # The engine connection is already open at this point. Do not leave an Asterisk
+        # WebSocket (and eventually a registration) behind when the browser handshake goes
+        # away before Starlette can accept it.
+        await engine.close()
+        raise
 
     async def browser_to_engine():
         while True:

@@ -4,6 +4,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- The softphone WebSocket relay now closes an engine connection if the browser handshake fails,
+  and reports temporary unavailability (`1013`) when Docker cannot inspect the engine. Its
+  `websockets` dependency keeps Python 3.10 support while requiring the proxy-disable option used
+  by the relay.
+
 ### Changed
 
 - The browser softphone now connects to the same address as the WebUI, at
