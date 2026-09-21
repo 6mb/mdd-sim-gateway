@@ -25,6 +25,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from contextlib import asynccontextmanager
 
+import docker
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -6469,7 +6470,12 @@ async def ws_softphone(ws: WebSocket, iid: str):
             not softphone_ws.offers_sip(ws.headers.get("sec-websocket-protocol")):
         await ws.close(code=1008)
         return
-    runtime = await asyncio.to_thread(engine.container_runtime, str(iid))
+    try:
+        runtime = await asyncio.to_thread(engine.container_runtime, str(iid))
+    except docker.errors.DockerException as exc:
+        log.warning("softphone relay: cannot inspect engine %s: %s", iid, exc)
+        await ws.close(code=1013)
+        return
     if not runtime["running"] or not runtime["ip"]:
         await ws.close(code=1013)
         return

@@ -122,6 +122,27 @@ class SoftphoneRelayTests(unittest.IsolatedAsyncioTestCase):
         await self.server.wait_closed()
         self.assertEqual(await self.refused(), 1011)
 
+    async def test_browser_accept_failure_closes_the_engine_connection(self):
+        self.patched()
+
+        class _AcceptFailure(_Browser):
+            async def accept(self, subprotocol=None):
+                raise RuntimeError("browser disconnected during accept")
+
+        with self.assertRaisesRegex(RuntimeError, "browser disconnected"):
+            await asyncio.wait_for(main.ws_softphone(_AcceptFailure(), "sim1"), 5)
+        await asyncio.wait_for(self.engine_closed.wait(), 5)
+
+    async def test_docker_failure_is_temporarily_unavailable(self):
+        self.patched()
+        browser = _Browser()
+        with patch.object(
+                main.engine, "container_runtime",
+                side_effect=main.docker.errors.DockerException("daemon unavailable")):
+            await asyncio.wait_for(main.ws_softphone(browser, "sim1"), 5)
+        self.assertIsNone(browser.accepted)
+        self.assertEqual(browser.close_code, 1013)
+
     def test_path_is_per_line_and_escaped(self):
         self.assertEqual(softphone_ws.path("sim1"), "/api/instances/sim1/softphone/ws")
         self.assertEqual(softphone_ws.path("a/b"), "/api/instances/a%2Fb/softphone/ws")
