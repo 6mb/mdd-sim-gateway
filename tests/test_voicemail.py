@@ -85,12 +85,23 @@ class DialplanTests(unittest.TestCase):
         self.assertNotIn("context=mdd_voicemail",
                          (ROOT / "engine" / "templates" / "pjsip.conf.j2").read_text())
 
-    def test_the_hangup_handler_keeps_its_load_bearing_return(self):
-        # Without Return() the 'h' routine falls through to the catch-all and fires a phantom
-        # second call_in for every call.
+    def test_plain_h_handlers_end_with_hangup_not_return(self):
+        # Both are ordinary special extensions, not Gosub routines. They still need an explicit
+        # terminal application: otherwise [volte_ims]'s catch-all can match h at the next priority
+        # and fire a phantom call_in, but Return() emits "Return without Gosub" on every call.
         out = render(vm_enabled=True)
-        handler = out.split("exten => h,1,")[1]
-        self.assertIn("same => n,Return()", handler.split("\n\n")[0])
+        for context_name in ("volte_ims", "from-local"):
+            context = out.split(f"[{context_name}]", 1)[1].split("\n[", 1)[0]
+            handler = context.split("exten => h,1,", 1)[1].split("\n\n", 1)[0]
+            self.assertNotIn("Return()", handler, context_name)
+            self.assertTrue(handler.rstrip().endswith("same => n,Hangup()"), context_name)
+
+    def test_gosub_routines_keep_their_returns(self):
+        out = render(vm_enabled=True)
+        outbound_headers = out.split("[ims-outbound-headers]", 1)[1].split("\n[", 1)[0]
+        ussd_report = out.split("[ussd-report]", 1)[1].split("\n[", 1)[0]
+        self.assertIn("same => n,Return()", outbound_headers)
+        self.assertIn("same => n(done),Return()", ussd_report)
 
     def test_the_prompt_is_shipped_rather_than_assumed(self):
         # The base image's Asterisk sound packages are a side effect of its build; nothing
