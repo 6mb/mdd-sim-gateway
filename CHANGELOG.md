@@ -2,10 +2,26 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
-## [Unreleased]
+## [1.11.0] - 2026-09-22
 
 ### Fixed
 
+- VoWiFi registration no longer becomes stale after a tunnel or P-CSCF change. P-CSCF updates
+  restart Asterisk cleanly instead of reloading `res_pjsip` through an unsafe credential lifetime;
+  the carrier-granted expiry is taken from this line's own Contact even when the response also
+  lists a stale binding; and a slow or missing SIM authentication answer gets ten seconds and a
+  bounded retry instead of leaving the line falsely shown as registered for up to an hour.
+- MMS composition now generates valid SMIL with unique references, measures the fully packaged
+  request against the carrier limit, and stores received parts under safe internal names. File and
+  database changes switch atomically, so a failed save cannot leave rows describing overwritten
+  content. Conversations open at the newest message and keep following it until the reader scrolls
+  up.
+- Migration and full local backups now include the MMS files referenced by their history snapshot.
+  A file that was already absent is reported without making all future backups impossible, while a
+  file that existed but was omitted from the archive still fails the backup.
+- Plain Asterisk hangup handlers no longer emit `Return without Gosub` on every call. Call records
+  now say whether the carrier, local endpoint, or gateway ended the SIP dialog first, and support
+  bundles include redacted Asterisk WARNING/ERROR lines needed to distinguish media and SDP faults.
 - The softphone WebSocket relay now closes an engine connection if the browser handshake fails,
   and reports temporary unavailability (`1013`) when Docker cannot inspect the engine. Its
   `websockets` dependency keeps Python 3.10 support while requiring the proxy-disable option used
@@ -13,6 +29,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- VoWiFi settings and line details now name ESP rekeying as the data-channel rekey and IKE
+  rekeying as the control-channel rekey. A zero data-channel interval distinguishes a rekey
+  initiated by the carrier from a rekey that is off; this is a label-only change.
 - The browser softphone now connects to the same address as the WebUI, at
   `/api/instances/<line>/softphone/ws`, and the control surface relays it to that line's engine
   over the Docker bridge. Engines no longer publish a WSS port (8089, 8099, ...) to the host, no
