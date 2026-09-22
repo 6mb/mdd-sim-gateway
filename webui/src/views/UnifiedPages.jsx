@@ -848,7 +848,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
   const buildCacheReclaimable = status?.host?.project_storage?.build_cache_reclaimable_bytes
   const oldImagesReclaimable = status?.host?.project_storage?.mdd_old_images_reclaimable_bytes
   const save = async () => { try { const saved = await api.saveSettings(s); setS(saved); showToast(t('Saved')) } catch (e) { showToast(e.message) } }
-  const action = async name => { try { const result = name === 'backup' ? await api.createBackup() : await api.maintenance(name); showToast(result.ok ? t('Operation completed') : t('Operation completed with errors')); loadStatus() } catch (e) { showToast(e.message) } }
+  const action = async name => { try { const result = name === 'backup' ? await api.createBackup() : await api.maintenance(name); showToast(name === 'backup' && result.missing_attachments ? t('Backup created, but {count} attachment(s) were already missing', { count: result.missing_attachments }) : result.ok ? t('Operation completed') : t('Operation completed with errors')); loadStatus() } catch (e) { showToast(e.message) } }
   const pruneBuildCache = async () => {
     if (!window.confirm(t('Clear dangling Docker build cache? Images, containers and volumes are kept.'))) return
     setMaintenanceBusy('prune_build_cache')

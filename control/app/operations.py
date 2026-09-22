@@ -11,6 +11,7 @@ import os
 from collections import deque
 from pathlib import Path
 import re
+import shutil
 import tarfile
 import time
 import zipfile
@@ -19,6 +20,7 @@ import docker
 import yaml
 
 from . import config as cfg
+from . import store
 
 
 _SECRET_KEYS = re.compile(
@@ -317,20 +319,78 @@ def asterisk_problem_lines(text: str) -> str:
 
 
 def create_local_backup(system_name: str = "gateway") -> dict:
-    """Create a root-local recovery archive. It is intentionally not returned over HTTP."""
+    """Create a root-local recovery archive. It is intentionally not returned over HTTP.
+
+    The message history goes in as a consistent snapshot rather than the live file, together
+    with every MMS attachment it refers to; the archive is then checked to hold each of those
+    attachments, so restoring it restores whole messages."""
     root = Path(cfg.DATA_DIR).resolve()
     target_dir = root / "backups"
     target_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     target = target_dir / f"{_safe_name(system_name)}-{stamp}.tar.gz"
-    with tarfile.open(target, "w:gz") as archive:
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or target_dir in path.parents:
-                continue
-            archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
+    history = Path(store.DB_PATH).resolve()
+    snapshot = history.is_relative_to(root) and history.is_file()
+    database_name = str(history.relative_to(root)) if snapshot else ""
+    skipped = {database_name + suffix for suffix in ("", "-journal", "-wal", "-shm")}
+    mms_root = Path(store.mms_dir()).resolve()
+    staging = target_dir / f".staging-{stamp}"
+    for stale in target_dir.glob(".staging-*"):
+        shutil.rmtree(stale, ignore_errors=True)
+    try:
+        referenced = []
+        known_missing = set()
+        if snapshot:
+            snapshot_result = store.snapshot_history(
+                str(staging / database_name), str(staging / "mms"))
+            known_missing = set(snapshot_result.get("missing_parts", []))
+            referenced = _referenced_parts(staging / database_name)
+        with tarfile.open(target, "w:gz") as archive:
+            for path in sorted(root.rglob("*")):
+                if not path.is_file() or target_dir in path.parents:
+                    continue
+                relative = str(path.relative_to(root))
+                if snapshot and (relative in skipped or mms_root in path.parents):
+                    continue
+                archive.add(path, arcname=relative, recursive=False)
+            if snapshot:
+                archive.add(staging / database_name, arcname=database_name, recursive=False)
+                mms_name = str(mms_root.relative_to(root)) if mms_root.is_relative_to(root) \
+                    else "mms"
+                for path in sorted((staging / "mms").rglob("*")):
+                    if path.is_file():
+                        archive.add(path, recursive=False, arcname=str(
+                            Path(mms_name) / path.relative_to(staging / "mms")))
+        if referenced:
+            with tarfile.open(target, "r:gz") as archive:
+                names = set(archive.getnames())
+            mms_name = str(mms_root.relative_to(root)) if mms_root.is_relative_to(root) \
+                else "mms"
+            absent = [p for p in referenced if f"{mms_name}/{p}" not in names]
+            copy_failures = [part for part in absent if part not in known_missing]
+            if copy_failures:
+                raise RuntimeError(f"the backup is missing {len(copy_failures)} MMS "
+                                   f"attachment(s), e.g. {copy_failures[0]}")
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     os.chmod(target, 0o600)
     return {"ok": True, "name": target.name, "created_at": int(time.time()),
-            "size": target.stat().st_size, "location": "gateway-local"}
+            "size": target.stat().st_size, "location": "gateway-local",
+            "missing_attachments": len(known_missing)}
+
+
+def _referenced_parts(database: Path) -> list[str]:
+    """"<message id>/<file>" of every attachment the history snapshot refers to."""
+    import sqlite3
+    with sqlite3.connect(database) as check:
+        if not check.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                             "AND name='mms_parts'").fetchone():
+            return []
+        rows = check.execute("SELECT message_id, path FROM mms_parts WHERE path!=''").fetchall()
+    return [f"{int(m)}/{p}" for m, p in rows]
 
 
 def list_local_backups() -> list[dict]:

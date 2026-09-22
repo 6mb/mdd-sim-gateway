@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_transport, softphone_ws)
+               mms_media, mms_transport, softphone_ws)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -1651,18 +1651,31 @@ def _mms_push_text(rec: dict) -> str:
     return summary
 
 
+# How often the MMS worker looks for attachment files an interrupted save or deletion left.
+MMS_SWEEP_SECONDS = 6 * 3600
+
+
 async def mms_worker():
     """Retrieve notified MMS from the MMSC, retrying on the schedule mms.download() sets."""
     try:
         await asyncio.to_thread(store.reset_interrupted_mms)
     except Exception as exc:  # noqa
         log.debug("MMS state recovery failed: %r", exc)
+    swept = time.monotonic()
     while True:
         try:
             await asyncio.wait_for(hub.mms_wakeup.wait(), timeout=20)
         except asyncio.TimeoutError:
             pass
         hub.mms_wakeup.clear()
+        if time.monotonic() - swept > MMS_SWEEP_SECONDS:
+            swept = time.monotonic()
+            try:
+                removed = await asyncio.to_thread(store.sweep_mms_orphans)
+                if removed:
+                    log.info("removed %d unreferenced MMS file(s)", removed)
+            except Exception as exc:  # noqa
+                log.debug("MMS orphan sweep failed: %r", exc)
         try:
             due = await asyncio.to_thread(store.due_mms_downloads)
         except Exception as exc:  # noqa
@@ -5387,7 +5400,8 @@ async def api_mms_send(iid: str, request: Request):
         data = await upload.read(int(settings["max_size"]) + 1)
         attachments.append({"name": os.path.basename(upload.filename or "")[:80],
                             "content_type": upload.content_type or "", "data": data})
-    problem = mms.validate_outgoing(recipients, text, attachments, settings)
+    problem = await asyncio.to_thread(mms.validate_outgoing, recipients, text, attachments,
+                                      settings, subject)
     if problem:
         raise HTTPException(422, problem)
     rec = await asyncio.to_thread(mms.create_outgoing, iid, recipients, text, attachments,
@@ -5440,7 +5454,8 @@ def api_mms_part(iid: str, mid: int, pid: int, download: bool = False):
     media_type = content_type if inline else "application/octet-stream"
     if inline and content_type == "text/plain":
         media_type = f"text/plain; charset={part['charset'] or 'utf-8'}"
-    name = part["name"] or os.path.basename(part["file"])
+    # The same rule as when the name was stored; rows written before it existed get it here.
+    name = mms_media.display_name(part["name"] or "", content_type)
     return FileResponse(part["file"], media_type=media_type, filename=name,
                         content_disposition_type="inline" if inline else "attachment",
                         headers={"X-Content-Type-Options": "nosniff",

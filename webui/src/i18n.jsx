@@ -37,6 +37,7 @@ const zh = {
   'The All versions option follows the approved latest Release. Main versions only follows the independently configured stable main Release, even when newer patches exist.': '“全部版本”跟随获准推送的最新 Release；“仅主版本”跟随独立配置的稳定主版本，即使已有更新补丁也能补装该主版本。',
   'Matching releases only send one notice. Installation starts only after you review and confirm it manually.': '符合范围的版本只提示一次；查看版本说明并手动确认后才会开始安装。',
   'Delete this local backup? This cannot be undone.': '确定删除这份本地备份吗？删除后无法恢复。', 'Backup deleted': '备份已删除',
+  'Backup created, but {count} attachment(s) were already missing': '备份已创建，但有 {count} 个附件在备份前已经缺失',
   'Importing the verified control image…': '正在导入已校验的控制镜像…',
   Dashboard: '仪表盘', Softphone: '软电话', Messages: '短信', 'SIM Config': 'SIM 配置',
   Settings: '设置', Logs: '日志', Language: '语言', English: 'English', Chinese: '中文',
