@@ -162,6 +162,12 @@ def redact_jsonl(text: str) -> str:
 
 
 CALL_EVENTS = ("call_out", "call_result", "ussd")
+# The dialplan's closed vocabulary for which side ended a call ([hangup-by]).
+HANGUP_BY = ("carrier", "local", "gateway")
+# Asterisk's own log lines at WARNING/ERROR, e.g. "[Sep 21 22:06:43] WARNING[2987][C-00000009]".
+_ASTERISK_PROBLEM = re.compile(r"\b(?:WARNING|ERROR)\[\d+\]")
+_SIP_USERINFO = re.compile(r"\b(sips?|tel):[^\s@;<>\"',]+@", re.I)
+_TEL_URI = re.compile(r"\btel:[^\s;<>\"',]+", re.I)
 CALL_EVENT_SCAN_LINES = 20_000
 SUPPORT_BUNDLE_MAX_BYTES = 10 * 1024 * 1024
 # Leave space for ZIP metadata, the manifest and compression overhead. The final archive is
@@ -277,6 +283,9 @@ def call_event_evidence(text: str) -> str:
         peer_at = 1 if (event == "call_result" and args and args[0] in ("in", "out")) else 0
         if peer_at < len(args) and not any(ch in args[peer_at] for ch in "*#"):
             args[peer_at] = "<number>"
+        if event == "call_result" and peer_at == 1 and len(args) > 4 \
+                and args[4] not in HANGUP_BY:
+            args[4] = "<unknown>"
         if event == "ussd" and len(args) > 1:
             # That a reply arrived, and how big it was, answers the question. Its text can
             # carry account details and answers nothing.
@@ -286,6 +295,25 @@ def call_event_evidence(text: str) -> str:
             safe["ts"] = int(record["ts"])
         out.append(json.dumps(safe, ensure_ascii=False, sort_keys=True))
     return "\n".join(out)
+
+
+def asterisk_problem_lines(text: str) -> str:
+    """Asterisk's WARNING/ERROR lines, with every SIP/tel identity taken out.
+
+    The whole `messages` log cannot ship: its NOTICE lines name the subscriber's IMS public
+    identity on every registration. But an answered call that drops at once leaves its only
+    explanation here — a rejected SDP answer, a failed bridge, a media error — and without it
+    a report reading ANSWER/16 cannot be told apart from the carrier simply hanging up. So keep
+    the problem lines and drop the identity: the user part of any SIP/tel URI is replaced
+    before the generic redactor (long digit runs, hex blobs, key material) runs over the rest.
+    """
+    out = []
+    for line in text.splitlines():
+        if not _ASTERISK_PROBLEM.search(line):
+            continue
+        line = _SIP_USERINFO.sub(lambda m: f"{m.group(1)}:<user>@", line)
+        out.append(_TEL_URI.sub("tel:<number>", line))
+    return redact_log("\n".join(out)) if out else ""
 
 
 def create_local_backup(system_name: str = "gateway") -> dict:
@@ -478,10 +506,31 @@ def support_bundle(status_documents: dict, log_lines: int = 500) -> bytes:
         except OSError:
             continue
 
+    # Asterisk's `messages` is filtered the way events are, never exported whole (see
+    # asterisk_problem_lines); `full` stays out entirely.
+    for path in sorted(base.glob("*/logs/asterisk/messages")):
+        try:
+            tail = deque(maxlen=CALL_EVENT_SCAN_LINES)
+            raw_line_count = 0
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    raw_line_count += 1
+                    tail.append(line.rstrip("\r\n"))
+            source = list(tail)
+            eligible = asterisk_problem_lines("\n".join(source)).splitlines()
+            selected = eligible[-log_lines:]
+            if selected:
+                add_candidate(path, f"logs/{path.parents[2].name}-asterisk-problems.log",
+                              source, eligible, selected, "\n".join(selected), 30,
+                              raw_line_count)
+        except OSError:
+            continue
+
     # Explicit allow-list: voicemail recordings and every unknown future file stay excluded.
     # Note this deliberately does NOT include the rest of /logs/asterisk: Asterisk's own `full`
     # and `messages` carry the subscriber's IMS public identity on every registration. Only
-    # supervisor.jsonl is admitted, and it is a closed schema of exit codes and durations.
+    # supervisor.jsonl is admitted whole, and it is a closed schema of exit codes and
+    # durations; `messages` reaches the bundle only through the filter above.
     paths = [*base.glob("*/run/*.log"), *base.glob("*/logs/diagnostics.jsonl"),
              *base.glob("*/logs/lifecycle.jsonl"),
              *base.glob("*/logs/asterisk/supervisor.jsonl"),

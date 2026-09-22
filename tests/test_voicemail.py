@@ -102,6 +102,24 @@ class DialplanTests(unittest.TestCase):
         ussd_report = out.split("[ussd-report]", 1)[1].split("\n[", 1)[0]
         self.assertIn("same => n,Return()", outbound_headers)
         self.assertIn("same => n(done),Return()", ussd_report)
+        hangup_by = out.split("[hangup-by]", 1)[1].split("\n[", 1)[0]
+        self.assertIn("same => n,Return(${BY})", hangup_by)
+
+    def test_both_h_handlers_report_which_side_ended_the_call(self):
+        # ANSWER/16 after one second reads the same whether the carrier, the browser or the
+        # gateway tore the call down (#109); the 'h' handlers name the side as a 5th argument.
+        out = render(vm_enabled=True)
+        for direction in ("in", "out"):
+            line = next(l for l in out.splitlines() if f"call_result {direction} " in l)
+            self.assertIn('"${GOSUB_RETVAL}" &)', line, direction)
+            handler = out[:out.index(line)].rsplit("exten => h,1,", 1)[1]
+            self.assertIn("Gosub(hangup-by,s,1)", handler, direction)
+        routine = out.split("[hangup-by]", 1)[1].split("\n[", 1)[0]
+        # The carrier's channel is named after its endpoint; a browser/MicroSIP leg is not.
+        self.assertIn('"${HS:0:16}" = "PJSIP/volte_ims-"', routine)
+        self.assertIn('?Set(BY=carrier)', routine)
+        self.assertIn('?gateway:local', routine)
+        self.assertTrue(routine.rstrip().endswith("same => n,Return(${BY})"))
 
     def test_the_prompt_is_shipped_rather_than_assumed(self):
         # The base image's Asterisk sound packages are a side effect of its build; nothing
