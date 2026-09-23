@@ -2587,7 +2587,10 @@ async def update_automation_poller():
     await asyncio.sleep(30)
     while True:
         try:
-            await asyncio.to_thread(update_check.automation_cycle)
+            result = await asyncio.to_thread(update_check.automation_cycle)
+            if (operations.container_stack_enabled() and isinstance(result, dict)
+                    and result.get("auto_update_requested")):
+                await asyncio.to_thread(operations.launch_container_update)
         except Exception as exc:  # noqa: a failed poll must never take the control plane down
             log.warning("background update check failed: %s", type(exc).__name__)
         await asyncio.sleep(max(300, UPDATE_CHECK_INTERVAL_SECONDS))
@@ -2595,6 +2598,8 @@ async def update_automation_poller():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if operations.container_stack_enabled():
+        await asyncio.to_thread(operations.settle_container_service_restart)
     _keep_modem_storage_on_upgrade(store.schema_version())
     store.set_subscriber_resolver(_line_subscriber)
     try:
@@ -3981,6 +3986,13 @@ async def _unified_devices() -> list[dict]:
     configured_exits = settings.get("proxy", {}).get("exits", {}) or {}
     available_countries = sorted(country for country, value in configured_exits.items()
                                  if isinstance(value, dict) and value.get("enabled", False))
+    # Host routing publishes per-line state, while the container SOCKS transport publishes
+    # one shared listener/state per country.  Device presentation must understand both
+    # contracts: a working container exit otherwise appears as "Not connected" even while
+    # the Engine is actively sending IKE through it.
+    egress_state = egress.status()
+    egress_lines = egress_state.get("lines") or {}
+    egress_exits = egress_state.get("exits") or {}
     result = []
     for device_id in device_ids:
         native_card = native_readers.get(device_id)
@@ -4091,6 +4103,10 @@ async def _unified_devices() -> list[dict]:
                 "carrier_identity": (inst or {}).get("carrier_identity") or {},
             }
         carrier = _carrier_description(inst, card_info, cellular_view)
+        exit_country = egress.line_country(inst or card_info)
+        line_exit = egress_lines.get(str(inst["id"]) if inst else "", {}) or {}
+        country_exit = egress_exits.get(exit_country, {}) or {}
+        active_exit = line_exit if line_exit.get("node") else country_exit
         if native_card:
             hardware_imei, _hardware_id, _hardware_type = _hardware_imei_for_card(
                 native_card, cards)
@@ -4147,17 +4163,15 @@ async def _unified_devices() -> list[dict]:
                        # engine config (config.py).
                        "accept_epdg_rekey": bool((inst or {}).get("accept_epdg_esp_rekey",
                            (cfg.get_settings().get("rekey") or {}).get("accept_epdg", False)))},
-            "egress": {"node": (egress.status().get("lines") or {}).get(
-                str(inst["id"]) if inst else "", {}).get("node") or "",
+            "egress": {"node": active_exit.get("node") or "",
                 # The picker lives on the settings page, so without these the device page shows
                 # a node that silently disagrees with what the operator chose.
-                **{key: ((egress.status().get("exits") or {}).get(
-                    egress.line_country(inst or card_info), {}).get(key) or "")
+                **{key: (country_exit.get(key) or "")
                    for key in ("pinned_node", "pin_mode", "selection",
                                # Why the exit moved, and whether the pinned node is still
                                # serving a cooldown — otherwise a mismatch looks arbitrary.
                                "last_change", "pinned_cooldown_seconds")},
-                "country": egress.line_country(inst or card_info),
+                "country": exit_country,
                 "detected_country": egress.country_for_mcc((inst or card_info).get("mcc")),
                 "override": egress.normalize_country((inst or {}).get("proxy_country")),
                 "available_countries": available_countries},
@@ -4782,6 +4796,10 @@ def api_system_status():
         "unheard_voicemails": sum(store.unheard_voicemail_counts().values()),
         "timezone": settings.get("timezone") or "UTC",
         "version": VERSION,
+        "deployment": {
+            "container_stack": operations.container_stack_enabled(),
+            "host_restart_available": not operations.container_stack_enabled(),
+        },
         "repository_url": f"https://github.com/{update_check.repository()}",
         "backups": operations.list_local_backups(),
         "security": {
@@ -4838,10 +4856,17 @@ async def api_system_repository_stars(force: bool = False):
 
 @app.post("/api/system/update/apply")
 async def api_system_update_apply(body: dict):
-    """One-click update: publish a request for the host orchestrator, which runs the detached
-    updater (host/mdd_update.py). Responds immediately; progress is polled separately."""
+    """Start a detached update through the host orchestrator or container-stack helper.
+
+    The response remains immediate in both deployment modes; progress is polled separately.
+    """
     version = body.get("version")
-    return await asyncio.to_thread(update_check.request_apply, version=version)
+    result = await asyncio.to_thread(update_check.request_apply, version=version)
+    if result.get("ok") and operations.container_stack_enabled():
+        launched = await asyncio.to_thread(operations.launch_container_update)
+        if not launched.get("ok"):
+            return launched
+    return result
 
 
 @app.get("/api/system/update/progress")
@@ -4918,12 +4943,18 @@ async def api_system_maintenance(body: dict):
             except Exception as exc:
                 failed[iid] = str(getattr(exc, "detail", exc))
         return {"ok": not failed, "action": action, "restarted": restarted, "failed": failed}
-    # Restarting services is the one maintenance action this process cannot perform itself:
-    # it is unprivileged, and in every scope it is itself one of the things being restarted.
+    # Publish one shared request contract. The Pi host orchestrator consumes it externally;
+    # container mode launches its bounded Docker executor after the response has been flushed.
     scope = {"restart_control": "control", "restart_services": "services",
              "restart_host": "host"}.get(action)
     if scope:
         result = await asyncio.to_thread(operations.request_service_restart, scope)
+        if result.get("ok") and operations.container_stack_enabled():
+            async def restart_after_response():
+                # Let Uvicorn flush the accepted response before the Docker daemon stops us.
+                await asyncio.sleep(.75)
+                await asyncio.to_thread(operations.perform_container_service_restart, scope)
+            asyncio.create_task(restart_after_response())
         return {**result, "action": action}
     raise HTTPException(400, "unknown maintenance action")
 

@@ -135,6 +135,7 @@ class AutoProvisionTests(unittest.TestCase):
             "id": "3", "index": 0, "imsi": "234100000000000",
             "mcc": "234", "mnc": "10", "iccid": "test-card",
             "imei": "490154203237518", "ami_secret": "test-secret",
+            "epdg": "198.51.100.10",
             "sip": {"webrtc": {"enable": True, "password": "test-password"},
                     "access_type": "custom-access"},
         }
@@ -144,6 +145,7 @@ class AutoProvisionTests(unittest.TestCase):
         self.assertEqual(rendered["sip"]["access_type"], "custom-access")
         self.assertTrue(rendered["sip"]["user_eq_phone"])
         self.assertIn("country=GB", rendered["sip"]["pani"])
+        self.assertEqual(rendered["epdg"], "198.51.100.10")
 
     def test_a_native_reader_gives_every_engine_role_the_line_s_own_slot(self):
         """A USB PC/SC reader has one slot. The rendered PIN/IMS readers used to be fixed at

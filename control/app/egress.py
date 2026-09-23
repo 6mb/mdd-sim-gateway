@@ -5,6 +5,9 @@ small desired-state document under the shared data directory.  The host-side
 ``mdd-sim-gateway-orchestrator`` resolves each line's ePDG and owns the per-country sing-box TUN + /32
 routes.  Engine startup waits for the corresponding line to become ready, preventing an IKE
 attempt from leaking through the wrong country's default route.
+
+The opt-in container transport instead consumes a separate, versioned SOCKS status.
+That status confirms listener readiness only; it never claims a host route exists.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import time
 from copy import deepcopy
 
 from . import config as cfg
+from .egress_contract import current_status, socks_endpoint
 
 _HERE = os.path.dirname(__file__)
 _MCC_PATH = os.path.join(_HERE, "mcc_country.json")
@@ -531,7 +535,45 @@ def publish(instances: list[dict] | None = None, settings: dict | None = None) -
 
 
 def status() -> dict:
+    if transport() == "socks5":
+        return _read_json(os.path.join(_ORCH_DIR, "socks-egress-status.json"))
     return _read_json(_STATUS)
+
+
+def transport() -> str:
+    value = os.environ.get("MDD_EGRESS_TRANSPORT", "host").strip()
+    if value not in {"host", "socks5"}:
+        raise EgressError("MDD_EGRESS_TRANSPORT must be host or socks5")
+    return value
+
+
+def _ensure_socks_exit(country, proxy, timeout):
+    deadline = time.monotonic() + max(1.0, timeout)
+    reason = "container egress status is missing, stale or for a different configuration"
+    while time.monotonic() < deadline:
+        state = status()
+        if current_status(state, proxy, time.time()):
+            exits = state.get("exits")
+            last = exits.get(country) if isinstance(exits, dict) else None
+            if isinstance(last, dict):
+                if last.get("ready") is True:
+                    if last.get("transport") == "direct" and last.get("mode") == "direct":
+                        # Only an explicit country setting can authorize direct access.
+                        selected = proxy["exits"][country]
+                        if selected.get("mode") == "direct" and not selected.get("profile_id"):
+                            return {"ready": True, "mode": "direct", "transport": "direct"}
+                    elif last.get("transport") == "socks5" and last.get("mode") != "direct":
+                        try:
+                            endpoint = socks_endpoint(last)
+                        except ValueError:
+                            raise EgressError("invalid container egress endpoint") from None
+                        return {**last, "proxy_url": endpoint}
+                    raise EgressError("container egress transport does not match configuration")
+                if last.get("terminal"):
+                    raise EgressError(f"{country.upper()} container exit configuration rejected")
+                reason = "container country exit is not ready"
+        time.sleep(0.4)
+    raise EgressError(f"{country.upper()} exit unavailable: {reason}")
 
 
 def request_reselect(inst: dict, reason: str, stable_for: float = 0.0) -> str:
@@ -602,13 +644,14 @@ def report_stalled_exit(country: str, node: str, reason: str, line: str) -> bool
 
 
 def ensure_line(inst: dict, settings: dict, timeout: float = 18.0) -> dict:
-    """Publish desired state and wait until the host confirms the line's ePDG route.
+    """Publish desired state and wait for the selected transport's readiness contract.
 
     Proxy routing is opt-in globally.  With it enabled, missing/unhealthy exits fail closed unless
     the country entry explicitly selects ``direct``.  That is intentional: silently using the
     host default route can expose the wrong geography to an operator ePDG.
     """
     proxy = settings.get("proxy") or {}
+    selected_transport = transport()
     publish(settings=settings)
     if not proxy.get("enabled", False):
         return {"ready": True, "mode": "legacy"}
@@ -619,6 +662,8 @@ def ensure_line(inst: dict, settings: dict, timeout: float = 18.0) -> dict:
     exit_cfg = exits.get(country) or {}
     if not exit_cfg.get("enabled", False):
         raise EgressError(f"no enabled proxy exit configured for country {country.upper()}")
+    if selected_transport == "socks5":
+        return _ensure_socks_exit(country, proxy, timeout)
     deadline = time.monotonic() + max(1.0, timeout)
     iid = str(inst.get("id", ""))
     last = {}

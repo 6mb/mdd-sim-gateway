@@ -32,7 +32,7 @@
 #
 # Config via env (or a .env file next to this script):
 #   MDD_MODE            deploy mode: local | docker                (default local)
-#   MDD_PORT            host port to publish/serve the WebUI on    (default 8443)
+#   MDD_PORT            host port to publish/serve the WebUI on    (default 10443)
 #   MDD_DATA_DIR        runtime data dir                           (default <repo>/data)
 #   MDD_ADVERTISE_ADDR  host LAN IP for SIP/WebRTC media           (default: auto-detect)
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
@@ -53,7 +53,7 @@ SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_DIR="$SELF_DIR"
 [ -f "$REPO_DIR/.env" ] && . "$REPO_DIR/.env"
 
-MDD_PORT="${MDD_PORT:-8443}"
+MDD_PORT="${MDD_PORT:-10443}"
 DATA_DIR_STATE="/etc/mdd-sim-gateway/data-dir"
 if [ -n "${MDD_DATA_DIR+x}" ]; then
   MDD_DATA_DIR=$MDD_DATA_DIR
