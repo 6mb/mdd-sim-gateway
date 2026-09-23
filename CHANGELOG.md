@@ -2,6 +2,17 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- An outgoing MMS whose upload the modem refused part way through -- its MMSC socket
+  occasionally answers `SEND FAIL` -- is submitted again on a fresh connection after 3 and then
+  10 seconds instead of being marked failed at once. Only an attempt that stopped before the
+  last chunk, or never connected, is repeated, since the MMSC cannot have received it whole; a
+  request that may have arrived complete is still never sent twice. The error now carries the
+  modem's own answer and the byte offset where the upload stopped.
+
 ## [1.11.0] - 2026-09-22
 
 ### Fixed

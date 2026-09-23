@@ -45,12 +45,17 @@ MMS_CONTENT_TYPE = "application/vnd.wap.mms-message"
 class MmsTransportError(Exception):
     """A failed MMSC exchange. `retryable` is False when trying again cannot help."""
 
-    def __init__(self, message: str, *, retryable: bool = True, after_send: bool = False):
+    def __init__(self, message: str, *, retryable: bool = True, after_send: bool = False,
+                 unsent: bool = False):
         super().__init__(message)
         self.retryable = retryable
         # The request reached the network before this failed: for a send, the MMSC may
         # have accepted the message, so the outcome is unknown rather than failed.
         self.after_send = after_send
+        # The MMSC cannot have received the whole request -- no connection was made, or the
+        # upload stopped before its last chunk -- so submitting it again cannot deliver the
+        # message twice.
+        self.unsent = unsent
 
 
 @dataclass
@@ -376,8 +381,9 @@ class SerialAtChannel:
             self.close()
             raise MmsTransportError(f"{self.port}: {exc}") from None
         if b"SEND OK" not in result:
+            said = " ".join(result.decode("latin-1").split())[:80] or "nothing"
             raise MmsTransportError("the modem could not send on the MMSC connection; "
-                                    "it may have closed")
+                                    f"it may have closed (modem answered: {said})")
 
     def close(self) -> None:
         if self._serial is not None:
@@ -491,13 +497,21 @@ class ModemSocketHttp:
         if proxy:
             host, port = proxy
         deadline = self.clock() + timeout
-        cid, activated = self._context()
+        try:
+            cid, activated = self._context()
+        except MmsTransportError as exc:
+            exc.unsent = True
+            raise
         sid = self.CONNECT_ID
         try:
             self.at(f"AT+QICLOSE={sid},1", 3)
-            self._require(f'AT+QICFG="dataformat",{self.at.DATAFORMAT}')
-            self._require(f'AT+QIOPEN={cid},{sid},"TCP","{host}",{port},0,0', 10)
-            self._wait_connected(sid, deadline)
+            try:
+                self._require(f'AT+QICFG="dataformat",{self.at.DATAFORMAT}')
+                self._require(f'AT+QIOPEN={cid},{sid},"TCP","{host}",{port},0,0', 10)
+                self._wait_connected(sid, deadline)
+            except MmsTransportError as exc:
+                exc.unsent = True
+                raise
             self._send(sid, payload, deadline)
             try:
                 return self._receive(sid, deadline)
@@ -532,15 +546,22 @@ class ModemSocketHttp:
         chunk_size = self.at.CHUNK
         for offset in range(0, len(payload), chunk_size):
             chunk = payload[offset:offset + chunk_size]
-            self.at.send_chunk(sid, chunk)
+            # Up to the last chunk, the request the MMSC has seen is incomplete whatever went
+            # wrong. The last chunk may have left the modem even when it reports a failure.
+            last = offset + len(chunk) >= len(payload)
+            try:
+                self.at.send_chunk(sid, chunk)
+            except MmsTransportError as exc:
+                raise MmsTransportError(f"{exc}, at byte {offset} of {len(payload)}",
+                                        retryable=exc.retryable, unsent=not last) from None
             if self.at.VERIFY_EACH_CHUNK:
                 sent = self._sent(sid)
                 if sent != offset + len(chunk):
                     raise MmsTransportError(
                         f"the modem sent {max(sent, 0)} of {len(payload)} request bytes; "
-                        "the MMSC connection may have closed")
+                        "the MMSC connection may have closed", unsent=not last)
             if self.clock() > deadline:
-                raise MmsTransportError("timed out sending to the MMSC")
+                raise MmsTransportError("timed out sending to the MMSC", unsent=not last)
         if not self.at.VERIFY_EACH_CHUNK:
             sent = self._sent(sid)
             if sent != len(payload):
