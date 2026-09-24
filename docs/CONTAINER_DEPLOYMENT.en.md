@@ -106,11 +106,15 @@ Container Manager package only during a maintenance window. **DSM 7.4 has been o
 then restart every container project during this package restart**; it is not a zero-downtime UI
 refresh. Projects created in the DSM UI are registered automatically and do not need this procedure.
 
-Do not copy the common `chown -R user:users` step used by ordinary Compose projects. The MDD data
-directory contains messages, certificates, SIM configuration and notification credentials and must
-remain root-owned with mode `0700`. Control and Egress intentionally cannot bypass directory
-permissions, so changing its owner prevents them from starting. Edit the YAML through Container
-Manager or a root SSH session.
+Create the data directory in File Station as usual; its owner and mode need no changes. Every file
+inside is created by the containers as root with mode `0600`/`0700`, so messages, certificates, SIM
+configuration and notification credentials are not readable by DSM accounts. Do not copy the common
+`chown -R user:users` step used by ordinary Compose projects: it would hand those files to that
+account and expose them through File Station or SMB. Edit the YAML through Container Manager.
+
+Compose files from v1.12.0-rc4 and earlier lack this permission. In a folder created in File Station,
+Control and Egress then exit with `Operation not permitted` or `Permission denied`. Run
+`sudo chown root:root <data-dir>` once and start the project again, or use a newer Compose file.
 
 ## 5. Security boundaries in the Compose file
 
