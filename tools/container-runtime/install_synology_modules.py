@@ -21,7 +21,9 @@ def main():
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, default=22)
     parser.add_argument("--identity", required=True)
-    parser.add_argument("--source-dir", default="/volume1/homes/douglas/.mdd-ec25-build-108/mdd-ec25-module-src")
+    # Absolute path on the NAS holding the modules built from the vendor toolchain.
+    # Deliberately required: it is a per-operator build location, not a project default.
+    parser.add_argument("--source-dir", required=True)
     parser.add_argument("--uninstall", action="store_true")
     args = parser.parse_args()
     ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",

@@ -47,15 +47,18 @@ Plug in the modem or reader before deployment. A modem normally exposes nodes si
 ```
 
 A standard PC/SC reader only needs to appear under `/dev/bus/usb`; pcscd and libccid are supplied by
-the Hardware image. If all required nodes exist, the host is `host-native` and no MDD host package
-is needed.
+the Hardware image. If all required nodes exist, the host needs no MDD package at all — just create
+the Compose project.
 
-When nodes are missing, the Compose project can still be created. The Web console reports
-`driver_required` with a redacted compatibility key. Match that key against the
-[NAS compatibility and driver catalogue](../drivers/README.en.md). A driver must match the exact NAS
-vendor, model, CPU platform, architecture, complete OS build and kernel release. Synology drivers
-are distributed as manually installed `.spk` packages; never load a similar model's arbitrary
-`.ko` file.
+When nodes are missing, the Hardware container stays unhealthy and Control, which depends on it,
+never starts. This release does **not** ship an automatic driver preflight status: run the commands
+above yourself to establish which nodes are absent, then compare that against the
+[NAS compatibility and driver catalogue](../drivers/README.en.md) by hand. A driver must match the
+exact NAS vendor, model, CPU platform, architecture, complete OS build and kernel release; never
+install a package built for a similar model or OS version. The single catalogue entry that exists
+today (DS1621+, DSM 7.4.1-90080, kernel 4.4.302+) is `driver-verified` with its driver pack still
+`packaging-pending`, so **no installable driver asset is published in any Release yet**. Until an
+entry reaches `release-ready`, do not load an unknown `.ko` or `.spk`.
 
 ## 3. Create the Synology project in the UI
 
@@ -139,7 +142,8 @@ Accept the initial self-signed certificate warning on a trusted LAN or VPN and c
 administrator account immediately. Then verify:
 
 1. Control, Hardware, Egress and every Engine report the same version;
-2. Hardware is healthy and reports no missing driver or competing host pcscd;
+2. Hardware is healthy, no host pcscd competes for the readers, and NetworkManager has
+   claimed no non-cellular interface;
 3. hot-plugged modems and readers appear without rebuilding the project;
 4. PC/SC readers expose VoWiFi/eSIM capabilities without cellular controls;
 5. enabling modem 4G leaves the NAS default route unchanged;
@@ -192,13 +196,15 @@ If the WebUI is unavailable, use the same boundaries for a manual recovery:
 6. restore the previous YAML, images and pre-update data backup if a base service fails.
 
 Do not let Watchtower update one component independently. Stopping or deleting the project does
-not delete its bind-mounted data unless the administrator removes that directory. Driver SPKs are
-also independent and must be removed separately in Package Center.
+not delete its bind-mounted data unless the administrator removes that directory. Manually
+installed kernel drivers are independent of Compose and must be removed separately.
 
 ## 9. Common problems
 
-**Hardware is unhealthy or reports `driver_required`:** confirm host USB enumeration and use the
-exact compatibility key. Re-evaluate drivers after every DSM/kernel update.
+**Hardware is unhealthy:** confirm the host enumerated the USB device, then use the section 2
+commands to check whether the required device nodes exist — missing nodes mean the host lacks the
+kernel driver. `docker logs mdd-sim-gateway-hardware` reports why the supervisor failed.
+Re-evaluate drivers against the complete build and kernel after every DSM update.
 
 **A reader is missing:** stop any host pcscd or other container that has claimed it. The Hardware
 image already contains pcsc-lite, libccid and the project's verified reader patches.

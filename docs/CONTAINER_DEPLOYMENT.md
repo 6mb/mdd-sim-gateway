@@ -47,13 +47,16 @@ Compose 只声明前三个基础服务。不要手工为每张 SIM 复制 Engine
 普通 PC/SC 读卡器只需要能在 `/dev/bus/usb` 下看到对应 USB 设备，它的 pcscd 和 libccid 在
 Hardware 容器内。
 
-如果节点齐全，部署状态为 `host-native`，无需安装任何项目宿主软件。节点缺失时，仍可先创建
-Compose 项目；WebUI 会显示 `driver_required` 和脱敏后的兼容键。到
-[NAS 兼容性与驱动目录](../drivers/README.md)查找精确匹配项。
+如果上面的节点齐全，宿主不需要安装任何项目软件，直接创建 Compose 项目即可。
 
-驱动必须同时匹配厂商、型号、CPU 平台、架构、系统完整 build 和内核 release。不得安装相近
-型号或相近系统版本的包。正式的 Synology 驱动以手动安装的 `.spk` 提供；安装后重插设备或
-重启 NAS，再确认节点出现。没有 `release-ready` 记录时不要使用社区提供的未知 `.ko`。
+节点缺失时 Hardware 容器会保持 unhealthy，依赖它的 Control 不会启动。当前版本**不提供**
+自动的驱动预检状态：请自己按上面的命令确认缺少哪些节点，再到
+[NAS 兼容性与驱动目录](../drivers/README.md)人工比对是否存在完全匹配的记录。
+
+驱动必须同时匹配厂商、型号、CPU 平台、架构、系统完整 build 和内核 release，不得安装相近
+型号或相近系统版本的包。目录中当前唯一的记录（DS1621+、DSM 7.4.1-90080、内核 4.4.302+）
+状态为 `driver-verified`，其驱动包仍是 `packaging-pending`，**Release 尚未提供任何可安装的
+驱动资产**。在出现 `release-ready` 记录之前，不要使用来源不明的 `.ko` 或 `.spk`。
 
 ## 3. 在 Synology Container Manager 创建项目
 
@@ -133,7 +136,7 @@ https://NAS_LAN_IP:10443/
 按以下顺序验收：
 
 1. “系统设置/诊断”显示 Control、Hardware、Egress 版本完全一致；
-2. Hardware 状态为健康，且没有 `driver_required`、宿主 pcscd 抢占或非蜂窝网卡被接管；
+2. Hardware 状态为健康，没有宿主 pcscd 抢占，也没有非蜂窝网卡被 NetworkManager 接管；
 3. “设备”页只出现实际插入的模块和读卡器；拔插后无需重建项目即可消失、恢复；
 4. PC/SC 读卡器只显示 VoWiFi/eSIM 能力，不显示虚假的 4G 开关；
 5. 蜂窝模块能读取 SIM 状态，按需开启 4G 后 NAS 默认网关保持不变；
@@ -194,17 +197,18 @@ Docker socket，不使用宿主 PID、网络或特权模式。更新期间不要
 
 - 保留数据：删除项目和项目容器，保留数据目录，之后可用同版本 Compose 恢复；
 - 完全删除：先导出所需备份，再删除项目、MDD 命名卷和数据目录；
-- 驱动 SPK 独立于 Compose。卸载应用项目不会自动移除内核驱动，需在套件中心单独卸载。
+- 手工安装的内核驱动独立于 Compose。卸载应用项目不会移除它们，需要单独卸载。
 
 不要手工删除仍被其他容器使用的 Docker 网络、卷或镜像。MDD 只管理带
 `io.mdd-sim-gateway.managed=true` 标签的资源。
 
 ## 9. 常见问题
 
-### Hardware 不健康或显示 `driver_required`
+### Hardware 不健康
 
-确认 USB 设备已被宿主枚举，并按页面显示的兼容键查询驱动目录。系统升级后必须重新匹配完整
-build 和内核，不能强制加载旧驱动。
+先确认 USB 设备已被宿主枚举，再按第 2 节的命令检查所需设备节点是否齐全；节点缺失即表示
+宿主缺少对应内核驱动。`docker logs mdd-sim-gateway-hardware` 会给出主管进程的失败原因。
+系统升级后必须按完整 build 和内核重新匹配驱动，不能强制加载旧驱动。
 
 ### 读卡器没有出现
 

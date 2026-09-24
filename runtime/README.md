@@ -168,8 +168,8 @@ docker compose -f runtime/compose.yaml up -d --no-build
 正式 Release 会额外发布 `mdd-sim-gateway-compose-vX.Y.Z.yaml`，其中四个 GHCR 镜像已经
 固定为对应 Release 标签。群晖用户可以把该 YAML 直接粘贴到 Container Manager 新项目，
 把文件开头标出的示例 LAN 地址改成自己的 NAS 地址，按需修改数据目录、管理端口和 NAS
-域名映射后启动；不需要额外的 `.env` 或应用安装脚本。只有页面报告 `driver_required` 时，
-才需要在宿主单独安装完全匹配的驱动包。
+域名映射后启动；不需要额外的 `.env` 或应用安装脚本。只有宿主没有生成所需设备节点时，
+才需要在宿主单独安装完全匹配的驱动；当前 Release 还没有提供可安装的驱动资产。
 
 常驻容器为 Control、Hardware、Egress，加每条已启用线路一个 Engine，即 `3 + N`。
 Control 只发布管理端口；Hardware 和 Egress 不发布宿主端口。Engine 的国家 SOCKS

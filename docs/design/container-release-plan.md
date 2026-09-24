@@ -3,6 +3,34 @@
 本文定义 issue #108 完成后的正式发布形态。目标是让普通 Linux、树莓派和 NAS 使用
 同一套容器镜像，同时把必须依赖宿主内核的部分限制为可审计的可选驱动包。
 
+## 0. 实现状态（截至 v1.12.0-rc1）
+
+本文描述的是**目标形态**，不是当前代码的能力。发布或撰写用户文档前请先看这一节。
+
+已经实现：
+
+- §3 的四种镜像、版本化 Compose 项目文件、八个离线镜像包，以及覆盖它们的统一
+  `SHA256SUMS`（`.github/workflows/release.yml`）。
+- §6 的下载校验、更新前备份、保留用户 Compose 编辑、基础容器与 Engine 的滚动替换，以及
+  失败时恢复上一份 Compose、基础镜像和 Engine（`host/mdd_container_update.py`）。
+- §7 中的 Compose 权限断言与非 privileged 检查（`tests/test_container_compose.py`）。
+
+**尚未实现**，不得在用户文档或发布说明中描述为可用：
+
+- §4 驱动目录与下载全部内容。`drivers/catalog/` 目前只有供人工查阅和 CI 校验的记录，
+  没有任何运行时消费者；`--driver-bundle` 与 `MDD_DRIVER_INDEX_URL` 不存在。Release 也
+  尚未发布驱动目录或驱动包资产。
+- §5 第 3–5 步的启动硬件预检，以及 `host-native` / `driver_required` 状态。代码中不存在
+  这两个状态，WebUI 也不展示兼容键。当前实际行为是：缺少设备节点时 Hardware 容器保持
+  unhealthy，Control 因 `depends_on` 不会启动。
+- §3 与 §6 中按镜像 digest 验证和回滚。Compose 引用的是版本标签，回滚恢复的是上一份
+  Compose 文本；GHCR 标签被移动的情形目前没有防护。
+- §6 更新门槛中除 Hardware 健康检查以外的五条：NetworkManager 接管范围、NAS 默认路由
+  一致、读卡器与 modem 可见性、Egress 状态指纹、线路 SWu/IMS 恢复。更新器只等待容器
+  达到 running/healthy，不校验 IMS 是否重新注册。
+- §7 中 Hardware 与 Egress 镜像的 CI 构建、Hardware 内 pcsc-lite/libccid 补丁检查，以及
+  `tools/validate_nas_catalog.py` 的 CI 执行。这三项目前只在打标签发布时或本地运行。
+
 ## 1. 支持边界
 
 USB 枚举成功不等于设备已经可用。安装器按下面三层判断：
