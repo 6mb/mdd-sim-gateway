@@ -30,6 +30,8 @@ except ModuleNotFoundError:  # Imported as host.mdd_container_update by tests.
 
 COMPONENTS = ("control", "hardware", "egress", "engine")
 BASE_COMPONENTS = ("hardware", "egress", "control")
+# Hardware may have to reset the modem to recover a stale QMI session before it is healthy.
+WAIT_SECONDS = {"hardware": 300}
 MANAGED = "io.mdd-sim-gateway.managed"
 COMPONENT = "io.mdd-sim-gateway.component"
 VERSION = "org.opencontainers.image.version"
@@ -161,10 +163,24 @@ def wait_container(client, name: str, image_id: str, timeout: int = 180) -> None
     raise mdd_update.UpdateError(f"{name} did not become healthy ({last})")
 
 
-def compose_up(compose: Path) -> None:
-    run(["docker", "compose", "-p", "mdd-sim-gateway", "-f", str(compose),
-         "up", "-d", "--no-build", "--force-recreate", *BASE_COMPONENTS],
-        cwd=compose.parent, timeout=600)
+def compose_up(compose: Path, wait) -> None:
+    """Recreate the base services in dependency order, waiting on this helper's clock.
+
+    Control declares `depends_on: {condition: service_healthy}` on Hardware, and Compose
+    gives up the moment Hardware first reports unhealthy. A freshly recreated Hardware
+    usually inherits a stale QMI session from the container it replaced, and recovering
+    it (a modem reset plus re-enumeration) outlasts the image's health-check grace
+    period. Leaving the ordering to Compose therefore failed the update, and then the
+    rollback, on the very restart it was performing. `--no-deps` hands the ordering to
+    wait(), whose deadline is long enough for that recovery, including when rolling back
+    to an image whose own grace period is still the short one.
+    """
+    command = ["docker", "compose", "-p", "mdd-sim-gateway", "-f", str(compose),
+               "up", "-d", "--no-build", "--force-recreate", "--no-deps"]
+    run([*command, "hardware", "egress"], cwd=compose.parent, timeout=600)
+    wait("hardware")
+    wait("egress")
+    run([*command, "control"], cwd=compose.parent, timeout=600)
 
 
 def docker_root_free_bytes(client) -> int:
@@ -321,9 +337,12 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
         switched = True
 
         status.publish("running", "reloading", backup=saved.get("name", ""))
-        compose_up(compose)
-        for component in BASE_COMPONENTS:
-            wait_container(client, f"mdd-sim-gateway-{component}", image_ids[component])
+        def wait_new(component):
+            wait_container(client, f"mdd-sim-gateway-{component}", image_ids[component],
+                           timeout=WAIT_SECONDS.get(component, 180))
+
+        compose_up(compose, wait_new)
+        wait_new("control")
         roll_engines(client, image_ids["engine"], status)
         mdd_update.atomic_json(project / "update" / "installed-images.json", {
             "version": version, "architecture": arch, "installed_at": int(time.time()),
@@ -337,10 +356,13 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
             try:
                 status.publish("running", "rollback", error=str(exc)[:1000])
                 shutil.copy2(compose_backup, compose)
-                compose_up(compose)
-                for component in BASE_COMPONENTS:
+                def wait_old(component):
                     wait_container(client, f"mdd-sim-gateway-{component}",
-                                   old_base_ids[component])
+                                   old_base_ids[component],
+                                   timeout=WAIT_SECONDS.get(component, 180))
+
+                compose_up(compose, wait_old)
+                wait_old("control")
                 for name, old_image_id in old_engine_ids.items():
                     try:
                         current = client.containers.get(name)

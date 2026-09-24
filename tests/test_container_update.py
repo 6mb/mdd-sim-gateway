@@ -49,6 +49,26 @@ services:
                 mdd_container_update.find_compose(root)
 
 
+class ContainerComposeOrderTests(unittest.TestCase):
+    def test_control_starts_only_after_our_own_wait_for_hardware(self):
+        """Compose's service_healthy gate gave up on the first unhealthy report, which a
+        Hardware start recovering a stale QMI session always produces."""
+        events = []
+        with patch.object(mdd_container_update, "run",
+                          side_effect=lambda command, **_: events.append(command[-2:])):
+            mdd_container_update.compose_up(Path("/data/docker-compose.yml"),
+                                            lambda component: events.append(component))
+        self.assertEqual(events, [["hardware", "egress"], "hardware", "egress",
+                                  ["--no-deps", "control"]])
+
+    def test_every_compose_start_skips_compose_dependency_gating(self):
+        commands = []
+        with patch.object(mdd_container_update, "run",
+                          side_effect=lambda command, **_: commands.append(command)):
+            mdd_container_update.compose_up(Path("/data/docker-compose.yml"), lambda _c: None)
+        self.assertTrue(all("--no-deps" in command for command in commands))
+
+
 class ContainerUpdateLaunchTests(unittest.TestCase):
     def test_control_launches_a_detached_owned_helper_on_both_project_networks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -107,6 +127,16 @@ class ContainerUpdateLaunchTests(unittest.TestCase):
 
 class ContainerUpdateRollbackTests(unittest.TestCase):
     def test_failed_base_recreation_restores_the_original_compose(self):
+        attempts = []
+
+        def compose_up_stub(_compose, wait):
+            # The first start (new release) fails; the rollback start waits like the real one.
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise mdd_container_update.mdd_update.UpdateError("new Control unhealthy")
+            wait("hardware")
+            wait("egress")
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "update").mkdir()
@@ -149,8 +179,7 @@ class ContainerUpdateRollbackTests(unittest.TestCase):
                     patch("control.app.operations.create_local_backup",
                           return_value={"name": "backup.tar.gz"}), \
                     patch.object(mdd_container_update, "compose_up",
-                                 side_effect=[mdd_container_update.mdd_update.UpdateError(
-                                     "new Control unhealthy"), None]) as compose_up, \
+                                 side_effect=compose_up_stub) as compose_up, \
                     patch.object(mdd_container_update, "wait_container") as wait:
                 with self.assertRaises(mdd_container_update.mdd_update.UpdateError):
                     mdd_container_update.perform(
@@ -159,6 +188,8 @@ class ContainerUpdateRollbackTests(unittest.TestCase):
             self.assertEqual((root / "docker-compose.yml").read_text(), original)
             self.assertEqual(compose_up.call_count, 2)
             self.assertEqual(wait.call_count, len(mdd_container_update.BASE_COMPONENTS))
+            self.assertEqual([call.args[1] for call in wait.call_args_list],
+                             [f"mdd-sim-gateway-{c}" for c in ("hardware", "egress", "control")])
             failed = json.loads((root / "orchestrator/update-status.json").read_text())
             self.assertEqual(failed["state"], "failed")
             self.assertTrue(failed["rollback_succeeded"])
