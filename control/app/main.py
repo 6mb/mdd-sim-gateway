@@ -4113,6 +4113,10 @@ async def _unified_devices() -> list[dict]:
             hardware_record = device_state.hardware().get(device_id) or hardware_record
         else:
             hardware_imei = cfg.normalize_imei(identity.get("imei", ""))
+        if is_draft and len(hardware_imei) != 15:
+            vowifi.update(
+                available=False,
+                reason="Set a 15-digit IMEI in Hardware; the line will then start automatically")
         masked_imei = _masked_identifier(hardware_imei)
         bridge_active = bool(actual_state.get("vowifi_bridge_active"))
         logical_channels = (None if is_native_reader else
@@ -4223,26 +4227,46 @@ async def api_device_hardware(device_id: str, body: dict):
         "stable_path": device.get("stable_path") or "", "imei": imei})
 
     # A running line renders the device identity inside its container. Apply a hardware
-    # change immediately to the SIM currently inserted in this reader.
+    # change immediately to the SIM currently inserted in this reader. A new reader line is
+    # deliberately a stopped draft until its hardware IMEI exists; saving that last missing
+    # fact must also promote and start it, without requiring a second Save on the SIM tab.
     iid = str(device.get("instance_id") or "")
     applied = False
+    started = False
     if iid and imei:
         inst = cfg.get_instance(iid) or {}
-        previous_imeisv = str(inst.get("imeisv") or "")
-        svn = (previous_imeisv[-2:] if len(previous_imeisv) == 16
-               and previous_imeisv[-2:].isdigit() else _random_svn())
-        inst = cfg.upsert_instance({"id": iid, "imei": imei,
-                                    "imei_source_device_id": device_id,
-                                    "imeisv": cfg.imeisv_from_imei(imei, svn=svn)})
-        if await asyncio.to_thread(engine.is_running, iid):
+        cards = hub.cards_list()
+        card_info = next((item for item in cards if item.get("present") and (
+            str(item.get("hardware_id") or "") == device_id
+            or (inst.get("iccid") and str(item.get("iccid") or "")
+                == str(inst.get("iccid") or "")))), None)
+        if inst.get("provisioning_state") == "draft" and card_info:
+            inst = await asyncio.to_thread(_auto_promote_card_draft, inst, card_info, cards)
+        else:
+            previous_imeisv = str(inst.get("imeisv") or "")
+            svn = (previous_imeisv[-2:] if len(previous_imeisv) == 16
+                   and previous_imeisv[-2:].isdigit() else _random_svn())
+            inst = cfg.upsert_instance({"id": iid, "imei": imei,
+                                        "imei_source_device_id": device_id,
+                                        "imeisv": cfg.imeisv_from_imei(imei, svn=svn)})
+        running = await asyncio.to_thread(engine.is_running, iid)
+        if running:
             await hub.drop_ami(iid)
             await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
                                     dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
             hub.reset_health(iid, "configuration_restart")
             applied = True
+        elif inst.get("provisioning_state") != "draft":
+            allowed, _reason = _line_auto_start_allowed(inst)
+            if allowed:
+                await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
+                                        dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
+                hub.reset_health(iid, "hardware_identity_completed")
+                applied = True
+                started = True
     await hub.broadcast({"type": "hardware", "device": device_id})
     return {"ok": True, "imei_masked": _masked_identifier(record.get("imei")),
-            "applied": applied}
+            "applied": applied, "started": started}
 
 
 def _remove_device_from_document(path: str, device_id: str, mapping_key: str) -> None:

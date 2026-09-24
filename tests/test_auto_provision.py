@@ -247,6 +247,35 @@ class HotplugDraftPromotionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("2", main.hub.hotplug_starts)
 
 
+class ReaderImeiCompletionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_saving_last_missing_reader_imei_promotes_and_starts_draft(self):
+        device = {"id": "reader-1", "device_type": "reader", "instance_id": "2",
+                  "name": "USB reader", "stable_path": "1-2"}
+        draft = {"id": "2", "iccid": "test-card", "provisioning_state": "draft",
+                 "enabled": False}
+        card = {"present": True, "iccid": "test-card", "hardware_id": "reader-1"}
+        ready = {**draft, "provisioning_state": "ready", "enabled": True,
+                 "imei": "490154203237518"}
+
+        with patch.object(main, "_unified_devices", new=AsyncMock(return_value=[device])), \
+                patch.object(main.device_state, "set_hardware", return_value={
+                    "imei": "490154203237518"}), \
+                patch.object(main.cfg, "get_instance", return_value=draft), \
+                patch.object(main.hub, "cards_list", return_value=[card]), \
+                patch.object(main, "_auto_promote_card_draft", return_value=ready) as promote, \
+                patch.object(main.engine, "is_running", return_value=False), \
+                patch.object(main, "_line_auto_start_allowed", return_value=(True, "")), \
+                patch.object(main, "_start_engine_checked") as start, \
+                patch.object(main.hub, "broadcast", new=AsyncMock()):
+            result = await main.api_device_hardware(
+                "reader-1", {"imei": "490154203237518"})
+
+        promote.assert_called_once_with(draft, card, [card])
+        start.assert_called_once()
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["started"])
+
+
 class ImsIdentityLearningTests(unittest.IsolatedAsyncioTestCase):
     def test_modemmanager_number_requires_ims_confirmation(self):
         self.assertTrue(main._needs_ims_msisdn_learning({
