@@ -421,6 +421,7 @@ const zh = {
   'This IMEI belongs to the physical reader. Any SIM inserted here uses it automatically.': '此 IMEI 属于这台物理读卡器，插入其中的任意 SIM 都会自动使用它。',
   'The IMEI is inherited from this device’s Hardware settings.': 'IMEI 已从当前设备的“硬件”设置自动继承。',
   'Set a 15-digit IMEI on the Hardware tab before starting VoWiFi.': '启动 VoWiFi 前，请先在“硬件”页设置 15 位 IMEI。',
+  'Set a 15-digit IMEI in Hardware; the line will then start automatically': '请在“硬件”页设置 15 位 IMEI，设置后线路会自动启动',
   'Device name': '设备名称', 'Smart-card reader': '智能读卡器', 'Cellular modem': '蜂窝通信模块',
   'Firmware version': '固件版本', 'Hardware did not report': '硬件未上报',
   'The device name identifies this hardware in the interface. Model and firmware appear only when the hardware reports them.': '设备名称是界面中的硬件标识；型号和固件版本仅在硬件主动上报时显示。',
