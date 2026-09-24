@@ -2,6 +2,25 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc4] - 2026-09-24
+
+Fourth release candidate. Updating rc3 -> rc4 from the web console is the first container
+update performed entirely by released code, and the first chance to run the whole-stack
+rollback drill on hardware. The automatic update channel stays on 1.9.5.
+
+### Changed
+
+- The README presents both deployment methods up front — host install and full-container
+  deployment on a NAS — with a comparison and step-by-step instructions for the container
+  path. The capability table no longer implies that every deployment uses a per-country TUN.
+- The container deployment guide covers moving rc1/rc2 by editing image tags, the rollback
+  drill, removing Engine containers before uninstalling, and two DSM startup messages.
+
+### Fixed
+
+- On a host install, the orchestrator skipped the first cellular dial during the first 45
+  seconds of uptime, because "never attempted" was stored as monotonic time zero.
+
 ## [1.12.0-rc3] - 2026-09-24
 
 Third release candidate. rc1 and rc2 cannot update themselves: the container update
