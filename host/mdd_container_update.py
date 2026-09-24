@@ -189,10 +189,12 @@ def docker_root_free_bytes(client) -> int:
     if not root.startswith("/"):
         raise mdd_update.UpdateError("Docker did not report an absolute image-store path")
     current = client.containers.get(socket.gethostname())
+    # The Control image's ENTRYPOINT is `python run.py`, so a bare command would be
+    # appended to it and start the whole control plane instead of this one-liner.
     output = client.containers.run(
         current.image.id,
-        ["python", "-c",
-         "import os; s=os.statvfs('/docker-root'); print(s.f_bavail*s.f_frsize)"],
+        ["import os; s=os.statvfs('/docker-root'); print(s.f_bavail*s.f_frsize)"],
+        entrypoint=["python", "-c"],
         remove=True, network_disabled=True, read_only=True, cap_drop=["ALL"],
         volumes={root: {"bind": "/docker-root", "mode": "ro"}},
     )
@@ -378,9 +380,12 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
                 rollback_ok = True
             except Exception as rollback_exc:  # preserve both causes in the private status
                 rollback_error = str(rollback_exc)[:1000]
+        # Before the Compose switch nothing was changed, so there is no rollback to report;
+        # "rollback_succeeded: false" there read as if the stack had been left broken.
+        rollback = ({"rollback_succeeded": rollback_ok, "rollback_error": rollback_error}
+                    if switched else {})
         status.publish("failed", "rollback" if switched else status.phase,
-                       error=str(exc)[:2000], rollback_succeeded=rollback_ok,
-                       rollback_error=rollback_error)
+                       error=str(exc)[:2000], **rollback)
         raise
     finally:
         if client is not None:

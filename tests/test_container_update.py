@@ -69,6 +69,27 @@ class ContainerComposeOrderTests(unittest.TestCase):
         self.assertTrue(all("--no-deps" in command for command in commands))
 
 
+class DockerRootSpaceTests(unittest.TestCase):
+    def test_the_probe_overrides_the_control_entrypoint(self):
+        """rc1 and rc2 passed the probe as a command only. The Control image's ENTRYPOINT
+        is `python run.py`, so the probe started the whole control plane in a container
+        without /data and every container update failed at its first step."""
+        client = Mock()
+        client.info.return_value = {"DockerRootDir": "/volume1/@docker"}
+        client.containers.get.return_value.image.id = "sha256:control"
+        client.containers.run.return_value = b"12345\n"
+
+        self.assertEqual(mdd_container_update.docker_root_free_bytes(client), 12345)
+
+        kwargs = client.containers.run.call_args.kwargs
+        self.assertEqual(kwargs["entrypoint"], ["python", "-c"])
+        command = client.containers.run.call_args.args[1]
+        self.assertEqual(len(command), 1)
+        self.assertIn("statvfs('/docker-root')", command[0])
+        self.assertEqual(kwargs["volumes"], {"/volume1/@docker": {
+            "bind": "/docker-root", "mode": "ro"}})
+
+
 class ContainerUpdateLaunchTests(unittest.TestCase):
     def test_control_launches_a_detached_owned_helper_on_both_project_networks(self):
         with tempfile.TemporaryDirectory() as tmp:
