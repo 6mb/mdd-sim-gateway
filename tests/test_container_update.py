@@ -278,6 +278,69 @@ class ContainerUpdateRollbackTests(unittest.TestCase):
             self.assertEqual(failed["state"], "failed")
             self.assertTrue(failed["rollback_succeeded"])
 
+    def test_the_rollback_drill_fails_once_after_the_switch_and_restores_everything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "update").mkdir()
+            (root / "update/fail-after-switch").touch()
+            original = """services:
+  control:
+    image: ghcr.io/mddidd/mdd-sim-gateway-control:v1.0.0
+    environment:
+      MDD_ENGINE_IMAGE: ghcr.io/mddidd/mdd-sim-gateway-engine:v1.0.0
+  hardware:
+    image: ghcr.io/mddidd/mdd-sim-gateway-hardware:v1.0.0
+  egress:
+    image: ghcr.io/mddidd/mdd-sim-gateway-egress:v1.0.0
+"""
+            (root / "docker-compose.yml").write_text(original)
+            network = root / "update/network.json"
+            network.write_text(json.dumps({"routes": [{"route": "direct", "proxy_url": ""}]}))
+            base = {name: SimpleNamespace(image=SimpleNamespace(id=f"sha256:old-{name}"))
+                    for name in mdd_container_update.BASE_COMPONENTS}
+            client = Mock()
+            client.containers.get.side_effect = lambda name: base[name.removeprefix(
+                "mdd-sim-gateway-")]
+            client.containers.list.return_value = []
+            status = mdd_container_update.mdd_update.Status(
+                root / "orchestrator/update-status.json", "2.0.0")
+            composes = []
+
+            def fetch(_url, destination, *_args, **_kwargs):
+                destination.write_bytes(b"verified")
+                return 0
+
+            with patch.object(mdd_container_update.docker, "from_env", return_value=client), \
+                    patch.object(mdd_container_update.mdd_update, "fetch_release_asset",
+                                 side_effect=fetch), \
+                    patch.object(mdd_container_update.mdd_update, "verify_release_file"), \
+                    patch.object(mdd_container_update, "docker_root_free_bytes",
+                                 return_value=10 * 1024 ** 3), \
+                    patch.object(mdd_container_update, "run"), \
+                    patch.object(mdd_container_update, "verify_and_tag_image",
+                                 side_effect=lambda _c, component, *_a: f"sha256:new-{component}"), \
+                    patch("control.app.operations.create_local_backup",
+                          return_value={"name": "backup.tar.gz"}), \
+                    patch.object(mdd_container_update, "compose_up",
+                                 side_effect=lambda compose, _wait: composes.append(
+                                     compose.read_text())), \
+                    patch.object(mdd_container_update, "roll_engines") as rolled, \
+                    patch.object(mdd_container_update, "wait_container"):
+                with self.assertRaisesRegex(mdd_container_update.mdd_update.UpdateError,
+                                            "rollback drill"):
+                    mdd_container_update.perform(
+                        root, "2.0.0", "MddIdd/mdd-sim-gateway", network, status)
+
+            rolled.assert_called_once()
+            self.assertIn("control:v2.0.0", composes[0])     # the new release really ran
+            self.assertEqual(composes[1], original)           # then the old one came back
+            self.assertEqual((root / "docker-compose.yml").read_text(), original)
+            self.assertFalse((root / "update/fail-after-switch").exists())
+            self.assertFalse((root / "update/installed-images.json").exists())
+            failed = json.loads((root / "orchestrator/update-status.json").read_text())
+            self.assertEqual(failed["state"], "failed")
+            self.assertTrue(failed["rollback_succeeded"])
+
     def test_rollout_recreates_only_running_engines_explicitly(self):
         running = Mock(name="running")
         running.name = "mdd-sim-gateway-engine-line-1"

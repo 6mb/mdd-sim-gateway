@@ -367,6 +367,15 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
         compose_up(compose, wait_new)
         wait_new("control")
         roll_engines(client, image_ids["engine"], status)
+        # Release validation: `touch <data>/update/fail-after-switch` makes the next update
+        # fail once every container already runs the new release, so the whole-stack
+        # rollback can be exercised on real hardware. It must live in the helper that
+        # performs the update, i.e. in the release being updated *from*. One-shot: the
+        # marker is consumed when it fires, so a forgotten file cannot block later updates.
+        drill = project / "update" / "fail-after-switch"
+        if drill.exists():
+            drill.unlink(missing_ok=True)
+            raise mdd_update.UpdateError("rollback drill requested by update/fail-after-switch")
         mdd_update.atomic_json(project / "update" / "installed-images.json", {
             "version": version, "architecture": arch, "installed_at": int(time.time()),
             "images": verified_images})
