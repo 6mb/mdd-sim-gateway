@@ -175,10 +175,27 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     ? (device.provisioning?.missing || []) : []
   const needsImei = setupMissing.includes('imei')
   const needsSim = setupMissing.some(key => key !== 'imei')
+  // IMSI, MCC/MNC and SMSC come from the card itself. A reader can miss them on the read at
+  // insertion and return them on the next, so offer that before asking anyone to type them.
+  const needsCardRead = setupMissing.some(key => ['imsi', 'mcc_mnc', 'smsc'].includes(key))
+  const [rereading, setRereading] = useState(false)
+  const rereadSim = async () => {
+    setRereading(true)
+    try {
+      const result = await api.rereadDeviceSim(device.id)
+      const cardFields = (result.missing || []).filter(name => ['IMSI', 'MCC/MNC', 'SMSC'].includes(name))
+      showToast?.(result.completing ? t('SIM read again; the line is being completed and started')
+        : cardFields.length ? t('The SIM still did not report: {fields}. Enter them on the SIM tab.', { fields: cardFields.join(t('list separator')) })
+        : t('SIM read again'))
+      await onChanged?.()
+    } catch (e) { showToast?.(`${t('Error')}: ${e.message}`) }
+    finally { setRereading(false) }
+  }
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
     <div><b>{title}</b><div className="u-cap-detail">{detail}</div>
       {!!setupMissing.length && <div className="u-cap-setup">
         <span>{t('Missing information')}: {setupMissing.map(key => t(`setup.field.${key}`)).join(t('list separator'))}</span>
+        {needsCardRead && <button className="btn btn-ghost" disabled={rereading} onClick={rereadSim}>{t(rereading ? 'Reading…' : 'Read SIM again')}</button>}
         {onSetup && needsImei && <button className="btn btn-ghost" onClick={() => onSetup('hardware')}>{t('Set IMEI')}</button>}
         {onSetup && needsSim && <button className="btn btn-ghost" onClick={() => onSetup('sim')}>{t('Complete SIM details')}</button>}
       </div>}

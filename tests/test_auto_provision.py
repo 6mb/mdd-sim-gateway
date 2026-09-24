@@ -320,6 +320,95 @@ class DraftSetupGuidanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["missing"], ["SMSC"])
 
 
+class LateCardDataTests(unittest.IsolatedAsyncioTestCase):
+    """On a DS1621+ an Alcor AK9563 read no SMSC at insertion; a later read returned it.
+    Nothing read the card again, and the SIM tab's "Read SIM card" only filled the form, so
+    the line stayed a draft until the operator also pressed Save."""
+
+    def card(self, **overrides):
+        values = {"iccid": "8944000000000000001", "imsi": "234330000000000", "mcc": "234",
+                  "mnc": "33", "mnc_len": 2, "smsc": "+447700900000", "pin_enabled": False,
+                  "pin_tries": 3}
+        values.update(overrides)
+        return SimpleNamespace(**values, dict=lambda: dict(values))
+
+    def entry(self, **overrides):
+        values = {"name": "Alcor Link AK9563 00 00", "index": 4, "present": True,
+                  "iccid": "8944000000000000001", "imsi": "234330000000000", "mcc": "234",
+                  "mnc": "33", "smsc": None, "matched": "2", "carrier_identity": {}}
+        values.update(overrides)
+        return values
+
+    def test_a_later_read_only_fills_gaps(self):
+        entry = self.entry(imsi="234330000000000")
+        self.assertTrue(main._merge_card_read(entry, self.card(imsi="999990000000000")))
+        self.assertEqual(entry["smsc"], "+447700900000")
+        self.assertEqual(entry["imsi"], "234330000000000")   # never replaced
+
+    def test_a_read_of_another_card_is_ignored(self):
+        entry = self.entry()
+        self.assertFalse(main._merge_card_read(entry, self.card(iccid="8944000000000000999")))
+        self.assertIsNone(entry["smsc"])
+
+    async def test_the_background_retry_completes_the_draft(self):
+        entry = self.entry()
+        draft = {"id": "2", "provisioning_state": "draft", "iccid": entry["iccid"]}
+        main.hub.cards[entry["name"]] = entry
+        try:
+            with patch.object(main, "_CARD_REREAD_DELAYS", (0,)), \
+                    patch.object(main.cfg, "get_instance", return_value=draft), \
+                    patch.object(main, "_hardware_imei_for_card",
+                                 return_value=("490154203237518", "reader-1", "reader")), \
+                    patch.object(main.sim, "read_card", return_value=self.card()), \
+                    patch.object(main, "_auto_start_hotplugged_line",
+                                 new=AsyncMock()) as start:
+                await main._complete_draft_from_card(entry["name"])
+                await asyncio.sleep(0)
+            start.assert_awaited_once_with("2")
+            self.assertEqual(main.hub.cards[entry["name"]]["smsc"], "+447700900000")
+        finally:
+            main.hub.cards.pop(entry["name"], None)
+
+    async def test_read_sim_card_on_the_sim_tab_now_finishes_the_draft(self):
+        entry = self.entry()
+        draft = {"id": "2", "provisioning_state": "draft", "iccid": entry["iccid"]}
+        main.hub.cards[entry["name"]] = entry
+        try:
+            with patch.object(main.sim, "list_readers",
+                              return_value=["r0", "r1", "r2", "r3", entry["name"]]), \
+                    patch.object(main.sim, "read_card", return_value=self.card()), \
+                    patch.object(main.cfg, "get_instance", return_value=draft), \
+                    patch.object(main, "_hardware_imei_for_card",
+                                 return_value=("490154203237518", "reader-1", "reader")), \
+                    patch.object(main, "_auto_start_hotplugged_line",
+                                 new=AsyncMock()) as start:
+                result = await main.api_sim_detect(4)
+                await asyncio.sleep(0)
+            self.assertEqual(result["smsc"], "+447700900000")
+            start.assert_awaited_once_with("2")
+        finally:
+            main.hub.cards.pop(entry["name"], None)
+
+    async def test_the_device_button_reports_what_the_card_still_lacks(self):
+        entry = self.entry()
+        draft = {"id": "2", "provisioning_state": "draft", "iccid": entry["iccid"]}
+        main.hub.cards[entry["name"]] = entry
+        try:
+            with patch.object(main, "_device_for_card", return_value=("reader-1", "reader")), \
+                    patch.object(main.sim, "read_card", return_value=self.card(smsc="")), \
+                    patch.object(main.cfg, "get_instance", return_value=draft), \
+                    patch.object(main, "_hardware_imei_for_card",
+                                 return_value=("490154203237518", "reader-1", "reader")), \
+                    patch.object(main.hub, "broadcast", new=AsyncMock()), \
+                    patch.object(main, "_auto_start_hotplugged_line", new=AsyncMock()) as start:
+                result = await main.api_device_sim_reread("reader-1")
+            self.assertEqual(result["missing"], ["SMSC"])
+            self.assertFalse(result["completing"])
+            start.assert_not_awaited()
+        finally:
+            main.hub.cards.pop(entry["name"], None)
+
+
 class ImsIdentityLearningTests(unittest.IsolatedAsyncioTestCase):
     def test_modemmanager_number_requires_ims_confirmation(self):
         self.assertTrue(main._needs_ims_msisdn_learning({
