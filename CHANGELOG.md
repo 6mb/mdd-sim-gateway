@@ -2,6 +2,30 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc5] - 2026-09-25
+
+Fifth release candidate. The rc3 -> rc4 rollback drill passed on a DS1621+: every container
+switched to rc4, the drill failed the update on purpose, and the whole stack returned to rc3
+with all lines registered. This release fixes what that round and a fresh install from the
+guide turned up. The automatic update channel stays on 1.9.5.
+
+### Fixed
+
+- A fresh container install into a folder created in File Station failed: the folder belongs
+  to the operator's DSM account with mode 0700, and Control and Egress, which drop every
+  capability, could not enter it. Control and Egress now keep the minimum needed. Existing
+  installs keep their previous capabilities; their folders already work.
+- The web console reported a failed update as successful. After the new Control came up it
+  showed the new version, although the update could still roll back. A banner now shows the
+  current step, or that a rollback is running, and the outcome is reported when it lands.
+- A draft line said it only needed an IMEI while it was really waiting for the SMSC. The
+  device page now lists exactly the fields that block the line, with buttons for the Hardware
+  tab, the SIM tab, or reading the SIM again.
+- A SIM whose first read missed a field (an Alcor AK9563 returned no SMSC at insertion) stayed
+  a draft until the operator pressed Save. The card is re-read on a widening schedule, and
+  "Read SIM card" on the SIM tab now completes the draft by itself.
+- The draft line's IMEI hint was not translated into Chinese.
+
 ## [1.12.0-rc4] - 2026-09-24
 
 Fourth release candidate. Updating rc3 -> rc4 from the web console is the first container
