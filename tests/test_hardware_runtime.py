@@ -317,6 +317,34 @@ class HardwareRuntimeTests(unittest.TestCase):
             "mmcli", "-m", "/org/freedesktop/ModemManager1/Modem/0", "--reset")
         app.terminate_qmi_proxy.assert_called_once_with()
 
+    def test_qmi_recovery_is_not_suppressed_during_the_first_minutes_of_uptime(self):
+        """The rate limit must not treat "never reset" as "reset at monotonic zero".
+
+        A freshly booted host reports a small monotonic clock, and a restarted Hardware
+        container is exactly when a stale QMI session needs the reset.
+        """
+        app = HardwareSupervisor()
+        app.assert_networkmanager_isolated = Mock()
+        app.desired_devices = Mock(return_value={
+            "modem-a": {"cellular_enabled": True, "vowifi_enabled": True,
+                        "flight_mode": False}})
+        app.modem_snapshot = Mock(return_value={
+            "available": True, "mm_object": "/org/freedesktop/ModemManager1/Modem/0",
+            "network_interface": "", "registration": "roaming", "data_active": False})
+        app.command = Mock(return_value=Mock(returncode=0, stdout=""))
+        app.terminate_qmi_proxy = Mock()
+        fake_paths = [Mock()]
+        fake_paths[0].exists.return_value = True
+
+        with patch("runtime.hardware.Path.glob", return_value=fake_paths), \
+                patch("runtime.hardware.time.monotonic", return_value=5.0):
+            app.reconcile_cellular([{"id": "modem-a", "tty": "/dev/ttyUSB2"}],
+                                   ["/org/freedesktop/ModemManager1/Modem/0"])
+
+        app.command.assert_called_once_with(
+            "mmcli", "-m", "/org/freedesktop/ModemManager1/Modem/0", "--reset")
+        app.terminate_qmi_proxy.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
