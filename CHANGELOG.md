@@ -2,6 +2,35 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc3] - 2026-09-24
+
+Third release candidate. rc1 and rc2 cannot update themselves: the container update
+helper is launched from the running Control image, and theirs is broken. Move them to
+rc3 by changing the four image tags in the Compose file. The automatic update channel
+stays on 1.9.5.
+
+### Fixed
+
+- The container update failed at its first step with a `run.py` traceback. The disk-space
+  probe did not override the Control image's entrypoint and started a second control
+  plane. On Synology its output was then lost as well, because docker-py returns a
+  container's output only for the json-file and journald log drivers.
+- The update helper ran Compose with the Control image's environment, whose
+  `MDD_HTTP_PORT=8443` is Control's in-container port. The new Control tried to publish
+  host port 8443, so on a host where that port is taken the update and its rollback both
+  failed; elsewhere the web console would have moved. Compose now sees only what the
+  Docker CLI needs.
+- Container updates ignored the selected download route and went direct while reporting
+  "direct". Control now resolves country exits and proxy-library entries to the Egress
+  SOCKS listener, and refuses a route that is not ready instead of falling back.
+- A failure before any change no longer reports `rollback_succeeded: false`.
+
+### Added
+
+- A one-shot rollback drill: `update/fail-after-switch` in the data directory makes the
+  next update fail after every container runs the new release, so the whole-stack
+  rollback can be validated on hardware. The marker is removed when it fires.
+
 ## [1.12.0-rc2] - 2026-09-24
 
 Second release candidate. Its purpose is the first real one-click update of a container
