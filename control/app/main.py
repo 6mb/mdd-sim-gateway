@@ -1843,7 +1843,11 @@ async def host_health_poller():
     previous_alerts = None
     while True:
         try:
-            snapshot = await asyncio.to_thread(sysinfo.collect, cfg.DATA_DIR)
+            # Docker df walks every image-layer xattr on DSM and can occupy dockerd for minutes.
+            # The minute health sampler needs host health, not an inventory of reclaimable
+            # layers; explicit cleanup actions refresh that inventory after the operator asks.
+            snapshot = await asyncio.to_thread(
+                sysinfo.collect, cfg.DATA_DIR, include_docker_storage=False)
             # Rate-based conditions need the previous sample; the first pass reports none.
             alerts = sysinfo.alerts(snapshot, hub.host_snapshot or None)
             alerts = _sustained_alerts(alerts, streaks)
@@ -4811,7 +4815,8 @@ def api_system_status():
     settings = cfg.get_settings()
     # Served from the poller's sample: collecting here would shell out to vcgencmd/dmesg on
     # every page load of an already power-constrained box.
-    host = hub.host_snapshot or sysinfo.collect(cfg.DATA_DIR)
+    host = hub.host_snapshot or sysinfo.collect(
+        cfg.DATA_DIR, include_docker_storage=False)
     return {
         "system_name": "MDD Sim Gateway",
         "host": host,
