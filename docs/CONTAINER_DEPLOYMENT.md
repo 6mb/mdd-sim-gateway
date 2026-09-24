@@ -180,6 +180,17 @@ Control、Hardware 和 Egress 的命名卷保存运行时 socket 或可重建状
 Docker socket，不使用宿主 PID、网络或特权模式。更新期间不要关闭 NAS；完成后 WebUI 会要求
 重新登录。
 
+执行更新的是**当前运行版本**的助手，所以助手自身的修复要到下一次更新才生效。v1.12.0-rc1 和
+rc2 的助手有缺陷，无法从网页更新：请在 Container Manager 中把项目 YAML 的四处镜像标签改为目标
+版本后重新启动项目，其他内容保持不变。rc3 及以后可以正常使用一键更新。
+
+助手报告成功只代表基础容器健康、Engine 已按新镜像重建。如果某条线路在更新期间被健康策略暂时
+停止，Control 会在稍后用新镜像自行恢复它，这时线路可能晚一两分钟才重新注册。
+
+**回滚演练**（用于发布验收）：执行 `sudo touch <数据目录>/update/fail-after-switch` 后发起更新，
+助手会在所有容器都换成新版本、Engine 也重建完成之后故意失败，并把整组恢复到更新前的版本。标记在
+触发时自动删除，下一次更新即为正常更新。演练会让线路短暂中断两次，不要在业务时段进行。
+
 无法使用 WebUI 时可按相同边界手工恢复：
 
 1. 下载目标 Release 的新 Compose YAML 和本机架构镜像资产，核对 `SHA256SUMS`；
@@ -199,6 +210,14 @@ Docker socket，不使用宿主 PID、网络或特权模式。更新期间不要
 - 完全删除：先导出所需备份，再删除项目、MDD 命名卷和数据目录；
 - 手工安装的内核驱动独立于 Compose。卸载应用项目不会移除它们，需要单独卸载。
 
+Engine 容器由 Control 按线路动态创建，不属于 Compose 项目，删除项目不会带走它们，而且它们
+仍连接着 `mdd-sim-gateway-engine` 网络，会让网络删除报 “Resource is still in use”。通过 SSH
+卸载时先删除 Engine，再删除项目：
+
+```sh
+sudo docker ps -aq --filter "label=io.mdd-sim-gateway.component=engine" | xargs -r sudo docker rm -f
+```
+
 不要手工删除仍被其他容器使用的 Docker 网络、卷或镜像。MDD 只管理带
 `io.mdd-sim-gateway.managed=true` 标签的资源。
 
@@ -209,6 +228,17 @@ Docker socket，不使用宿主 PID、网络或特权模式。更新期间不要
 先确认 USB 设备已被宿主枚举，再按第 2 节的命令检查所需设备节点是否齐全；节点缺失即表示
 宿主缺少对应内核驱动。`docker logs mdd-sim-gateway-hardware` 会给出主管进程的失败原因。
 系统升级后必须按完整 build 和内核重新匹配驱动，不能强制加载旧驱动。
+
+### 重建项目后提示 “dependency failed to start: container mdd-sim-gateway-hardware is unhealthy”
+
+新的 Hardware 会继承模块里残留的 QMI 会话，需要先重置模块并等待重新枚举，约一到两分钟。v1.12.0-rc2
+起健康检查宽限期为 180 秒；更早的镜像宽限期较短，Control 会停在“已创建”。等 Hardware 变为健康后，
+在项目页点击“启动”即可，不要点击“构建”，后者会再次重建 Hardware。
+
+### 启动日志出现 “PIDs limit discarded”
+
+DSM 7.4 的 4.4 内核不支持 pids cgroup，Docker 会忽略 Compose 中的 `pids_limit` 并给出这条警告。
+不影响运行，内存限制仍然有效。
 
 ### 读卡器没有出现
 
