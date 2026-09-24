@@ -49,6 +49,53 @@ services:
                 mdd_container_update.find_compose(root)
 
 
+class ContainerDownloadRouteTests(unittest.TestCase):
+    """The container helper gets URLs, never bare selections it would treat as direct."""
+
+    settings = {"proxy": {"exits": {"us": {"enabled": True, "profile_id": "sub"}},
+                          "profiles": {"sub": {"type": "subscription", "name": "Sub"},
+                                       "hk": {"type": "socks5", "name": "HK",
+                                              "server": "hk.example", "port": 1080}}}}
+    ready = {"exits": {"us": {"ready": True, "transport": "socks5",
+                              "proxy_host": "mdd-egress", "proxy_port": 22538}}}
+
+    def resolve(self, selections, state=None, current=True):
+        from control.app import egress, egress_contract
+        with patch.object(operations.cfg, "get_settings", return_value=self.settings), \
+                patch.object(egress, "status", return_value=state or self.ready), \
+                patch.object(egress_contract, "current_status", return_value=current):
+            return operations._container_download_routes(selections)
+
+    def test_a_country_exit_becomes_its_internal_socks_listener(self):
+        self.assertEqual(self.resolve([{"proxy_mode": "country", "proxy_country": "us"}]), [
+            {"proxy_url": "socks5h://mdd-egress:22538", "route": "country",
+             "route_name": "US"}])
+
+    def test_a_subscription_profile_goes_through_the_exit_that_uses_it(self):
+        routes = self.resolve([{"proxy_mode": "library", "proxy_profile_id": "sub"}])
+        self.assertEqual(routes[0]["proxy_url"], "socks5h://mdd-egress:22538")
+        self.assertEqual(routes[0]["route"], "library")
+
+    def test_a_socks_profile_is_dialled_directly(self):
+        routes = self.resolve([{"proxy_mode": "library", "proxy_profile_id": "hk"}])
+        self.assertEqual(routes[0]["proxy_url"], "socks5h://hk.example:1080")
+
+    def test_an_exit_that_is_not_ready_is_refused_rather_than_made_direct(self):
+        with self.assertRaisesRegex(ValueError, "US is not ready"):
+            self.resolve([{"proxy_mode": "country", "proxy_country": "us"}],
+                         state={"exits": {"us": {"ready": False}}})
+
+    def test_stale_egress_status_counts_as_not_ready(self):
+        with self.assertRaisesRegex(ValueError, "not ready"):
+            self.resolve([{"proxy_mode": "country", "proxy_country": "us"}], current=False)
+
+    def test_auto_keeps_only_the_candidates_that_resolve(self):
+        routes = self.resolve([{"proxy_mode": "direct"},
+                               {"proxy_mode": "library", "proxy_profile_id": "sub"}],
+                              state={"exits": {}})
+        self.assertEqual([route["route"] for route in routes], ["direct"])
+
+
 class ContainerComposeOrderTests(unittest.TestCase):
     def test_control_starts_only_after_our_own_wait_for_hardware(self):
         """Compose's service_healthy gate gave up on the first unhealthy report, which a
@@ -69,6 +116,20 @@ class ContainerComposeOrderTests(unittest.TestCase):
         self.assertTrue(all("--no-deps" in command for command in commands))
 
 
+class ComposeEnvironmentTests(unittest.TestCase):
+    def test_the_control_image_environment_never_reaches_compose_interpolation(self):
+        """The Control image sets MDD_HTTP_PORT=8443 for its own listener; the Compose file
+        uses the same name for the host port. Inherited, it moved the published port."""
+        envs = []
+        leaked = {"PATH": "/usr/bin", "MDD_HTTP_PORT": "8443", "MDD_RTP_BASE": "10000",
+                  "MDD_DATA": "/data"}
+        with patch.dict(os.environ, leaked, clear=True), \
+                patch.object(mdd_container_update, "run",
+                             side_effect=lambda command, **kwargs: envs.append(kwargs["env"])):
+            mdd_container_update.compose_up(Path("/data/docker-compose.yml"), lambda _c: None)
+        self.assertEqual(envs, [{"PATH": "/usr/bin"}, {"PATH": "/usr/bin"}])
+
+
 class DockerRootSpaceTests(unittest.TestCase):
     def test_the_probe_overrides_the_control_entrypoint(self):
         """rc1 and rc2 passed the probe as a command only. The Control image's ENTRYPOINT
@@ -83,6 +144,8 @@ class DockerRootSpaceTests(unittest.TestCase):
 
         kwargs = client.containers.run.call_args.kwargs
         self.assertEqual(kwargs["entrypoint"], ["python", "-c"])
+        # DSM defaults to its `db` log driver, from which docker-py returns no output.
+        self.assertEqual(kwargs["log_config"]["type"], "json-file")
         command = client.containers.run.call_args.args[1]
         self.assertEqual(len(command), 1)
         self.assertIn("statvfs('/docker-root')", command[0])

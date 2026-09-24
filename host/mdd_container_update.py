@@ -105,10 +105,11 @@ def rewrite_compose(source: str, images: dict[str, str]) -> str:
     return "".join(output)
 
 
-def run(command: list[str], *, cwd: Path | None = None, timeout: int = 600) -> str:
+def run(command: list[str], *, cwd: Path | None = None, timeout: int = 600,
+        env: dict | None = None) -> str:
     completed = subprocess.run(command, cwd=str(cwd) if cwd else None, text=True,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               timeout=timeout)
+                               timeout=timeout, env=env)
     if completed.returncode:
         raise mdd_update.UpdateError(
             f"{' '.join(command[:3])} failed: {completed.stdout[-2000:].strip()}")
@@ -163,6 +164,21 @@ def wait_container(client, name: str, image_id: str, timeout: int = 180) -> None
     raise mdd_update.UpdateError(f"{name} did not become healthy ({last})")
 
 
+# Only what the Docker CLI itself needs. Compose interpolates ${VAR:-default} from its own
+# environment, and this helper runs in the Control image, whose ENV includes
+# MDD_HTTP_PORT=8443 — the port Control listens on *inside* its container. The Compose
+# file uses the same name for the *host* port, so an inherited environment published the
+# web console on host port 8443: on a NAS where that port belongs to another service the
+# update and its rollback both failed, and elsewhere the console would silently have moved.
+COMPOSE_ENVIRONMENT = ("PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONFIG",
+                       "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY")
+
+
+def compose_environment() -> dict:
+    """The environment an operator's own `docker compose up` would interpolate with."""
+    return {name: os.environ[name] for name in COMPOSE_ENVIRONMENT if name in os.environ}
+
+
 def compose_up(compose: Path, wait) -> None:
     """Recreate the base services in dependency order, waiting on this helper's clock.
 
@@ -177,10 +193,11 @@ def compose_up(compose: Path, wait) -> None:
     """
     command = ["docker", "compose", "-p", "mdd-sim-gateway", "-f", str(compose),
                "up", "-d", "--no-build", "--force-recreate", "--no-deps"]
-    run([*command, "hardware", "egress"], cwd=compose.parent, timeout=600)
+    environment = compose_environment()
+    run([*command, "hardware", "egress"], cwd=compose.parent, timeout=600, env=environment)
     wait("hardware")
     wait("egress")
-    run([*command, "control"], cwd=compose.parent, timeout=600)
+    run([*command, "control"], cwd=compose.parent, timeout=600, env=environment)
 
 
 def docker_root_free_bytes(client) -> int:
@@ -195,6 +212,10 @@ def docker_root_free_bytes(client) -> int:
         current.image.id,
         ["import os; s=os.statvfs('/docker-root'); print(s.f_bavail*s.f_frsize)"],
         entrypoint=["python", "-c"],
+        # docker-py returns a finished container's output only for the json-file and
+        # journald drivers and None otherwise. Synology's daemon defaults to its own `db`
+        # driver, so without this the measurement ran and was then lost.
+        log_config={"type": "json-file", "config": {}},
         remove=True, network_disabled=True, read_only=True, cap_drop=["ALL"],
         volumes={root: {"bind": "/docker-root", "mode": "ro"}},
     )
