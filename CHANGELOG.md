@@ -2,6 +2,33 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc2] - 2026-09-24
+
+Second release candidate. Its purpose is the first real one-click update of a container
+deployment (rc1 -> rc2) on hardware. The automatic update channel stays on 1.9.5.
+
+### Fixed
+
+- A container deployment could not start after Hardware was recreated. A new Hardware
+  container inherits the modem's stale QMI session and recovers it by resetting the modem,
+  which took longer than the image's 30-second health-check grace period; Compose then gave
+  up on Control, leaving it in `Created`. The grace period is now 180 seconds, and the update
+  helper starts Hardware and Egress, waits for them itself, and only then starts Control, so
+  an update and its rollback no longer depend on the image's health-check timing.
+- Hardware suppressed its stale-QMI recovery for the first five minutes of host uptime,
+  because "never reset" was stored as monotonic time zero.
+- Control now fetches the Engine image on first use when the deployment names a registry
+  image. Compose only pulls the three base services, so a fresh container install previously
+  came up with healthy base containers and every line failing on `ImageNotFound`. A locally
+  built tag is never looked up in a registry.
+
+### Changed
+
+- Hardware reads each modem once per reconcile pass instead of up to four times, and only
+  re-reads after a command actually changed the modem: 8 subprocesses per pass become 3 for a
+  single modem. `host-diagnostics.json` is written every 15 seconds instead of every pass.
+- Egress resolves its internal listener address once instead of once per country per pass.
+
 ## [1.12.0-rc1] - 2026-09-24
 
 Release candidate, published to exercise the container deployment's update and rollback
