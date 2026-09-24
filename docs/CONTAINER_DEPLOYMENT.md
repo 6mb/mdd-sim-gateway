@@ -97,10 +97,14 @@ sudo chmod 444 "$CMDIR/${UUID}.lock"
 描述成无中断的界面刷新。通过 DSM 界面新建项目时由 Container Manager 自动完成登记，不需要
 手工执行。
 
-不要套用普通 Compose 项目常见的 `chown -R 用户:users` 步骤。MDD 数据目录包含短信、证书、
-SIM 配置和通知凭据，必须保持 root 所有和 `0700`；Control/Egress 已移除绕过目录权限的能力，
-修改所有者会导致它们无法启动。YAML 的后续编辑应通过 Container Manager 项目界面或 root SSH
-完成。
+数据目录直接在 File Station 中新建即可，不需要修改所有者或权限。目录内的文件都由容器以 root
+身份创建，权限为 `0600`/`0700`，因此短信、证书、SIM 配置和通知凭据不会被 DSM 账号直接读取。
+不要套用普通 Compose 项目常见的 `chown -R 用户:users` 步骤：那会把这些文件交给该账号，可以通过
+File Station 或 SMB 读取。YAML 的后续编辑应通过 Container Manager 项目界面完成。
+
+v1.12.0-rc4 及更早的 Compose 文件缺少这项权限，在 File Station 新建的目录里 Control 和 Egress
+会以 `Operation not permitted` 或 `Permission denied` 退出。遇到时可执行一次
+`sudo chown root:root <数据目录>` 后重新启动项目，或改用新版 Compose 文件。
 
 首次拉取需要访问 `ghcr.io`。不能访问时，先从同一 Release 下载本机架构的四个离线镜像包，
 核对 `SHA256SUMS` 并在 Container Manager 导入；不得混用不同版本或不同架构的镜像。
