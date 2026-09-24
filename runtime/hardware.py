@@ -611,7 +611,11 @@ class HardwareSupervisor:
         if snapshot.get("registration") not in {"home", "roaming", "registered"}:
             return
         device_id = modem["id"]
-        if time.monotonic() - self.data_attempt_at.get(device_id, 0) < 45:
+        # `None` means "never attempted". Defaulting the timestamp to 0 instead would compare
+        # against a monotonic clock that starts near zero on a freshly booted host, so the
+        # first attempts would be suppressed for the first 45 seconds of uptime.
+        last_attempt = self.data_attempt_at.get(device_id)
+        if last_attempt is not None and time.monotonic() - last_attempt < 45:
             return
         self.data_attempt_at[device_id] = time.monotonic()
         primary = snapshot.get("primary_port") or snapshot.get("network_interface")
@@ -683,8 +687,13 @@ class HardwareSupervisor:
             qmi_present = any(path.exists() for path in Path("/sys/class/usbmisc").glob(
                 "cdc-wdm*"))
             net_present = any(path.exists() for path in Path("/sys/class/net").glob("wwan*"))
+            # Same reason as data_attempt_at: a 0 default is indistinguishable from a reset
+            # performed at monotonic zero, which suppressed this recovery for the first five
+            # minutes of host uptime — exactly when a restarted Hardware container is most
+            # likely to be holding a stale QMI session.
+            last_reset = self.qmi_reset_at.get(device_id)
             if (obj and qmi_present and net_present and not snapshot.get("network_interface")
-                    and time.monotonic() - self.qmi_reset_at.get(device_id, 0) >= 300):
+                    and (last_reset is None or time.monotonic() - last_reset >= 300)):
                 self.qmi_reset_at[device_id] = time.monotonic()
                 self.terminate_qmi_proxy()
                 self.command("mmcli", "-m", obj, "--reset")
