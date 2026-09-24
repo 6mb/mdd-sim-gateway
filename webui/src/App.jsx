@@ -114,6 +114,7 @@ export default function App() {
   const [loadErrors, setLoadErrors] = useState({})
   const [selected, setSelected] = useState(null); const [toast, setToast] = useState(null)
   const [selectedDeviceId, setSelectedDeviceId] = useState(null)
+  const [deviceTab, setDeviceTab] = useState(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'auto')
   const [systemMeta, setSystemMeta] = useState({ version: '', repository_url: '' })
   const [updateOpen, setUpdateOpen] = useState(false)
@@ -221,7 +222,7 @@ export default function App() {
   if (!authState) return <div className="auth-shell"><div className="auth-card"><h1>MDD Sim Gateway</h1><p>{t('Loading…')}</p></div></div>
   if (!authState.authenticated) return <AuthScreen configured={authState.configured} accountUsername={authState.username} t={t} onDone={result=>{setCsrf(result.csrf);setAuthState(s=>({...s,configured:true,authenticated:true,csrf:result.csrf}))}} />
   const sel=instances.find(i=>i.id===selected)
-  const common={devices,discovering,initialLoading,loadErrors,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,openUpdateDialog,setSystemMeta}
+  const common={devices,discovering,initialLoading,loadErrors,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,deviceTab,setDeviceTab,openUpdateDialog,setSystemMeta}
   const content={
     overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, calls:<Softphone {...common}/>,
     messages:<Messages {...common}/>, esim:<Esim {...common}/>, keepalive:<Keepalive {...common}/>,

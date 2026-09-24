@@ -276,6 +276,50 @@ class ReaderImeiCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["started"])
 
 
+class DraftSetupGuidanceTests(unittest.IsolatedAsyncioTestCase):
+    """Seen on a DS1621+: an EE SIM in an Alcor reader stayed a draft after its IMEI was
+    saved, because the reader could not read the SMSC. The page still spoke only about the
+    IMEI, then only of a generic wait, so the operator had to guess that the SIM tab mattered."""
+
+    draft = {"id": "2", "iccid": "test-card", "provisioning_state": "draft", "enabled": False,
+             "imsi": "234330000000000", "mcc": "234", "mnc": "33"}
+    card = {"present": True, "iccid": "test-card", "hardware_id": "reader-1",
+            "imsi": "234330000000000", "mcc": "234", "mnc": "33", "smsc": ""}
+
+    def test_missing_lists_exactly_what_blocks_promotion(self):
+        with patch.object(main, "_hardware_imei_for_card",
+                          return_value=("490154203237518", "reader-1", "reader")):
+            self.assertEqual(main._draft_missing(self.draft, self.card, [self.card]), ["SMSC"])
+            promoted = main._auto_promote_card_draft(self.draft, self.card, [self.card])
+        self.assertEqual(promoted["provisioning_state"], "draft")
+        self.assertEqual(promoted["auto_provision_missing"], ["SMSC"])
+
+    def test_a_locked_sim_without_a_saved_pin_is_reported(self):
+        card = {**self.card, "smsc": "+447700900000", "pin_enabled": True}
+        with patch.object(main, "_hardware_imei_for_card",
+                          return_value=("490154203237518", "reader-1", "reader")):
+            self.assertEqual(main._draft_missing(self.draft, card, [card]), ["SIM PIN"])
+
+    async def test_saving_the_imei_says_what_is_still_missing(self):
+        device = {"id": "reader-1", "device_type": "reader", "instance_id": "2",
+                  "name": "Alcor Link AK9563", "stable_path": "1-2"}
+        with patch.object(main, "_unified_devices", new=AsyncMock(return_value=[device])), \
+                patch.object(main.device_state, "set_hardware", return_value={
+                    "imei": "490154203237518"}), \
+                patch.object(main.cfg, "get_instance", return_value=self.draft), \
+                patch.object(main.hub, "cards_list", return_value=[self.card]), \
+                patch.object(main, "_hardware_imei_for_card",
+                             return_value=("490154203237518", "reader-1", "reader")), \
+                patch.object(main.engine, "is_running", return_value=False), \
+                patch.object(main, "_start_engine_checked") as start, \
+                patch.object(main.hub, "broadcast", new=AsyncMock()):
+            result = await main.api_device_hardware("reader-1", {"imei": "490154203237518"})
+
+        start.assert_not_called()
+        self.assertFalse(result["started"])
+        self.assertEqual(result["missing"], ["SMSC"])
+
+
 class ImsIdentityLearningTests(unittest.IsolatedAsyncioTestCase):
     def test_modemmanager_number_requires_ims_confirmation(self):
         self.assertTrue(main._needs_ims_msisdn_learning({
