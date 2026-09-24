@@ -310,6 +310,16 @@ Release workflow 已从 Control、Engine 两种镜像扩展为四种运行镜像
 
 ## 下一阶段
 
+### 已知限制
+
+- Control 位于 Docker bridge 命名空间，无法在删除旧 Engine 前可靠探测宿主命名空间中的
+  RTP 发布端口。容器模式只检查项目已分配端口，最终冲突由 Docker 在创建新 Engine 时报告；
+  发生冲突时该线路会保持停止并在页面显示启动错误。部署前应确保配置的 RTP 范围未被宿主
+  或其他 Compose 项目占用。
+- 新增或移除蜂窝模块会改变 VPCD reader 布局，当前 Hardware 会重启私有 pcscd 和 bridge，
+  已运行线路会出现一次短暂 SIM 通道中断。后续需引入持久化 reader 槽位和增量生命周期，
+  才能在不重排既有 reader 的情况下完成多模块热插拔。
+
 正式镜像、实体读卡器、可选宿主驱动目录、安装、更新与回滚的发布边界见
 [全容器版本发布方案](container-release-plan.md)。
 

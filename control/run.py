@@ -83,7 +83,7 @@ def main():
 
     settings = cfg.get_settings()
     tls = settings.get("tls", {})
-    port = int(os.environ.get("MDD_HTTP_PORT", settings.get("http_port", 10443)))
+    port = int(os.environ.get("MDD_HTTP_PORT", settings.get("http_port", 8443)))
     bind = os.environ.get("MDD_BIND", settings.get("bind", "0.0.0.0"))
 
     configured_cert = _runtime_path(tls.get("cert_path"))

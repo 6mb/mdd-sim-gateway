@@ -83,7 +83,7 @@ services:
     tmpfs:
       - /run:rw,nosuid,nodev,size=16m
       - /var/lib/ModemManager:rw,nosuid,nodev,size=8m
-      - /var/lib/mdd-vpcd:rw,nosuid,nodev,exec,size=4m
+      - /var/lib/mdd-vpcd:rw,nosuid,nodev,exec,size=32m
       - /etc/reader.conf.d:rw,nosuid,nodev,size=1m
     labels:
       com.centurylinklabs.watchtower.enable: "false"

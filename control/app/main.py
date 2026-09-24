@@ -88,6 +88,7 @@ UPDATE_CHECK_INTERVAL_SECONDS = float(os.environ.get("MDD_UPDATE_CHECK_INTERVAL"
 _line_state_written: dict[str, tuple[str, float]] = {}
 _line_registered_written: dict[str, float] = {}   # per-line throttle for the durable
                                                  # "last registered" stamp
+_background_tasks: set[asyncio.Task] = set()
 LINE_REGISTERED_WRITE_INTERVAL_SECONDS = 3600
 
 logging.basicConfig(level=logging.INFO,
@@ -4978,7 +4979,9 @@ async def api_system_maintenance(body: dict):
                 # Let Uvicorn flush the accepted response before the Docker daemon stops us.
                 await asyncio.sleep(.75)
                 await asyncio.to_thread(operations.perform_container_service_restart, scope)
-            asyncio.create_task(restart_after_response())
+            task = asyncio.create_task(restart_after_response())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
         return {**result, "action": action}
     raise HTTPException(400, "unknown maintenance action")
 

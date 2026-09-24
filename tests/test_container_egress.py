@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from engine.outer_transport import ProxyEndpoint, proxy_udp_socket
-from runtime.egress import SocksEgress
+from runtime.egress import ListenAddressError, SocksEgress
 from control.app.egress_contract import current_status
 
 
@@ -20,10 +20,11 @@ class ContainerEgressTests(unittest.TestCase):
             "us": {"enabled": True, "mode": "manual", "proxy_url": "socks5://other.invalid:1080"}}}
 
     def test_generates_only_socks_without_tun_or_route_mutations(self):
-        config, states = self.app.build_proxy_config(self.proxy)
+        with patch.object(self.app, "listen_address", return_value="172.30.0.3"):
+            config, states = self.app.build_proxy_config(self.proxy)
         self.assertEqual([item["type"] for item in config["inbounds"]], ["socks", "socks"])
         self.assertEqual(len({item["listen_port"] for item in config["inbounds"]}), 2)
-        self.assertTrue(all(item["listen"] == "0.0.0.0" for item in config["inbounds"]))
+        self.assertTrue(all(item["listen"] == "172.30.0.3" for item in config["inbounds"]))
         self.assertNotIn("interface", states["gb"])
         self.assertEqual(states["gb"]["proxy_host"], "mdd-egress")
         self.assertNotIn("auto_detect_interface", config["route"])
@@ -33,7 +34,8 @@ class ContainerEgressTests(unittest.TestCase):
             self.app.apply_routes({("198.51.100.1", "mdd-gb")})
 
     def test_publishes_separate_contract_without_claiming_host_routes(self):
-        with patch.object(self.app, "process_reselect_requests"), \
+        with patch.object(self.app, "listen_address", return_value="172.30.0.3"), \
+             patch.object(self.app, "process_reselect_requests"), \
              patch.object(self.app, "process_stalled_reports"), \
              patch.object(self.app, "update_selected_nodes"):
             self.app.reconcile_socks({"proxy": self.proxy})
@@ -63,9 +65,18 @@ class ContainerEgressTests(unittest.TestCase):
         self.assertNotIn("secret-value", status)
         self.assertEqual(json.loads(status)["exits"], {})
 
+    def test_ambiguous_engine_listener_has_a_diagnostic_error_code(self):
+        with patch.object(self.app, "build_proxy_config",
+                          side_effect=ListenAddressError("two addresses")):
+            self.app.reconcile_socks({"proxy": self.proxy})
+        status = json.loads(self.app.status_path.read_text())
+        self.assertEqual(status["error_code"], "listen_address_unavailable")
+        self.assertEqual(status["error_type"], "ListenAddressError")
+
     def test_direct_mode_does_not_invent_a_socks_listener(self):
-        config, states = self.app.build_proxy_config({"exits": {
-            "gb": {"enabled": True, "mode": "direct"}}})
+        with patch.object(self.app, "listen_address", return_value="172.30.0.3"):
+            config, states = self.app.build_proxy_config({"exits": {
+                "gb": {"enabled": True, "mode": "direct"}}})
         self.assertEqual(config["inbounds"], [])
         self.assertNotIn("proxy_host", states["gb"])
 

@@ -39,9 +39,8 @@ class EnginePathTests(unittest.TestCase):
                 patch.object(engine, "ENGINE_NETWORK", "mdd-control"), \
                 patch.object(engine, "_instance_paths", return_value=(temp, temp)), \
                 patch.object(engine, "_clear_runtime_state"), \
-                patch.object(engine.socket, "getaddrinfo", return_value=[
-                    (engine.socket.AF_INET, engine.socket.SOCK_DGRAM, 17, "",
-                     ("198.51.100.10", 500))]), \
+                patch.object(engine.egress, "resolve_ipv4_via_socks",
+                             return_value="198.51.100.10"), \
                 patch.object(engine.egress, "ensure_line", return_value={
                     "transport": "socks5", "proxy_url": "socks5://mdd-egress:22157"}), \
                 patch.object(engine.cfg, "write_instance_json") as write:
@@ -128,9 +127,8 @@ class EnginePathTests(unittest.TestCase):
                 patch.object(engine, "DIRECT_NETWORK", "mdd-uplink"), \
                 patch.object(engine, "_instance_paths", return_value=(temp, temp)), \
                 patch.object(engine, "_clear_runtime_state"), \
-                patch.object(engine.socket, "getaddrinfo", return_value=[
-                    (engine.socket.AF_INET, engine.socket.SOCK_DGRAM, 17, "",
-                     ("198.51.100.10", 500))]), \
+                patch.object(engine.egress, "resolve_ipv4_via_socks",
+                             return_value="198.51.100.10"), \
                 patch.object(engine.egress, "ensure_line", return_value={
                     "transport": "socks5", "proxy_url": "socks5://mdd-egress:22157"}), \
                 patch.object(engine.cfg, "write_instance_json"):
@@ -146,7 +144,9 @@ class EnginePathTests(unittest.TestCase):
                 engine.ENGINE_LABEL: "socks5"}}})
         with patch.object(engine, "_client", return_value=client), \
                 patch.object(engine, "ENGINE_NETWORK", "mdd-engine"), \
-                patch.object(engine.socket, "getaddrinfo", side_effect=OSError("dns")), \
+                patch.object(engine.egress, "resolve_ipv4_via_socks",
+                             side_effect=engine.egress.EgressError(
+                                 "ePDG DNS resolution failed through country exit")), \
                 patch.object(engine.egress, "ensure_line", return_value={
                     "transport": "socks5", "proxy_url": "socks5://mdd-egress:22157"}), \
                 patch.object(engine.cfg, "write_instance_json") as write:
@@ -216,6 +216,7 @@ class EnginePathTests(unittest.TestCase):
                                         "ami": 5038, "rtp_start": 10000}}
         with tempfile.TemporaryDirectory() as temp, \
                 patch.object(engine, "_client", lambda: client), \
+                patch.object(engine, "ENGINE_NETWORK", ""), \
                 patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
                 patch.object(engine, "_clear_runtime_state", lambda base: None), \
                 patch.object(engine.egress, "ensure_line", lambda i, s: None), \
@@ -251,6 +252,7 @@ class EnginePathTests(unittest.TestCase):
                 "webrtc": 8089, "ami": 5038, "rtp_start": 10000, "rtp_span": 12}}
         with tempfile.TemporaryDirectory() as temp, \
                 patch.object(engine, "_client", lambda: client), \
+                patch.object(engine, "ENGINE_NETWORK", ""), \
                 patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
                 patch.object(engine, "_clear_runtime_state", lambda base: None), \
                 patch.object(engine.egress, "ensure_line", lambda i, s: None), \
@@ -262,6 +264,14 @@ class EnginePathTests(unittest.TestCase):
         self.assertEqual(len([key for key in bindings if key.endswith("/udp")]), 12)
         self.assertIn("10011/udp", bindings)
         self.assertNotIn("10012/udp", bindings)
+        self.assertEqual(captured["sysctls"], {
+            "net.ipv6.conf.all.accept_ra": "0",
+            "net.ipv6.conf.default.accept_ra": "0",
+            "net.ipv6.conf.all.autoconf": "0",
+            "net.ipv6.conf.default.autoconf": "0",
+            "net.ipv6.conf.all.use_tempaddr": "0",
+            "net.ipv6.conf.default.use_tempaddr": "0",
+        })
 
     def test_engine_recreation_clears_stale_runtime_observations(self):
         engine = self.engine_module()

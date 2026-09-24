@@ -58,7 +58,7 @@ DEFAULTS = {
     "settings": {
         "timezone": "Asia/Shanghai",
         "device_defaults": {"cellular_enabled": False, "vowifi_enabled": True},
-        "http_port": 10443,
+        "http_port": 8443,
         "bind": "0.0.0.0",
         "tls": {"self_signed": True, "domain": "", "cert_path": "", "key_path": ""},
         "debug": {"asterisk": False, "charon": False, "pcap": False, "ami": False},
@@ -628,6 +628,10 @@ def _block_free(block: dict, reserved: set[int]) -> bool:
     bp = _block_ports(block)
     if bp & reserved:
         return False
+    # Engine ports are published in the host namespace, which is not visible from Control's
+    # bridge namespace. Docker remains authoritative when it creates the Engine container.
+    if os.environ.get("MDD_CONTAINER_STACK") == "1":
+        return True
     # A compact block probes 16 ports and a legacy block 64. This runs only while
     # provisioning, and avoids discovering an RTP collision after Docker has already
     # removed/replaced the previous Engine.

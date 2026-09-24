@@ -53,6 +53,7 @@ class ContainerComposeTests(unittest.TestCase):
         self.assertIn("unmanaged-devices=*,except:interface-name:wwan*;"
                       "except:interface-name:cdc-wdm*", dockerfile)
         self.assertIn("no-auto-default=*", dockerfile)
+        self.assertIn('"reconcile_error" not in d', dockerfile)
         self.assertIn("hardware-dbus:/run/dbus:ro",
                       self.compose["services"]["control"]["volumes"])
         self.assertIn("/sys/devices:/sys/devices:rw", hardware["volumes"])

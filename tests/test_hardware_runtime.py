@@ -10,6 +10,42 @@ from runtime.hardware import HardwareSupervisor, kernel_objects
 
 
 class HardwareRuntimeTests(unittest.TestCase):
+    def test_loop_retries_a_transient_reconcile_failure_without_stopping_services(self):
+        app = HardwareSupervisor(interval=0)
+        app.start = Mock()
+        app.dbus = app.modemmanager = app.networkmanager = Mock()
+        app.dbus.poll.return_value = None
+        app.publish_reconcile_error = Mock()
+
+        attempts = iter((RuntimeError("mmcli unavailable"), None))
+        def reconcile():
+            outcome = next(attempts)
+            if outcome:
+                raise outcome
+            app.stop = True
+        app.reconcile = Mock(side_effect=reconcile)
+        app.loop()
+
+        self.assertEqual(app.reconcile.call_count, 2)
+        app.publish_reconcile_error.assert_called_once()
+
+    def test_close_marks_published_devices_offline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            root = data / "orchestrator"
+            root.mkdir()
+            (root / "devices-status.json").write_text(json.dumps({
+                "version": 2,
+                "devices": {"modem-1": {"present": True, "transitioning": True,
+                                           "actual": {"vowifi_bridge_active": True,
+                                                      "cellular_backend_active": True}}},
+                "shared": {"modemmanager_active": True}}))
+            app = HardwareSupervisor(status_path=data / "status.json", data_path=data)
+            app.close()
+
+            state = json.loads((root / "devices-status.json").read_text())
+            self.assertFalse(state["devices"]["modem-1"]["present"])
+            self.assertFalse(state["shared"]["modemmanager_active"])
     def test_esim_bridge_restart_waits_for_new_ready_pid_and_target_iccid(self):
         with tempfile.TemporaryDirectory() as temp:
             data = Path(temp)

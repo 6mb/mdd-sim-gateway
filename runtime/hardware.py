@@ -32,6 +32,36 @@ VPCD_PORT_STRIDE = 0x100
 VPCD_SLOTS = 3
 
 
+def tail_lines(path, count=25, max_bytes=128 * 1024):
+    """Read a bounded tail; VPCD logs are append-only and may be very large."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read(max_bytes)
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        if size > max_bytes and lines:
+            lines = lines[1:]
+        return [line for line in lines if line.strip()][-count:]
+    except OSError:
+        return []
+
+
+def compact_log(path, limit=4 * 1024 * 1024, keep=128 * 1024):
+    """Bound an append-only bridge log while preserving its useful diagnostic tail."""
+    try:
+        if path.stat().st_size <= limit:
+            return
+        with path.open("rb") as handle:
+            handle.seek(-min(keep, path.stat().st_size), os.SEEK_END)
+            tail = handle.read()
+        with path.open("wb") as handle:
+            handle.write(tail)
+    except OSError:
+        pass
+
+
 def kernel_objects():
     return {(subsystem, path.name)
             for subsystem, root, pattern in EVENT_ROOTS
@@ -794,11 +824,8 @@ class HardwareSupervisor:
             requested = nonnegative_int(identity.get("channel_requested"))
             allocated = nonnegative_int(identity.get("channel_allocated"))
             log_path = self.data_path / "orchestrator" / f"vpcd-{device_id}.log"
-            try:
-                log_tail = [line for line in log_path.read_text(
-                    encoding="utf-8", errors="replace").splitlines() if line.strip()][-25:]
-            except OSError:
-                log_tail = []
+            compact_log(log_path)
+            log_tail = tail_lines(log_path)
             bridges[device_id] = {
                 "pid": int(process.pid), "running": process.poll() is None,
                 "metadata_age_seconds": max(0, now - updated) if updated else None,
@@ -865,6 +892,10 @@ class HardwareSupervisor:
                 ready_ids.add(modem["id"])
         self.finish_bridge_restart_requests({modem["id"] for modem in discovered})
         ready_bridges = len(ready_ids)
+        maintenance_ids = {
+            str(request.get("device_id") or "") for request in self.bridge_restarts.values()
+            if request.get("state") not in {"channels_ready", "failed"}
+        }
         atomic_json(self.status_path, {
             "version": 1,
             "updated_at": int(time.time()),
@@ -873,6 +904,7 @@ class HardwareSupervisor:
             "hardware_count": len(discovered),
             "bridge_count": sum(process.poll() is None for process in self.bridges.values()),
             "ready_bridge_count": ready_bridges,
+            "maintenance_bridge_count": len(maintenance_ids),
             "pcsc_reader_count": len(discovered) * 4,
             "logical_channel_count": len(discovered) * VPCD_SLOTS,
             "networkmanager_active": True,
@@ -881,18 +913,78 @@ class HardwareSupervisor:
         self.publish_control_state(discovered, ready_ids)
         self.publish_host_diagnostics(discovered, modems)
 
+    def publish_reconcile_error(self, exc):
+        """Keep the hardware plane alive while making one failed pass explicit and fail-closed."""
+        now = int(time.time())
+        try:
+            status = json.loads(self.status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            status = {"version": 1, "modem_count": 0, "hardware_count": 0,
+                      "ready_bridge_count": 0, "maintenance_bridge_count": 0}
+        status.update({"updated_at": now, "reconcile_error": type(exc).__name__})
+        atomic_json(self.status_path, status)
+        state_path = self.data_path / "orchestrator" / "devices-status.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+        shared = state.setdefault("shared", {})
+        shared.update({"transitioning": True, "error": "Hardware reconciliation is retrying",
+                       "disruption": "hardware_reconcile_failed"})
+        state["updated_at"] = now
+        atomic_json(state_path, state)
+
+    def publish_offline(self):
+        """Retire container-owned presence before the process stops."""
+        now = int(time.time())
+        state_path = self.data_path / "orchestrator" / "devices-status.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            state = {"version": 2, "devices": {}, "shared": {}}
+        for device in (state.get("devices") or {}).values():
+            if isinstance(device, dict):
+                device["present"] = False
+                device["transitioning"] = False
+                actual = device.get("actual")
+                if isinstance(actual, dict):
+                    actual["vowifi_bridge_active"] = False
+                    actual["cellular_backend_active"] = False
+        state["updated_at"] = now
+        state.setdefault("shared", {}).update({
+            "modemmanager_active": False, "transitioning": False,
+            "error": "Hardware service is offline", "disruption": "hardware_offline"})
+        atomic_json(state_path, state)
+        atomic_json(self.status_path, {
+            "version": 1, "updated_at": now, "modem_count": 0, "hardware_count": 0,
+            "bridge_count": 0, "ready_bridge_count": 0, "maintenance_bridge_count": 0,
+            "pcsc_reader_count": 0, "logical_channel_count": 0,
+            "networkmanager_active": False, "kernel_objects": [], "stopped": True})
+
     def loop(self):
         self.start()
         while not self.stop:
             if (self.dbus.poll() is not None or self.modemmanager.poll() is not None
                     or self.networkmanager.poll() is not None):
                 raise RuntimeError("hardware service exited")
-            self.reconcile()
+            try:
+                self.reconcile()
+            except Exception as exc:  # one transient tool failure must not tear down PC/SC
+                self.log(f"hardware reconcile failed; retrying: {type(exc).__name__}: {exc}")
+                try:
+                    self.publish_reconcile_error(exc)
+                except Exception as publish_exc:
+                    self.log("could not publish hardware retry state: "
+                             f"{type(publish_exc).__name__}: {publish_exc}")
             deadline = time.monotonic() + self.interval
             while not self.stop and time.monotonic() < deadline:
                 time.sleep(0.1)
 
     def close(self):
+        try:
+            self.publish_offline()
+        except Exception as exc:
+            self.log(f"could not publish hardware offline state: {type(exc).__name__}: {exc}")
         self.stop_pcsc()
         for process in (self.networkmanager, self.modemmanager, self.dbus):
             if process and process.poll() is None:
@@ -907,7 +999,7 @@ class HardwareSupervisor:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", type=Path, default=Path("/run/mdd-hardware/status.json"))
-    parser.add_argument("--interval", type=float, default=1.0)
+    parser.add_argument("--interval", type=float, default=3.0)
     parser.add_argument("--data", type=Path, default=Path("/data"))
     args = parser.parse_args()
     app = HardwareSupervisor(args.status, max(0.2, args.interval), args.data)

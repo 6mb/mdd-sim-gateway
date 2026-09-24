@@ -141,6 +141,8 @@ class ContainerUpdateRollbackTests(unittest.TestCase):
                     patch.object(mdd_container_update.mdd_update, "fetch_release_asset",
                                  side_effect=fetch), \
                     patch.object(mdd_container_update.mdd_update, "verify_release_file"), \
+                    patch.object(mdd_container_update, "docker_root_free_bytes",
+                                 return_value=10 * 1024 ** 3), \
                     patch.object(mdd_container_update, "run"), \
                     patch.object(mdd_container_update, "verify_and_tag_image",
                                  side_effect=lambda _c, component, *_a: f"sha256:new-{component}"), \
@@ -160,6 +162,52 @@ class ContainerUpdateRollbackTests(unittest.TestCase):
             failed = json.loads((root / "orchestrator/update-status.json").read_text())
             self.assertEqual(failed["state"], "failed")
             self.assertTrue(failed["rollback_succeeded"])
+
+    def test_rollout_recreates_only_running_engines_explicitly(self):
+        running = Mock(name="running")
+        running.name = "mdd-sim-gateway-engine-line-1"
+        stopped = Mock(name="stopped")
+        stopped.name = "mdd-sim-gateway-engine-line-2"
+        client = Mock()
+        client.containers.list.return_value = [running]
+        status = Mock()
+
+        with patch.object(mdd_container_update, "recreate_engine") as recreate, \
+                patch.object(mdd_container_update, "wait_container") as wait:
+            mdd_container_update.roll_engines(client, "sha256:new", status)
+
+        client.containers.list.assert_called_once_with(filters={"label": [
+            "io.mdd-sim-gateway.managed=true",
+            "io.mdd-sim-gateway.component=engine"]})
+        running.remove.assert_called_once_with(force=True)
+        stopped.remove.assert_not_called()
+        recreate.assert_called_once_with(client, running.name)
+        wait.assert_called_once_with(client, running.name, "sha256:new", timeout=240)
+
+    def test_recreate_engine_runs_control_lifecycle_code(self):
+        control = Mock()
+        control.exec_run.return_value = SimpleNamespace(exit_code=0, output=b"")
+        client = Mock()
+        client.containers.get.return_value = control
+
+        mdd_container_update.recreate_engine(
+            client, "mdd-sim-gateway-engine-line_1")
+
+        command = control.exec_run.call_args.args[0]
+        self.assertEqual(command[:2], ["python", "-c"])
+        self.assertEqual(command[-1], "line_1")
+        self.assertIn("engine.start", command[2])
+
+    def test_recreate_engine_accepts_docker_valid_dotted_instance_id(self):
+        control = Mock()
+        control.exec_run.return_value = SimpleNamespace(exit_code=0, output=b"")
+        client = Mock()
+        client.containers.get.return_value = control
+
+        mdd_container_update.recreate_engine(
+            client, "mdd-sim-gateway-engine-line.1")
+
+        self.assertEqual(control.exec_run.call_args.args[0][-1], "line.1")
 
 
 class ContainerUpdateApiTests(unittest.IsolatedAsyncioTestCase):

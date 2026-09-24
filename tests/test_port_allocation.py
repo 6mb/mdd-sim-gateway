@@ -7,6 +7,13 @@ from control.app import config
 
 
 class PortAllocationTests(unittest.TestCase):
+    def test_container_mode_does_not_probe_the_control_network_namespace(self):
+        block = config._alloc_ports(0)
+        with patch.dict(os.environ, {"MDD_CONTAINER_STACK": "1"}), \
+                patch.object(config, "_host_port_free") as probe:
+            self.assertTrue(config._block_free(block, set()))
+        probe.assert_not_called()
+
     def test_rtp_collision_rejects_the_whole_block(self):
         block = config._alloc_ports(0)
         occupied = block["rtp_start"] + 1

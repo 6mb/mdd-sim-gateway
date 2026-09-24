@@ -8,11 +8,16 @@ import argparse
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import time
 
 from host.mdd_orchestrator import Orchestrator, atomic_json, read_json
 from control.app.egress_contract import VERSION, proxy_fingerprint
+
+
+class ListenAddressError(RuntimeError):
+    """The isolated Engine-network listener address could not be selected safely."""
 
 
 class SocksEgress(Orchestrator):
@@ -32,7 +37,7 @@ class SocksEgress(Orchestrator):
         for inbound in config["inbounds"]:
             if inbound["type"] != "socks":
                 raise ValueError("isolated egress supports only SOCKS inbounds")
-            inbound["listen"] = os.environ.get("MDD_EGRESS_LISTEN", "0.0.0.0")
+            inbound["listen"] = self.listen_address()
         for rule in config.get("route", {}).get("rules", []):
             if "inbound" in rule:
                 rule["inbound"] = [tag for tag in rule["inbound"] if not tag.startswith("tun-")]
@@ -41,6 +46,21 @@ class SocksEgress(Orchestrator):
             if state.get("mode") != "direct":
                 state["proxy_host"] = os.environ.get("MDD_EGRESS_HOST", "mdd-egress")
         return config, states
+
+    @staticmethod
+    def listen_address():
+        configured = os.environ.get("MDD_EGRESS_LISTEN", "").strip()
+        if configured:
+            return configured
+        # The service has an uplink and an internal Engine interface. Resolve the Compose
+        # alias which exists only on the internal network so SOCKS is not exposed on uplink.
+        host = os.environ.get("MDD_EGRESS_HOST", "mdd-egress")
+        answers = socket.getaddrinfo(host, 0, socket.AF_INET, socket.SOCK_STREAM)
+        addresses = {item[4][0] for item in answers}
+        if len(addresses) != 1:
+            raise ListenAddressError(
+                f"Engine network alias resolved to {len(addresses)} IPv4 addresses")
+        return addresses.pop()
 
     def apply_routes(self, wanted):
         raise RuntimeError("SOCKS egress must never install network routes")
@@ -78,7 +98,10 @@ class SocksEgress(Orchestrator):
             self.stop_proxy()
             atomic_json(self.status_path, {**contract, "transport": "socks5", "enabled": True,
                                           "updated_at": int(time.time()), "exits": {},
-                                          "error_type": type(exc).__name__})
+                                          "error_type": type(exc).__name__,
+                                          "error_code": ("listen_address_unavailable"
+                                                         if isinstance(exc, ListenAddressError)
+                                                         else "configuration_rejected")})
 
     def stop_proxy(self):
         for attr in ("singbox", "xray"):

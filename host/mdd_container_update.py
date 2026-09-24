@@ -10,10 +10,10 @@ images pass their architecture/component/version checks.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -113,14 +113,6 @@ def run(command: list[str], *, cwd: Path | None = None, timeout: int = 600) -> s
     return completed.stdout
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def local_loaded_image(component: str, version: str, repository: str) -> str:
     if component == "engine":
         owner = repository.split("/", 1)[0].lower()
@@ -175,14 +167,61 @@ def compose_up(compose: Path) -> None:
         cwd=compose.parent, timeout=600)
 
 
+def docker_root_free_bytes(client) -> int:
+    """Measure the daemon's image store from a read-only bind in a disposable container."""
+    root = str((client.info() or {}).get("DockerRootDir") or "").strip()
+    if not root.startswith("/"):
+        raise mdd_update.UpdateError("Docker did not report an absolute image-store path")
+    current = client.containers.get(socket.gethostname())
+    output = client.containers.run(
+        current.image.id,
+        ["python", "-c",
+         "import os; s=os.statvfs('/docker-root'); print(s.f_bavail*s.f_frsize)"],
+        remove=True, network_disabled=True, read_only=True, cap_drop=["ALL"],
+        volumes={root: {"bind": "/docker-root", "mode": "ro"}},
+    )
+    try:
+        return int(output.decode().strip() if isinstance(output, bytes) else str(output).strip())
+    except ValueError as exc:
+        raise mdd_update.UpdateError("could not measure free Docker image-store space") from exc
+
+
+def recreate_engine(client, name: str) -> None:
+    """Ask the freshly started Control container to recreate one previously running line."""
+    prefix = "mdd-sim-gateway-engine-"
+    iid = name.removeprefix(prefix)
+    if name == iid or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", iid):
+        raise mdd_update.UpdateError(f"invalid managed Engine name: {name}")
+    control = client.containers.get("mdd-sim-gateway-control")
+    command = [
+        "python", "-c",
+        ("import os,sys; from app import config as cfg, engine; "
+         "i=cfg.get_instance(sys.argv[1]); "
+         "assert i is not None, 'saved line is missing'; "
+         "engine.start(i, cfg.get_settings(), "
+         "dev_mounts=os.environ.get('MDD_DEV_MOUNTS','') == '1', "
+         "reason='release_update')"),
+        iid,
+    ]
+    result = control.exec_run(command)
+    if hasattr(result, "exit_code"):
+        exit_code, output = int(result.exit_code), result.output
+    else:
+        exit_code, output = int(result[0]), result[1]
+    if exit_code:
+        detail = output.decode(errors="replace") if isinstance(output, bytes) else str(output)
+        raise mdd_update.UpdateError(f"could not recreate {name}: {detail[-1000:].strip()}")
+
+
 def roll_engines(client, target_image_id: str, status: mdd_update.Status) -> None:
-    engines = [item for item in client.containers.list(all=True, filters={"label": [
+    engines = [item for item in client.containers.list(filters={"label": [
         f"{MANAGED}=true", f"{COMPONENT}=engine"]})]
     for index, old in enumerate(sorted(engines, key=lambda item: item.name), 1):
         name = old.name
         status.publish("running", "engine_rollout", artifact=name,
                        engine_index=index, engine_total=len(engines))
         old.remove(force=True)
+        recreate_engine(client, name)
         wait_container(client, name, target_image_id, timeout=240)
 
 
@@ -215,13 +254,18 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
                  for component in COMPONENTS}
         base_url = f"https://github.com/{repository}/releases/download/v{version}"
         client = docker.from_env()
+        if docker_root_free_bytes(client) < 6 * 1024 * 1024 * 1024:
+            raise mdd_update.UpdateError(
+                "not enough Docker image-store space for a transactional container update")
         old_base_ids = {
             component: client.containers.get(f"mdd-sim-gateway-{component}").image.id
             for component in BASE_COMPONENTS
         }
+        # Only lines which are running at the start of the transaction belong in the rollout.
+        # Disabled, PIN-frozen and manually stopped lines must remain stopped.
         old_engine_ids = {
             item.name: item.image.id
-            for item in client.containers.list(all=True, filters={"label": [
+            for item in client.containers.list(filters={"label": [
                 f"{MANAGED}=true", f"{COMPONENT}=engine"]})
         }
         status.publish("running", "downloading", install_mode="container",
@@ -231,13 +275,15 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
             f"{base_url}/SHA256SUMS", sums, "SHA256SUMS", routes,
             asset_sizes=sizes, status=status)
         archives = {}
+        archive_digests = {}
         for component in COMPONENTS:
             name = names[component]
             archive = staging / name
             active = mdd_update.fetch_release_asset(
                 f"{base_url}/{name}", archive, name, routes, active,
                 asset_sizes=sizes, status=status, phase=f"{component}_image")
-            mdd_update.verify_release_file(archive, sums, f"{arch} {component} image")
+            archive_digests[component] = mdd_update.verify_release_file(
+                archive, sums, f"{arch} {component} image")
             archives[component] = archive
 
         targets = canonical_images(repository, version)
@@ -250,7 +296,7 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
                 client, component, version, repository, targets[component])
         verified_images = {
             component: {"reference": targets[component], "image_id": image_ids[component],
-                        "archive_sha256": sha256_file(archives[component])}
+                        "archive_sha256": archive_digests[component]}
             for component in COMPONENTS
         }
 
@@ -305,6 +351,7 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
                         current.remove(force=True)
                     except docker.errors.NotFound:
                         pass
+                    recreate_engine(client, name)
                     wait_container(client, name, old_image_id, timeout=240)
                 rollback_ok = True
             except Exception as rollback_exc:  # preserve both causes in the private status

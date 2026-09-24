@@ -61,6 +61,7 @@ RUN if [ -n "${DEBIAN_MIRROR}" ]; then \
     && make -C src/vpcd \
     && make -C src/ifd-vpcd \
     && make -C src/ifd-vpcd install DESTDIR=/hardware-root \
+    && strip --strip-unneeded /hardware-root/usr/lib/pcsc/drivers/serial/libifdvpcd.so \
     && rm -f /hardware-root/etc/reader.conf.d/vpcd \
     && touch "/hardware-root/usr/lib/pcsc/drivers/serial/.mdd-vpcd-slots-${VPCD_SLOTS}"
 
@@ -105,6 +106,6 @@ LABEL io.mdd-sim-gateway.component="hardware" \
       org.opencontainers.image.title="MDD Sim Gateway hardware plane"
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
-    CMD python -c 'import json,time; d=json.load(open("/run/mdd-hardware/status.json")); assert d["version"]==1 and time.time()-d["updated_at"]<15 and d["modem_count"]==d["hardware_count"] and d["ready_bridge_count"]==d["hardware_count"]'
+    CMD python -c 'import json,time; d=json.load(open("/run/mdd-hardware/status.json")); assert d["version"]==1 and time.time()-d["updated_at"]<15 and "reconcile_error" not in d and d["modem_count"]==d["hardware_count"] and d["ready_bridge_count"]+d.get("maintenance_bridge_count",0)>=d["hardware_count"]'
 
 ENTRYPOINT ["python", "-m", "runtime.hardware"]

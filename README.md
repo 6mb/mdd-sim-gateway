@@ -43,7 +43,7 @@ cd mdd-sim-gateway
 sudo ./install.sh install
 ```
 
-安装完成后访问 `https://<网关地址>:10443`，并在受信的局域网或 VPN 中立即创建管理员账号。完整的前置检查、安装过程和升级方式见 [安装与升级](docs/INSTALL.md)。
+安装完成后访问 `https://<网关地址>:8443`，并在受信的局域网或 VPN 中立即创建管理员账号。完整的前置检查、安装过程和升级方式见 [安装与升级](docs/INSTALL.md)。NAS Compose 部署默认使用宿主端口 `10443`。
 
 Synology 和其他 NAS 的全容器版本通过 Container Manager 导入发布版 Compose YAML，详见
 [全容器部署指南](docs/CONTAINER_DEPLOYMENT.md)；已验证和待验证的 NAS/内核组合见

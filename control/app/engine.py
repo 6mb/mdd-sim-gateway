@@ -19,7 +19,6 @@ import logging
 import os
 import re
 import shutil
-import socket
 import threading
 import time
 
@@ -357,6 +356,23 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
     if DIRECT_NETWORK in {"host", "none"} or (DIRECT_NETWORK and DIRECT_NETWORK == ENGINE_NETWORK):
         raise ValueError("MDD_ENGINE_DIRECT_NETWORK must be a separate Docker bridge network")
     network_options = {"network": ENGINE_NETWORK} if ENGINE_NETWORK else {}
+    engine_sysctls = {
+        # These six settings predate the full-container runtime and remain part of the native
+        # Pi Engine isolation policy.
+        "net.ipv6.conf.all.accept_ra": "0",
+        "net.ipv6.conf.default.accept_ra": "0",
+        "net.ipv6.conf.all.autoconf": "0",
+        "net.ipv6.conf.default.autoconf": "0",
+        "net.ipv6.conf.all.use_tempaddr": "0",
+        "net.ipv6.conf.default.use_tempaddr": "0",
+    }
+    if ENGINE_NETWORK:
+        # Docker disables IPv6 inside containers attached only to an IPv4 bridge. Many IMS
+        # PDNs assign only an IPv6 inner address and P-CSCF, so container mode re-enables it.
+        engine_sysctls.update({
+            "net.ipv6.conf.all.disable_ipv6": "0",
+            "net.ipv6.conf.default.disable_ipv6": "0",
+        })
     iid = str(inst["id"])
     client = _client()
     # Check readiness before replacing a working container. Host mode requires the ePDG
@@ -381,12 +397,7 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
             ipaddress.IPv4Address(epdg)
             epdg_ip = epdg
         except ValueError:
-            try:
-                answers = socket.getaddrinfo(epdg, 500, socket.AF_INET, socket.SOCK_DGRAM)
-                epdg_ip = next(item[4][0] for item in answers)
-            except (OSError, StopIteration):
-                raise egress.EgressError(
-                    "ePDG DNS resolution failed before isolated Engine startup") from None
+            epdg_ip = egress.resolve_ipv4_via_socks(selected_exit["proxy_url"], epdg)
         # The Engine network is internal and deliberately cannot query public DNS.
         # Render a one-run copy with the resolved peer; the saved line keeps its hostname.
         rendered_inst = {**inst, "epdg": epdg_ip}
@@ -474,21 +485,8 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
                 or (settings.get("engine") or {}).get("pcscf_apply_mode")
                 or "restart"),
         },
-        sysctls={
-            # Docker disables IPv6 inside containers attached only to an IPv4 bridge.
-            # Many IMS PDNs (including T-Mobile US) assign only an IPv6 inner address and
-            # P-CSCF. Re-enable it in this container's network namespace so swu_ike can bind
-            # the assigned address to ipsec0; this does not change the host IPv6 setting.
-            "net.ipv6.conf.all.disable_ipv6": "0",
-            "net.ipv6.conf.default.disable_ipv6": "0",
-            "net.ipv6.conf.all.accept_ra": "0",
-            "net.ipv6.conf.default.accept_ra": "0",
-            "net.ipv6.conf.all.autoconf": "0",
-            "net.ipv6.conf.default.autoconf": "0",
-            "net.ipv6.conf.all.use_tempaddr": "0",
-            "net.ipv6.conf.default.use_tempaddr": "0",
-        },
         extra_hosts={"host.docker.internal": "host-gateway"},  # so notify.py can reach the manager
+        sysctls=engine_sysctls,
         **network_options,
     )
     if direct_network is not None:

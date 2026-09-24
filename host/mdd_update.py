@@ -84,6 +84,12 @@ class Status:
         self.extra: dict = {}
 
     def publish(self, state: str, phase: str, **fields):
+        if phase != self.phase:
+            for key in ("url", "artifact", "downloaded_bytes", "total_bytes", "speed_bps",
+                        "elapsed_seconds", "detail", "route_attempt", "route_total",
+                        "engine_index", "engine_total", "error", "rollback_succeeded",
+                        "rollback_error"):
+                self.extra.pop(key, None)
         self.phase = phase
         self.extra.update(fields)
         atomic_json(self.path, {"state": state, "phase": phase, "target": self.target,
@@ -276,8 +282,10 @@ def verify_release_file(artifact: Path, sums: Path, description: str):
     with open(artifact, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    if digest.hexdigest() != expected:
+    actual = digest.hexdigest()
+    if actual != expected:
         raise UpdateError(f"release {description} checksum mismatch")
+    return actual
 
 
 def installed_mode(data: Path) -> str:
