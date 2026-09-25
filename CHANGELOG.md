@@ -2,6 +2,25 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc7] - 2026-09-25
+
+Seventh release candidate. The automatic update channel stays on 1.9.5.
+
+### Added
+
+- The Synology DS1621+ modem driver pack is published with every Release
+  (`mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz`) and covered by
+  `SHA256SUMS`. It is rebuilt in CI from Synology's public v1000 DSM 7.4 toolkit and unmodified
+  Linux v4.4.302 sources, and the build fails unless every module is byte-identical to the ones
+  validated on hardware. The pack installs with one SSH session, checks the exact DSM build before
+  writing anything, and includes the GPL-2.0 source and licence.
+
+### Changed
+
+- The README and deployment guide present the full-container deployment as available on any Linux
+  host with Docker Compose, with Synology as one case, and warn about the ModemManager service that
+  stock distributions enable by default.
+
 ## [1.12.0-rc6] - 2026-09-25
 
 Sixth release candidate. The automatic update channel stays on 1.9.5.
