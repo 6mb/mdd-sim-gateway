@@ -2,6 +2,25 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc10] - 2026-09-26
+
+Tenth release candidate. The automatic update channel stays on 1.9.5.
+
+### Fixed
+
+- In the full-container deployment every modem was named "Cellular modem", and configured modem
+  profiles were ignored: Hardware looked for them in a `config.json` that Control never writes. It
+  now reads `config.yaml`, so a modem shows its profile name (such as "DJI/Quectel EC25") as in a
+  native install.
+- The VoWiFi row of a carrier without Wi-Fi Calling alternated every few seconds between the reason
+  and "Stopped."; it now keeps the reason while the line is off.
+- Renaming a running line still restarted it when the SIM form also saved the MNC padded to three
+  digits or the live reader index. Neither changes what the engine uses, so a rename no longer
+  restarts the line.
+- On hosts where pcscd runs as an unprivileged user (Ubuntu 26.04), the modem readers never
+  appeared because their definition file was created readable by root only. It is now written
+  world-readable, and a file left by an older release is repaired on upgrade.
+
 ## [1.12.0-rc9] - 2026-09-25
 
 Ninth release candidate. The automatic update channel stays on 1.9.5.
