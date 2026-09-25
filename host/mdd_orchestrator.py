@@ -2950,6 +2950,21 @@ class Orchestrator:
                  "it collides with this gateway's per-modem virtual readers")
         return True
 
+    @staticmethod
+    def reader_config_unreadable(config_path: Path) -> bool:
+        """Whether an unprivileged pcscd would be unable to read the reader definitions.
+
+        This service runs with UMask=0077, so a freshly created definition file is 0600
+        root. pcscd running as root never noticed; distributions whose pcscd.service drops
+        to its own user (Ubuntu 26.04) silently skip the file and no modem reader appears.
+        Files written by earlier releases keep that mode, and their content already matches,
+        so the mode has to be checked on its own for an upgrade to repair them.
+        """
+        try:
+            return (config_path.stat().st_mode & 0o044) != 0o044
+        except OSError:
+            return False
+
     def reconcile_hardware(self, desired: dict, desired_devices: dict,
                            through_modemmanager=False) -> dict:
         hardware = (desired.get("hardware") or {})
@@ -3003,10 +3018,12 @@ class Orchestrator:
         legacy_config = config_path.with_name("vowifi-modems")
         legacy_present = legacy_config.exists() and legacy_config != config_path
         distro_disabled = self.disable_distro_vpcd_reader(config_path)
-        if reader_config != self.last_reader_config or distro_disabled:
+        unreadable = self.reader_config_unreadable(config_path)
+        if reader_config != self.last_reader_config or distro_disabled or unreadable:
             if not self.dry_run:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
                 config_path.write_text(reader_config, encoding="utf-8")
+                os.chmod(config_path, 0o644)
                 if legacy_present:
                     legacy_config.unlink(missing_ok=True)
                 (self.root / "pcsc-maintenance").write_text(str(int(time.time())), encoding="ascii")
