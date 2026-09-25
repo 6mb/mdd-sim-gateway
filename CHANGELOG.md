@@ -2,6 +2,34 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc8] - 2026-09-25
+
+Eighth release candidate. The automatic update channel stays on 1.9.5.
+
+### Added
+
+- A device's 4G tab has a Modem VoLTE / IMS switch for Quectel modules. China Telecom and other
+  carriers without circuit-switched fallback carry 4G calls and texts only over the modem's own IMS;
+  turning it on enables MBN auto-selection and IMS, then restarts the modem. A cellular text the
+  network refuses with `WmsMessageDeliveryFailure` now points to that switch.
+- The gateway knows when a carrier offers no Wi-Fi Calling, from a carrier table (mainland China
+  for now) and whether the carrier's standard ePDG name exists in public DNS. A new SIM from such a
+  carrier gets its line created with VoWiFi off, 4G and SMS still work, and the page offers
+  **Try anyway**; a manual try that cannot resolve the ePDG stops at once instead of retrying.
+
+### Changed
+
+- Up to ten SIM lines instead of five.
+- The device list shows one badge per capability (4G and VoWiFi) instead of a single VoWiFi badge,
+  and the 4G row describes the mobile data connection rather than reusing the VoWiFi sentence.
+
+### Fixed
+
+- SIMs that grant only one supplementary logical channel, such as some China Unicom USIMs, made the
+  SIM bridge exit and restart forever, left the full-container Hardware unhealthy, and showed "No
+  SIM inserted". The bridge now shares whatever channels the card grants, replaying each slot's
+  selection when a channel changes hands; cards that grant three channels behave as before.
+
 ## [1.12.0-rc7] - 2026-09-25
 
 Seventh release candidate. The automatic update channel stays on 1.9.5.
