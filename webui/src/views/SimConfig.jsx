@@ -188,7 +188,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       if (editedNumber) body.msisdn_source = String(form.msisdn || '').trim() ? 'manual' : ''
       // Strip runtime-only fields that ride along on the instance object from /api/instances
       // (they are computed per-request, not config — never persist them).
-      delete body.status; delete body.has_pin
+      delete body.status; delete body.has_pin; delete body.proxy_country_effective
       // Never send an empty PIN — the stored PIN (tied to this IMSI) must survive edits to
       // unrelated fields. `pin` state is only set when the user re-enters/verifies a PIN
       // here; only then do we forward it to update the saved credential.
@@ -246,7 +246,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   }
 
   const missing = targetDevice?.provisioning?.missing || []
-  const missingLabels = { imsi: 'IMSI / PIN', imei: 'IMEI', smsc: t('SMS centre (SMSC)') }
+  const missingLabels = { imsi: 'IMSI / PIN', imei: 'IMEI', smsc: t('SMS centre (SMSC)'), mcc_mnc: 'MCC/MNC', pin: t('setup.field.pin') }
   const imeiReady = String(targetDevice?.imei || '').replace(/[^0-9]/g, '').length === 15
   const existingLine = instances.some(line => String(line.id) === String(form.id))
 

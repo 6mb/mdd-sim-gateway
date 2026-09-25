@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_media, mms_transport, softphone_ws)
+               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -88,6 +88,7 @@ UPDATE_CHECK_INTERVAL_SECONDS = float(os.environ.get("MDD_UPDATE_CHECK_INTERVAL"
 _line_state_written: dict[str, tuple[str, float]] = {}
 _line_registered_written: dict[str, float] = {}   # per-line throttle for the durable
                                                  # "last registered" stamp
+_background_tasks: set[asyncio.Task] = set()
 LINE_REGISTERED_WRITE_INTERVAL_SECONDS = 3600
 
 logging.basicConfig(level=logging.INFO,
@@ -480,6 +481,7 @@ class Hub:
         self.esim_switch_locks: dict[str, asyncio.Lock] = {}
         self.lpa_busy: dict[str, bool] = {}  # readers currently owned by an LPA op
         self.lpa_downloads: dict[str, dict] = {}  # reader_name -> active download handle
+        self.card_rereads: set[str] = set()  # readers with a draft-completing re-read queued
         self.hotplug_starts: set[str] = set()  # debounce duplicate modem VPCD slots
         # When each line last became healthy, so a failure can be attributed. A line that
         # carried IMS for a long time and then broke is not evidence against its exit node.
@@ -844,6 +846,8 @@ async def _on_card_insert(name, idx):
             if inst:
                 info["matched"] = inst["id"]
     hub.cards[name] = info
+    if _draft_needs_card_read(name):
+        asyncio.create_task(_complete_draft_from_card(name))
     log.info("card inserted reader=%s (%s) identity=%s matched=%s", idx, name,
              "available" if info["iccid"] else "unknown", info["matched"])
     if info.get("matched"):
@@ -933,20 +937,22 @@ def _line_auto_start_allowed(inst: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def _auto_promote_card_draft(inst: dict, card_info: dict, cards: list[dict]) -> dict:
-    """Promote a complete auto-created draft, or return it with missing-field hints.
+_DRAFT_FIELD_KEYS = {"IMSI": "imsi", "MCC/MNC": "mcc_mnc", "IMEI": "imei", "SMSC": "smsc",
+                     "SIM PIN": "pin"}
 
-    Hardware identity follows the physical reader/modem; SIM identity follows the ICCID.
-    Keeping this as a synchronous helper makes the promotion rules independently testable.
+
+def _draft_missing(inst: dict, card_info: dict, cards: list[dict]) -> list[str]:
+    """What an auto-created draft still lacks before it can become a line.
+
+    The device page shows this list, so the operator is told what is actually missing. It
+    used to say only that an IMEI was needed. Once the IMEI was saved, a SIM whose SMSC the
+    reader could not read stayed a draft, and the only hint left was a generic "waiting".
     """
-    if inst.get("provisioning_state") != "draft":
-        return inst
-
     imsi = str(card_info.get("imsi") or inst.get("imsi") or "").strip()
     mcc = str(card_info.get("mcc") or inst.get("mcc") or (imsi[:3] if len(imsi) >= 3 else ""))
     mnc = str(card_info.get("mnc") or inst.get("mnc") or "")
     smsc = str(card_info.get("smsc") or inst.get("smsc") or "").strip()
-    imei, hardware_id, _device_type = _hardware_imei_for_card(card_info, cards)
+    imei, _hardware_id, _device_type = _hardware_imei_for_card(card_info, cards)
     missing = []
     if not imsi:
         missing.append("IMSI")
@@ -958,8 +964,109 @@ def _auto_promote_card_draft(inst: dict, card_info: dict, cards: list[dict]) -> 
         missing.append("SMSC")
     if card_info.get("pin_enabled") is True and not inst.get("pin"):
         missing.append("SIM PIN")
+    return missing
+
+
+# Draft fields that only a card read can supply; the rest come from the operator.
+_CARD_READ_FIELDS = {"IMSI", "MCC/MNC", "SMSC"}
+# Seen on an Alcor AK9563: the read at insertion returned no SMSC for a SIM whose EF_SMSP a
+# later read returned without trouble. Retry on a widening schedule, then leave it to the
+# operator, who is shown the missing field and a re-read button.
+_CARD_REREAD_DELAYS = (10, 30, 60, 120, 300)
+
+
+def _merge_card_read(entry: dict, card) -> bool:
+    """Fill what an earlier read of the same card left empty. Returns whether anything did.
+
+    Identity is only ever added, never replaced: a read that fails half way must not erase
+    what a better one found. PIN retry counters are live state and are always refreshed.
+    """
+    if not card.iccid or str(card.iccid) != str(entry.get("iccid") or ""):
+        return False
+    filled = False
+    for key, value in (("imsi", card.imsi), ("mcc", card.mcc), ("mnc", card.mnc),
+                       ("mnc_len", getattr(card, "mnc_len", None)), ("smsc", card.smsc)):
+        if value not in (None, "") and not entry.get(key):
+            entry[key] = value
+            filled = True
+    if filled:
+        entry["carrier_identity"] = entry.get("carrier_identity") or _carrier_identity(card)
+    for key in ("pin_enabled", "pin_tries"):
+        if getattr(card, key, None) is not None:
+            entry[key] = getattr(card, key)
+    return filled
+
+
+async def _reread_card(name: str) -> bool:
+    """Read the card in reader `name` again and merge what the first read missed."""
+    entry = hub.cards.get(name)
+    if not entry or not entry.get("present") or hub.lpa_busy.get(name):
+        return False
+    lock = hub.reader_lock(name)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=0.5)
+    except asyncio.TimeoutError:
+        return False
+    try:
+        card = await asyncio.to_thread(sim.read_card, entry["index"])
+    except Exception as exc:  # noqa: a failed read leaves the cache as it was
+        log.debug("card re-read failed for %s: %r", name, exc)
+        return False
+    finally:
+        lock.release()
+    return _merge_card_read(entry, card)
+
+
+def _draft_needs_card_read(name: str) -> str:
+    """The draft id behind reader `name` if a card read could still complete it, else ''."""
+    entry = hub.cards.get(name) or {}
+    iid = str(entry.get("matched") or "")
+    inst = cfg.get_instance(iid) if iid and entry.get("present") else None
+    if not inst or inst.get("provisioning_state") != "draft":
+        return ""
+    missing = _draft_missing(inst, entry, hub.cards_list())
+    return iid if set(missing) & _CARD_READ_FIELDS else ""
+
+
+async def _complete_draft_from_card(name: str):
+    """Re-read a draft's card on a widening schedule while it lacks card-only fields."""
+    if name in hub.card_rereads:
+        return
+    hub.card_rereads.add(name)
+    try:
+        for delay in _CARD_REREAD_DELAYS:
+            await asyncio.sleep(delay)
+            iid = _draft_needs_card_read(name)
+            if not iid:
+                return
+            if await _reread_card(name) and not _draft_needs_card_read(name):
+                log.info("draft %s: a later card read supplied what the first one missed", iid)
+                asyncio.create_task(_auto_start_hotplugged_line(iid))
+                return
+        if _draft_needs_card_read(name):
+            log.info("draft behind %s still lacks card data after %d re-reads",
+                     name, len(_CARD_REREAD_DELAYS))
+    finally:
+        hub.card_rereads.discard(name)
+
+
+def _auto_promote_card_draft(inst: dict, card_info: dict, cards: list[dict]) -> dict:
+    """Promote a complete auto-created draft, or return it with missing-field hints.
+
+    Hardware identity follows the physical reader/modem; SIM identity follows the ICCID.
+    Keeping this as a synchronous helper makes the promotion rules independently testable.
+    """
+    if inst.get("provisioning_state") != "draft":
+        return inst
+
+    missing = _draft_missing(inst, card_info, cards)
     if missing:
         return {**inst, "auto_provision_missing": missing}
+    imsi = str(card_info.get("imsi") or inst.get("imsi") or "").strip()
+    mcc = str(card_info.get("mcc") or inst.get("mcc") or (imsi[:3] if len(imsi) >= 3 else ""))
+    mnc = str(card_info.get("mnc") or inst.get("mnc") or "")
+    smsc = str(card_info.get("smsc") or inst.get("smsc") or "").strip()
+    imei, hardware_id, _device_type = _hardware_imei_for_card(card_info, cards)
 
     previous_imeisv = str(inst.get("imeisv") or "")
     svn = (previous_imeisv[-2:] if len(previous_imeisv) == 16
@@ -1006,9 +1113,18 @@ def _auto_promote_card_draft(inst: dict, card_info: dict, cards: list[dict]) -> 
             "reader_index": int(card_info.get("index") or inst.get("reader_index") or 0),
             "reader_port": str(card_info.get("reader_port") or inst.get("reader_port") or ""),
         })
+    # A phone hides the Wi-Fi Calling switch for a carrier that does not offer it. Doing the
+    # same here keeps cellular working without a line that can only fail; the device page
+    # says why and the switch still lets the user try.
+    support = vowifi_support.for_instance({"mcc": mcc, "mnc": mnc, "epdg": inst.get("epdg")},
+                                          probe_now=True)
+    if support["status"] == vowifi_support.UNSUPPORTED:
+        update["enabled"] = False
     promoted = cfg.upsert_instance(update, unique_name=generated_name)
     egress.publish()
-    log.info("hotplug draft %s auto-provisioned for MCC %s", inst["id"], mcc)
+    log.info("hotplug draft %s auto-provisioned for MCC %s%s", inst["id"], mcc,
+             f" (VoWiFi left off: {support['source']})"
+             if support["status"] == vowifi_support.UNSUPPORTED else "")
     return promoted
 
 
@@ -1842,7 +1958,11 @@ async def host_health_poller():
     previous_alerts = None
     while True:
         try:
-            snapshot = await asyncio.to_thread(sysinfo.collect, cfg.DATA_DIR)
+            # Docker df walks every image-layer xattr on DSM and can occupy dockerd for minutes.
+            # The minute health sampler needs host health, not an inventory of reclaimable
+            # layers; explicit cleanup actions refresh that inventory after the operator asks.
+            snapshot = await asyncio.to_thread(
+                sysinfo.collect, cfg.DATA_DIR, include_docker_storage=False)
             # Rate-based conditions need the previous sample; the first pass reports none.
             alerts = sysinfo.alerts(snapshot, hub.host_snapshot or None)
             alerts = _sustained_alerts(alerts, streaks)
@@ -2475,6 +2595,22 @@ def apply_health(iid, inst, st, container_id: str | None = None):
         h["retry_count"] = 0
         st["retry"] = {"count": 0, "max": rmax}
         return st
+    if state == "EPDG_UNRESOLVED":
+        support = vowifi_support.for_instance(inst)
+        if support["source"] == "carrier_table":
+            # The user chose to try a carrier that does not offer Wi-Fi Calling. Retrying on
+            # a timer only repeats the same DNS answer; stop and say why. Only the carrier
+            # table is trusted this far: a missing DNS answer can also be an outage.
+            h["frozen_code"] = st["reason_code"]
+            h["frozen_reason"] = support["reason"]
+            h["next_retry_at"] = None
+            _record_lifecycle(iid, "recovery_cancelled", "carrier_unsupported",
+                              retry_count=h.get("retry_count"), card_present=True)
+            asyncio.create_task(asyncio.to_thread(
+                engine.capture_and_stop, iid, inst, "health-freeze:carrier_unsupported",
+                container_id))
+            asyncio.create_task(hub.drop_ami(str(iid)))
+            return _frozen(h, st, rmax)
     if state == "PIN_PROBLEM":
         # wrong/blocked PIN won't recover by retrying — surface immediately.
         h["frozen_code"] = st["reason_code"]
@@ -2587,7 +2723,10 @@ async def update_automation_poller():
     await asyncio.sleep(30)
     while True:
         try:
-            await asyncio.to_thread(update_check.automation_cycle)
+            result = await asyncio.to_thread(update_check.automation_cycle)
+            if (operations.container_stack_enabled() and isinstance(result, dict)
+                    and result.get("auto_update_requested")):
+                await asyncio.to_thread(operations.launch_container_update)
         except Exception as exc:  # noqa: a failed poll must never take the control plane down
             log.warning("background update check failed: %s", type(exc).__name__)
         await asyncio.sleep(max(300, UPDATE_CHECK_INTERVAL_SECONDS))
@@ -2595,6 +2734,8 @@ async def update_automation_poller():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if operations.container_stack_enabled():
+        await asyncio.to_thread(operations.settle_container_service_restart)
     _keep_modem_storage_on_upgrade(store.schema_version())
     store.set_subscriber_resolver(_line_subscriber)
     try:
@@ -2832,8 +2973,15 @@ async def api_sim_detect(reader_index: int = 0):
         raise HTTPException(400, "reader index out of range")
     name = rlist[reader_index]
     async with hub.reader_lock(name):
-        return await asyncio.to_thread(
-            lambda: _client_card_info(sim.read_card(reader_index).dict()))
+        card = await asyncio.to_thread(sim.read_card, reader_index)
+    # This read used to reach only the form. A draft waiting on a field the insertion read
+    # missed then stayed a draft until the operator also pressed Save.
+    entry = hub.cards.get(name)
+    if entry is not None and _merge_card_read(entry, card):
+        iid = str(entry.get("matched") or "")
+        if iid and not _draft_needs_card_read(name):
+            asyncio.create_task(_auto_start_hotplugged_line(iid))
+    return _client_card_info(card.dict())
 
 
 def _resolve_reader_index(body: dict) -> int:
@@ -3244,7 +3392,9 @@ def _modem_active_slot_capacity(hardware_id: str, sibling_count: int) -> int:
     identity = (_device_identities().get(hardware_id)
                 or _modem_identity_for_reader(f"VoWiFi Modem {hardware_id} 00 00")
                 or {})
-    raw = (identity.get("channel_allocated")
+    # A card with too few channels still serves every slot on a shared one.
+    raw = (identity.get("slots_served")
+           or identity.get("channel_allocated")
            or identity.get("channel_capacity")
            or identity.get("slots")
            or sibling_count)
@@ -3981,6 +4131,13 @@ async def _unified_devices() -> list[dict]:
     configured_exits = settings.get("proxy", {}).get("exits", {}) or {}
     available_countries = sorted(country for country, value in configured_exits.items()
                                  if isinstance(value, dict) and value.get("enabled", False))
+    # Host routing publishes per-line state, while the container SOCKS transport publishes
+    # one shared listener/state per country.  Device presentation must understand both
+    # contracts: a working container exit otherwise appears as "Not connected" even while
+    # the Engine is actively sending IKE through it.
+    egress_state = egress.status()
+    egress_lines = egress_state.get("lines") or {}
+    egress_exits = egress_state.get("exits") or {}
     result = []
     for device_id in device_ids:
         native_card = native_readers.get(device_id)
@@ -4005,6 +4162,11 @@ async def _unified_devices() -> list[dict]:
                       "flight_mode": False})
         cell_desired = bool(wanted.get("cellular_enabled"))
         vowifi_desired = bool(wanted.get("vowifi_enabled"))
+        if inst and not is_native_reader:
+            # A modem's switch is device-wide, but the line it would start can be disabled on
+            # its own (a carrier without VoWiFi is provisioned that way). Showing the switch on
+            # over a disabled line read as "enabled but no line is running" forever.
+            vowifi_desired = vowifi_desired and bool(inst.get("enabled", True))
         flight_desired = bool(wanted.get("flight_mode"))
         line_status = _cached_line_status(inst) if inst else None
         running = bool(inst) and (line_status or {}).get("state") != "STOPPED"
@@ -4019,6 +4181,12 @@ async def _unified_devices() -> list[dict]:
         elif is_draft:
             vowifi.update(available=False,
                           reason="Automatic setup is waiting for SIM or hardware information")
+        support_source = inst or native_card or {}
+        vowifi["support"] = vowifi_support.for_instance(
+            support_source if support_source.get("mcc") else {})
+        if (vowifi["support"]["status"] == vowifi_support.UNSUPPORTED
+                and vowifi.get("actual") == "off" and not vowifi.get("reason")):
+            vowifi["reason"] = vowifi["support"]["reason"]
 
         actual_state = observed.get("actual") or {}
         # Published by the orchestrator when this gateway is configured VoWiFi-only
@@ -4091,12 +4259,30 @@ async def _unified_devices() -> list[dict]:
                 "carrier_identity": (inst or {}).get("carrier_identity") or {},
             }
         carrier = _carrier_description(inst, card_info, cellular_view)
+        exit_country = egress.line_country(inst or card_info)
+        line_exit = egress_lines.get(str(inst["id"]) if inst else "", {}) or {}
+        country_exit = egress_exits.get(exit_country, {}) or {}
+        active_exit = line_exit if line_exit.get("node") else country_exit
         if native_card:
             hardware_imei, _hardware_id, _hardware_type = _hardware_imei_for_card(
                 native_card, cards)
             hardware_record = device_state.hardware().get(device_id) or hardware_record
         else:
             hardware_imei = cfg.normalize_imei(identity.get("imei", ""))
+        draft_missing = None
+        if is_draft and card_info.get("present"):
+            # Exactly the rule that decides promotion, so the page cannot name one field
+            # while the line is really waiting for another.
+            missing = draft_missing = _draft_missing(inst, card_info, cards)
+            if missing == ["IMEI"]:
+                vowifi.update(available=False, reason=(
+                    "Set a 15-digit IMEI in Hardware; the line will then start automatically"))
+            elif "IMEI" in missing:
+                vowifi.update(available=False, reason=(
+                    "Set the IMEI in Hardware and complete the SIM details; the line will then start automatically"))  # noqa: E501 - one literal: the i18n coverage test reads it
+            elif missing:
+                vowifi.update(available=False, reason=(
+                    "Complete the SIM details; the line will then start automatically"))
         masked_imei = _masked_identifier(hardware_imei)
         bridge_active = bool(actual_state.get("vowifi_bridge_active"))
         logical_channels = (None if is_native_reader else
@@ -4147,25 +4333,26 @@ async def _unified_devices() -> list[dict]:
                        # engine config (config.py).
                        "accept_epdg_rekey": bool((inst or {}).get("accept_epdg_esp_rekey",
                            (cfg.get_settings().get("rekey") or {}).get("accept_epdg", False)))},
-            "egress": {"node": (egress.status().get("lines") or {}).get(
-                str(inst["id"]) if inst else "", {}).get("node") or "",
+            "egress": {"node": active_exit.get("node") or "",
                 # The picker lives on the settings page, so without these the device page shows
                 # a node that silently disagrees with what the operator chose.
-                **{key: ((egress.status().get("exits") or {}).get(
-                    egress.line_country(inst or card_info), {}).get(key) or "")
+                **{key: (country_exit.get(key) or "")
                    for key in ("pinned_node", "pin_mode", "selection",
                                # Why the exit moved, and whether the pinned node is still
                                # serving a cooldown — otherwise a mismatch looks arbitrary.
                                "last_change", "pinned_cooldown_seconds")},
-                "country": egress.line_country(inst or card_info),
+                "country": exit_country,
                 "detected_country": egress.country_for_mcc((inst or card_info).get("mcc")),
                 "override": egress.normalize_country((inst or {}).get("proxy_country")),
                 "available_countries": available_countries},
             "provisioning": {"state": "draft" if is_draft else "ready" if inst else "detecting",
-                "missing": ([key for key, value in (
-                    ("imsi", (inst or card_info).get("imsi")),
-                    ("imei", hardware_imei),
-                    ("smsc", (inst or card_info).get("smsc"))) if not value])},
+                # IMEI is set on the Hardware tab; everything else on the SIM tab.
+                "missing": ([_DRAFT_FIELD_KEYS[name] for name in draft_missing]
+                            if draft_missing is not None else
+                            [key for key, value in (
+                                ("imsi", (inst or card_info).get("imsi")),
+                                ("imei", hardware_imei),
+                                ("smsc", (inst or card_info).get("smsc"))) if not value])},
             "capabilities": {"cellular": {"desired": cell_desired, "actual": cell_actual,
                                              "reason": cell_reason},
                              "flight": {"desired": flight_desired,
@@ -4190,6 +4377,27 @@ async def api_devices():
             "shared": device_state.status().get("shared") or {}}
 
 
+@app.post("/api/devices/{device_id}/sim/reread")
+async def api_device_sim_reread(device_id: str):
+    """Read this device's SIM again; a draft completed by it is promoted and started."""
+    cards = hub.cards_list()
+    name = next((str(card.get("name") or "") for card in cards
+                 if card.get("present") and _device_for_card(card, cards)[0] == device_id), "")
+    if not name:
+        raise HTTPException(404, "no SIM is present in this device")
+    filled = await _reread_card(name)
+    iid = str((hub.cards.get(name) or {}).get("matched") or "")
+    inst = cfg.get_instance(iid) if iid else None
+    is_draft = bool(inst and inst.get("provisioning_state") == "draft")
+    missing = _draft_missing(inst, hub.cards.get(name) or {}, hub.cards_list()) if is_draft else []
+    # Only a complete draft is handed on; one still waiting for the IMEI or a PIN reports that.
+    completing = is_draft and not missing
+    if completing:
+        asyncio.create_task(_auto_start_hotplugged_line(iid))
+    await hub.broadcast({"type": "cards", "cards": _client_cards()})
+    return {"ok": True, "updated": filled, "completing": completing, "missing": missing}
+
+
 @app.put("/api/devices/{device_id}/hardware")
 async def api_device_hardware(device_id: str, body: dict):
     """Save user-managed physical hardware identity (currently native-reader IMEI)."""
@@ -4209,26 +4417,48 @@ async def api_device_hardware(device_id: str, body: dict):
         "stable_path": device.get("stable_path") or "", "imei": imei})
 
     # A running line renders the device identity inside its container. Apply a hardware
-    # change immediately to the SIM currently inserted in this reader.
+    # change immediately to the SIM currently inserted in this reader. A new reader line is
+    # deliberately a stopped draft until its hardware IMEI exists; saving that last missing
+    # fact must also promote and start it, without requiring a second Save on the SIM tab.
     iid = str(device.get("instance_id") or "")
     applied = False
+    started = False
     if iid and imei:
         inst = cfg.get_instance(iid) or {}
-        previous_imeisv = str(inst.get("imeisv") or "")
-        svn = (previous_imeisv[-2:] if len(previous_imeisv) == 16
-               and previous_imeisv[-2:].isdigit() else _random_svn())
-        inst = cfg.upsert_instance({"id": iid, "imei": imei,
-                                    "imei_source_device_id": device_id,
-                                    "imeisv": cfg.imeisv_from_imei(imei, svn=svn)})
-        if await asyncio.to_thread(engine.is_running, iid):
+        cards = hub.cards_list()
+        card_info = next((item for item in cards if item.get("present") and (
+            str(item.get("hardware_id") or "") == device_id
+            or (inst.get("iccid") and str(item.get("iccid") or "")
+                == str(inst.get("iccid") or "")))), None)
+        if inst.get("provisioning_state") == "draft" and card_info:
+            inst = await asyncio.to_thread(_auto_promote_card_draft, inst, card_info, cards)
+        else:
+            previous_imeisv = str(inst.get("imeisv") or "")
+            svn = (previous_imeisv[-2:] if len(previous_imeisv) == 16
+                   and previous_imeisv[-2:].isdigit() else _random_svn())
+            inst = cfg.upsert_instance({"id": iid, "imei": imei,
+                                        "imei_source_device_id": device_id,
+                                        "imeisv": cfg.imeisv_from_imei(imei, svn=svn)})
+        running = await asyncio.to_thread(engine.is_running, iid)
+        if running:
             await hub.drop_ami(iid)
             await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
                                     dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
             hub.reset_health(iid, "configuration_restart")
             applied = True
+        elif inst.get("provisioning_state") != "draft":
+            allowed, _reason = _line_auto_start_allowed(inst)
+            if allowed:
+                await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
+                                        dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
+                hub.reset_health(iid, "hardware_identity_completed")
+                applied = True
+                started = True
     await hub.broadcast({"type": "hardware", "device": device_id})
+    still_missing = (list(inst.get("auto_provision_missing") or [])
+                     if iid and imei and inst.get("provisioning_state") == "draft" else [])
     return {"ok": True, "imei_masked": _masked_identifier(record.get("imei")),
-            "applied": applied}
+            "applied": applied, "started": started, "missing": still_missing}
 
 
 def _remove_device_from_document(path: str, device_id: str, mapping_key: str) -> None:
@@ -4279,6 +4509,53 @@ async def api_device_cellular(device_id: str):
         raise HTTPException(404, "no such physical device")
     return {"device_id": device_id, "capability": device["capabilities"]["cellular"],
             "cellular": device.get("cellular")}
+
+
+def _device_modem_path(device_id: str) -> str:
+    """The live ModemManager object of a present modem, or ""."""
+    _desired, observed, _assignments = _device_sources()
+    item = (observed.get("devices") or {}).get(device_id) or {}
+    if not item.get("present"):
+        return ""
+    return str((item.get("cellular") or {}).get("mm_object") or item.get("mm_object") or "")
+
+
+@app.get("/api/devices/{device_id}/ims")
+async def api_device_ims(device_id: str):
+    path = _device_modem_path(device_id)
+    if not path:
+        return {"supported": False, "reason": "The modem is not available."}
+    return await asyncio.to_thread(modem_ims.status, path)
+
+
+@app.get("/api/devices/{device_id}/voice-audio")
+async def api_device_voice_audio(device_id: str):
+    """Read-only: can this modem hand cellular call audio to the gateway?"""
+    path = _device_modem_path(device_id)
+    if not path:
+        return {"status": modem_voice.UNKNOWN, "reason": "The modem is not available."}
+    return await asyncio.to_thread(modem_voice.status, path)
+
+
+@app.put("/api/devices/{device_id}/ims")
+async def api_device_ims_set(device_id: str, body: dict):
+    enabled = (body or {}).get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(400, "enabled must be boolean")
+    async with capability_lock:
+        path = _device_modem_path(device_id)
+        if not path:
+            raise HTTPException(409, "The modem is not available.")
+        current = await asyncio.to_thread(modem_ims.status, path)
+        if not current.get("supported"):
+            raise HTTPException(409, current.get("reason") or "IMS is not supported")
+        result = await asyncio.to_thread(modem_ims.set_enabled, path, enabled)
+    if not result.get("ok"):
+        raise HTTPException(502, result.get("error") or "the modem rejected the change")
+    log.info("modem %s: VoLTE/IMS %s; modem restarting", device_id,
+             "enabled" if enabled else "disabled")
+    await hub.broadcast({"type": "capability", "device": device_id, "ims": enabled})
+    return result
 
 
 @app.post("/api/devices/{device_id}/diagnostics")
@@ -4772,7 +5049,8 @@ def api_system_status():
     settings = cfg.get_settings()
     # Served from the poller's sample: collecting here would shell out to vcgencmd/dmesg on
     # every page load of an already power-constrained box.
-    host = hub.host_snapshot or sysinfo.collect(cfg.DATA_DIR)
+    host = hub.host_snapshot or sysinfo.collect(
+        cfg.DATA_DIR, include_docker_storage=False)
     return {
         "system_name": "MDD Sim Gateway",
         "host": host,
@@ -4782,6 +5060,10 @@ def api_system_status():
         "unheard_voicemails": sum(store.unheard_voicemail_counts().values()),
         "timezone": settings.get("timezone") or "UTC",
         "version": VERSION,
+        "deployment": {
+            "container_stack": operations.container_stack_enabled(),
+            "host_restart_available": not operations.container_stack_enabled(),
+        },
         "repository_url": f"https://github.com/{update_check.repository()}",
         "backups": operations.list_local_backups(),
         "security": {
@@ -4838,10 +5120,17 @@ async def api_system_repository_stars(force: bool = False):
 
 @app.post("/api/system/update/apply")
 async def api_system_update_apply(body: dict):
-    """One-click update: publish a request for the host orchestrator, which runs the detached
-    updater (host/mdd_update.py). Responds immediately; progress is polled separately."""
+    """Start a detached update through the host orchestrator or container-stack helper.
+
+    The response remains immediate in both deployment modes; progress is polled separately.
+    """
     version = body.get("version")
-    return await asyncio.to_thread(update_check.request_apply, version=version)
+    result = await asyncio.to_thread(update_check.request_apply, version=version)
+    if result.get("ok") and operations.container_stack_enabled():
+        launched = await asyncio.to_thread(operations.launch_container_update)
+        if not launched.get("ok"):
+            return launched
+    return result
 
 
 @app.get("/api/system/update/progress")
@@ -4918,12 +5207,20 @@ async def api_system_maintenance(body: dict):
             except Exception as exc:
                 failed[iid] = str(getattr(exc, "detail", exc))
         return {"ok": not failed, "action": action, "restarted": restarted, "failed": failed}
-    # Restarting services is the one maintenance action this process cannot perform itself:
-    # it is unprivileged, and in every scope it is itself one of the things being restarted.
+    # Publish one shared request contract. The Pi host orchestrator consumes it externally;
+    # container mode launches its bounded Docker executor after the response has been flushed.
     scope = {"restart_control": "control", "restart_services": "services",
              "restart_host": "host"}.get(action)
     if scope:
         result = await asyncio.to_thread(operations.request_service_restart, scope)
+        if result.get("ok") and operations.container_stack_enabled():
+            async def restart_after_response():
+                # Let Uvicorn flush the accepted response before the Docker daemon stops us.
+                await asyncio.sleep(.75)
+                await asyncio.to_thread(operations.perform_container_service_restart, scope)
+            task = asyncio.create_task(restart_after_response())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
         return {**result, "action": action}
     raise HTTPException(400, "unknown maintenance action")
 
@@ -5026,8 +5323,9 @@ def _only_instance_name_changed(before: dict | None, after: dict) -> bool:
     """
     if before is None or before == after:
         return False
-    before_runtime = {key: value for key, value in before.items() if key != "name"}
-    after_runtime = {key: value for key, value in after.items() if key != "name"}
+    ignored = cfg.RUNTIME_ONLY_INSTANCE_FIELDS | {"name"}
+    before_runtime = {key: value for key, value in before.items() if key not in ignored}
+    after_runtime = {key: value for key, value in after.items() if key not in ignored}
     return before_runtime == after_runtime
 
 
@@ -6191,7 +6489,7 @@ def api_keepalive_save(iid: str, body: dict):
 
 @app.get("/api/keepalive/summary")
 async def api_keepalive_summary():
-    """One aggregate for the whole page: at most five lines, so a per-line fan-out of four
+    """One aggregate for the whole page: at most ten lines, so a per-line fan-out of four
     requests each would be pure overhead."""
     now = int(time.time())
     rows = []
