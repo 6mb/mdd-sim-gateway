@@ -70,8 +70,8 @@ supported.
 1. **Check that the host sees the modem.** After plugging it in, the host should show
    `/dev/ttyUSB*`, `/dev/cdc-wdm*` and a `wwan*` interface; a standard PC/SC reader only needs to
    appear under `/dev/bus/usb`. Mainstream distribution kernels normally include the drivers;
-   trimmed kernels such as Synology's may not — see the
-   [compatibility and driver catalogue](drivers/README.en.md). If the host already runs
+   trimmed kernels such as Synology's may not. A DS1621+ can use the driver pack published with each
+   Release — see the [compatibility and driver catalogue](drivers/README.en.md). If the host already runs
    ModemManager (enabled by default on Ubuntu and others), stop it first, or it will compete with
    the containers for the modem.
 2. **Download the Compose file.** Get `mdd-sim-gateway-compose-vX.Y.Z.yaml` from
