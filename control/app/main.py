@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support)
+               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -4526,6 +4526,15 @@ async def api_device_ims(device_id: str):
     if not path:
         return {"supported": False, "reason": "The modem is not available."}
     return await asyncio.to_thread(modem_ims.status, path)
+
+
+@app.get("/api/devices/{device_id}/voice-audio")
+async def api_device_voice_audio(device_id: str):
+    """Read-only: can this modem hand cellular call audio to the gateway?"""
+    path = _device_modem_path(device_id)
+    if not path:
+        return {"status": modem_voice.UNKNOWN, "reason": "The modem is not available."}
+    return await asyncio.to_thread(modem_voice.status, path)
 
 
 @app.put("/api/devices/{device_id}/ims")
