@@ -192,12 +192,18 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   // events. One includes the detailed OK reason while the other may omit it. Render one
   // canonical healthy message so those feeds cannot make the text flicker every few seconds.
   const cellular = device.cellular || {}
+  const unsupported = kind === 'vowifi' && vowifiUnsupported(device)
+  // For a carrier without Wi-Fi Calling the device snapshot explains why, while live line
+  // events report the stopped line ("Stopped."); the two alternated every few seconds. The
+  // carrier's answer is the one that tells the user something, so it wins while the line is off.
+  const unsupportedReason = unsupported && c.actual === 'off'
+    ? (device.capabilities?.vowifi?.support?.reason || '') : ''
   const detail = c.actual === 'on'
     ? (kind === 'vowifi' ? t('Working — connected to the carrier over Wi-Fi.')
       : kind === 'cellular' ? [t('Mobile data connected'), cellular.operator, cellular.ip].filter(Boolean).join(' · ')
       : t('cap.help.on'))
+    : unsupportedReason ? t(unsupportedReason)
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
-  const unsupported = kind === 'vowifi' && vowifiUnsupported(device)
   const badgeState = capabilityBadgeState(device, kind, displayedState)
   // A draft line starts by itself once these are filled in. IMEI belongs to the reader
   // (Hardware tab); every other field belongs to the SIM (SIM tab).
