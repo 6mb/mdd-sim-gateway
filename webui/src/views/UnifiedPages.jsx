@@ -33,16 +33,17 @@ function capabilityBadgeState(device, kind, actual) {
   return kind === 'vowifi' && actual === 'off' && vowifiUnsupported(device) ? 'unsupported' : actual
 }
 
-// One badge per capability: a modem whose 4G works must not look broken because VoWiFi does not.
+// One badge per capability, on every device, so the list reads the same way throughout: a
+// modem whose 4G works must not look broken because VoWiFi does not, and a smart-card reader
+// says outright that it has no 4G rather than leaving the badge out.
 function DeviceStatusBadges({ device }) {
   const { t } = useI18n()
   if (device.present === false) return <Badge state="error">{t('Offline')}</Badge>
   const vowifi = capability(device, 'vowifi').actual
-  const badges = []
-  if (supportsCellular(device)) {
-    badges.push(['4g', capability(device, 'cellular').actual, t('4G')])
-  }
-  badges.push(['vowifi', capabilityBadgeState(device, 'vowifi', vowifi), 'VoWiFi'])
+  const badges = [
+    ['4g', supportsCellular(device) ? capability(device, 'cellular').actual : 'unsupported', t('4G')],
+    ['vowifi', capabilityBadgeState(device, 'vowifi', vowifi), 'VoWiFi'],
+  ]
   return <span className="u-badge-row">{badges.map(([key, state, label]) =>
     <Badge key={key} state={state}>{`${label} · ${t(`cap.${state}`)}`}</Badge>)}</span>
 }
