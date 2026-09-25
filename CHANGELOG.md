@@ -6,6 +6,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **An upgraded gateway no longer serves the old WebUI from the browser's cache.** The page that
+  names which build to load is now marked `no-cache`, so every client revalidates it, and the
+  files it names -- whose names contain a hash of their contents -- are marked immutable. Before
+  this the answers carried an ETag but no caching rule at all, which let a client decide for
+  itself how long to reuse them; a web view, with no reload button, could keep showing the
+  previous build indefinitely.
+- **Messages works on a phone.** Below 760 px it shows the conversation list or one conversation
+  (or a new message) at a time, with a back button, and the system back gesture returns to the
+  list. A conversation row is a real button, so it opens on the first tap.
 - An outgoing MMS whose upload the modem refused part way through -- its MMSC socket
   occasionally answers `SEND FAIL` -- is submitted again on a fresh connection after 3 and then
   10 seconds instead of being marked failed at once. Only an attempt that stopped before the

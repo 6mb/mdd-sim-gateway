@@ -3,6 +3,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'Back to conversations': '返回会话列表',
   'update.error.proxy': '升级代理未配置、已从代理库移除或尚未就绪',
   'Automatic tries a direct connection first, then the available proxy library entries. The route that passes the check is reused for the download.': '自动模式先尝试直连，失败后再依次尝试可用的代理库条目；检查成功的线路会继续用于下载。',
   'Automatic — direct, then proxy library': '自动 · 先直连，后代理库', 'Direct only': '仅直连', 'Specified proxy': '指定代理',
