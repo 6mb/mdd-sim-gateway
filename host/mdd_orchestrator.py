@@ -36,6 +36,13 @@ try:
 except ImportError:  # pragma: no cover - installer provides PyYAML
     yaml = None
 
+
+def load_yaml_text(text: str) -> dict:
+    """Parse with libyaml when PyYAML has it: the same safe schema, far less CPU. The country
+    egress re-reads a subscription of hundreds of nodes every few seconds."""
+    loader = getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader
+    return yaml.load(text, Loader=loader) or {}
+
 # 0x8C7B (35963) is vpcd's own default port, which the distribution package hands to its
 # "Virtual PCD" reader. Two pcscd readers cannot listen on one port, so sharing that base
 # made the modem readers and the packaged reader fight over it — directory order decided
@@ -1936,7 +1943,7 @@ class Orchestrator:
     def reconcile_timezone(self):
         """Apply the validated WebUI timezone to the host without changing its hostname."""
         try:
-            document = yaml.safe_load((self.data / "config.yaml").read_text()) or {}
+            document = load_yaml_text((self.data / "config.yaml").read_text())
             timezone = str((document.get("settings") or {}).get("timezone") or "").strip()
         except Exception:
             return
@@ -1979,7 +1986,18 @@ class Orchestrator:
                     raise
         if yaml is None:
             raise RuntimeError("PyYAML is required for subscription mode")
-        return yaml.safe_load(cache.read_text(encoding="utf-8")) or {}
+        # The cache only changes on a refresh (every refresh_minutes), but this runs on every
+        # reconcile pass. Keep the parsed document until the file changes; hand out a copy so
+        # the proxy builders can never edit the cached one.
+        stat = cache.stat()
+        key = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        parsed = getattr(self, "_subscription_docs", None)
+        if parsed is None:
+            parsed = self._subscription_docs = {}
+        entry = parsed.get(str(cache))
+        if entry is None or entry[0] != key:
+            entry = parsed[str(cache)] = (key, load_yaml_text(cache.read_text(encoding="utf-8")))
+        return deepcopy(entry[1])
 
     def xray_bridge_outbound(self, node: dict, sing_tag: str, runtime_id: str) -> dict:
         """Register one loopback-only Xray endpoint and return its sing-box detour."""
@@ -3099,7 +3117,7 @@ class Orchestrator:
             # hardware lives beside proxy in settings; desired v1 publishers may omit it.
             if not desired.get("hardware"):
                 try:
-                    conf = yaml.safe_load((self.data / "config.yaml").read_text()) or {}
+                    conf = load_yaml_text((self.data / "config.yaml").read_text())
                     desired["hardware"] = (conf.get("settings") or {}).get("hardware") or {}
                 except Exception:
                     pass

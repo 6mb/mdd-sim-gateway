@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support)
+               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -4528,6 +4528,15 @@ async def api_device_ims(device_id: str):
     return await asyncio.to_thread(modem_ims.status, path)
 
 
+@app.get("/api/devices/{device_id}/voice-audio")
+async def api_device_voice_audio(device_id: str):
+    """Read-only: can this modem hand cellular call audio to the gateway?"""
+    path = _device_modem_path(device_id)
+    if not path:
+        return {"status": modem_voice.UNKNOWN, "reason": "The modem is not available."}
+    return await asyncio.to_thread(modem_voice.status, path)
+
+
 @app.put("/api/devices/{device_id}/ims")
 async def api_device_ims_set(device_id: str, body: dict):
     enabled = (body or {}).get("enabled")
@@ -7663,8 +7672,29 @@ async def ws_endpoint(ws: WebSocket):
 
 
 # ----------------------------- static WebUI -----------------------------
+# The page that names which build to load must be revalidated every time; the files it names
+# never change, because their names contain a hash of their contents.
+#
+# Without this the upgrade does not arrive. The answers carry an ETag but no Cache-Control, so a
+# client is free to guess how long they stay fresh -- and a WebView, which has no reload button,
+# can keep showing the previous build until its cache is evicted. That looks exactly like an
+# upgrade that did not apply.
+INDEX_CACHE_CONTROL = "no-cache"
+ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+class _HashedAssets(StaticFiles):
+    """Static files whose names carry a content hash, so a name maps to one immutable body."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = ASSET_CACHE_CONTROL
+        return response
+
+
 if os.path.isdir(WEBUI_DIR):
-    app.mount("/assets", StaticFiles(directory=os.path.join(WEBUI_DIR, "assets")), name="assets")
+    app.mount("/assets", _HashedAssets(directory=os.path.join(WEBUI_DIR, "assets")),
+              name="assets")
 
     @app.get("/{full_path:path}")
     def spa(full_path: str):
@@ -7674,8 +7704,10 @@ if os.path.isdir(WEBUI_DIR):
             return JSONResponse({"detail": "API endpoint not found"}, status_code=404)
         candidate = os.path.join(WEBUI_DIR, full_path)
         if full_path and os.path.isfile(candidate):
-            return FileResponse(candidate)
+            # Everything else at the root -- the logo, the icons -- is small, rarely changed and
+            # not hashed, so it revalidates like the page itself.
+            return FileResponse(candidate, headers={"Cache-Control": INDEX_CACHE_CONTROL})
         index = os.path.join(WEBUI_DIR, "index.html")
         if os.path.isfile(index):
-            return FileResponse(index)
+            return FileResponse(index, headers={"Cache-Control": INDEX_CACHE_CONTROL})
         return JSONResponse({"error": "webui not built"}, status_code=404)

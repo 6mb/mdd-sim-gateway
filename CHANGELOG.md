@@ -2,6 +2,49 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc9] - 2026-09-25
+
+Ninth release candidate. The automatic update channel stays on 1.9.5.
+
+### Added
+
+- A device's 4G tab shows whether the modem can hand cellular call audio to the gateway, from a
+  read-only probe. The DJI-customised EC25/EG25-G reports `firmware_locked`: calls can be answered
+  but carry no audio, so auto-answer, recording and browser calls are not possible on it.
+
+### Changed
+
+- Idle CPU on a Raspberry Pi 3 drops from about one core to a quarter: the configuration and the
+  country-exit subscription are parsed once per change instead of on every request, Hardware
+  checks every 8 s when nothing is in flight (waking at once on hotplug or a UI change), and the
+  container health checks run every 30 s.
+
+### Fixed
+
+- A container update failed, and so did its rollback, when an old base container took longer than
+  Docker's stop timeout to exit, leaving Hardware and Egress stopped. The updater now stops each
+  base container itself, waits up to two minutes for it to exit, and removes containers a failed
+  recreate left behind. This protects the update *after* the one that installs it, since the
+  updater comes from the release being updated from.
+- A modem ModemManager gave up on at start-up (its QMI port timed out) stayed unused until someone
+  reset it by hand. Hardware now resets such a modem through its AT port after two minutes, at
+  most once every five minutes.
+- **An upgraded gateway no longer serves the old WebUI from the browser's cache.** The page that
+  names which build to load is now marked `no-cache`, so every client revalidates it, and the
+  files it names -- whose names contain a hash of their contents -- are marked immutable. Before
+  this the answers carried an ETag but no caching rule at all, which let a client decide for
+  itself how long to reuse them; a web view, with no reload button, could keep showing the
+  previous build indefinitely.
+- **Messages works on a phone.** Below 760 px it shows the conversation list or one conversation
+  (or a new message) at a time, with a back button, and the system back gesture returns to the
+  list. A conversation row is a real button, so it opens on the first tap.
+- An outgoing MMS whose upload the modem refused part way through -- its MMSC socket
+  occasionally answers `SEND FAIL` -- is submitted again on a fresh connection after 3 and then
+  10 seconds instead of being marked failed at once. Only an attempt that stopped before the
+  last chunk, or never connected, is repeated, since the MMSC cannot have received it whole; a
+  request that may have arrived complete is still never sent twice. The error now carries the
+  modem's own answer and the byte offset where the upload stopped.
+
 ## [1.12.0-rc8] - 2026-09-25
 
 Eighth release candidate. The automatic update channel stays on 1.9.5.
