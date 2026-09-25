@@ -65,7 +65,8 @@ sudo ./install.sh install
 
 1. **确认宿主已识别蜂窝模块。**插入模块后宿主应出现 `/dev/ttyUSB*`、`/dev/cdc-wdm*` 和
    `wwan*` 网卡；普通 PC/SC 读卡器只需出现在 `/dev/bus/usb`。节点缺失说明宿主缺少内核驱动，
-   主流发行版内核一般自带所需驱动；群晖等精简内核可能缺失，见 [兼容性与驱动目录](drivers/README.md)。
+   主流发行版内核一般自带所需驱动；群晖等精简内核可能缺失，DS1621+ 可使用随 Release 发布的驱动包，
+   见 [兼容性与驱动目录](drivers/README.md)。
    宿主若已运行 ModemManager（Ubuntu 等发行版默认启用），先停用，否则它会和容器抢占模块。
 2. **下载 Compose 文件。**从 [Releases](https://github.com/MddIdd/mdd-sim-gateway/releases) 下载
    `mdd-sim-gateway-compose-vX.Y.Z.yaml`，四个镜像已固定为该版本。

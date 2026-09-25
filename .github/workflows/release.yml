@@ -186,8 +186,31 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
+  driver-pack:
+    name: Synology DS1621+ driver pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify tag and version
+        run: test "v$(tr -d '\n' < VERSION)" = "${GITHUB_REF_NAME}"
+      # Fails unless every module reproduces the one validated on hardware, and unless the
+      # pack reproduces the checksum the compatibility catalogue pins.
+      - name: Rebuild and verify the driver pack
+        run: |
+          set -eu
+          sh tools/drivers/build-synology-pack.sh dist
+          python3 tools/validate_nas_catalog.py
+          expected=$(python3 -c "import json;print(json.load(open('drivers/catalog/synology-ds1621plus-dsm-7.4.1-90080-k4.4.302plus-x86_64.json'))['driver_pack']['sha256'])")
+          test "$(sha256sum dist/mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz | cut -d' ' -f1)" = "$expected"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: driver-pack
+          path: dist/mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
   package:
-    needs: [engine, control, runtime]
+    needs: [engine, control, runtime, driver-pack]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -228,6 +251,10 @@ jobs:
         with:
           pattern: runtime-images-*
           merge-multiple: true
+          path: .
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: driver-pack
           path: .
       - name: Publish multi-architecture image manifests
         env:
@@ -306,7 +333,8 @@ jobs:
             "mdd-sim-gateway-hardware-${GITHUB_REF_NAME}-arm64.tar.gz" \
             "mdd-sim-gateway-hardware-${GITHUB_REF_NAME}-amd64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-arm64.tar.gz" \
-            "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-amd64.tar.gz" > SHA256SUMS
+            "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-amd64.tar.gz" \
+            "mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz" > SHA256SUMS
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -331,6 +359,7 @@ jobs:
             "mdd-sim-gateway-hardware-${GITHUB_REF_NAME}-amd64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-arm64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-amd64.tar.gz" \
+            "mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz" \
             SHA256SUMS \
             --verify-tag --notes-file "$notes_file" --title "MDD Sim Gateway ${GITHUB_REF_NAME}" \
             "${release_flags[@]}"

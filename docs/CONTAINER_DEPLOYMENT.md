@@ -56,9 +56,22 @@ Hardware 容器内。
 [NAS 兼容性与驱动目录](../drivers/README.md)人工比对是否存在完全匹配的记录。
 
 驱动必须同时匹配厂商、型号、CPU 平台、架构、系统完整 build 和内核 release，不得安装相近
-型号或相近系统版本的包。目录中当前唯一的记录（DS1621+、DSM 7.4.1-90080、内核 4.4.302+）
-状态为 `driver-verified`，其驱动包仍是 `packaging-pending`，**Release 尚未提供任何可安装的
-驱动资产**。在出现 `release-ready` 记录之前，不要使用来源不明的 `.ko` 或 `.spk`。
+型号或相近系统版本的包，也不要使用来源不明的 `.ko` 或 `.spk`。
+
+**DS1621+（DSM 7.4.1-90080、内核 4.4.302+）** 已有正式驱动包，随每个 Release 发布：
+`mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz`，并纳入 Release 的 `SHA256SUMS`。它由 CI 用群晖公开工具链和未经修改的 Linux
+v4.4.302 源码重新构建，与实机验证过的模块逐字节一致。安装需要一次 SSH：
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing     # 与驱动包放在同一目录
+tar -xzf mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz
+cd mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64
+sudo sh install.sh
+```
+
+安装脚本在改动任何文件前核对架构、内核、DSM 版本、平台和模块校验值，之后每次开机都会重复这些
+检查；DSM 升级后不匹配就不加载，需要等对应新版本的驱动包。卸载执行包内的 `sudo sh uninstall.sh`。
+装好后重新插拔模块或重启 NAS，确认上面的设备节点出现，再创建项目。
 
 ## 3. 在 Synology Container Manager 创建项目
 
