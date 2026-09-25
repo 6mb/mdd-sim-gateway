@@ -6406,7 +6406,7 @@ def api_keepalive_save(iid: str, body: dict):
 
 @app.get("/api/keepalive/summary")
 async def api_keepalive_summary():
-    """One aggregate for the whole page: at most five lines, so a per-line fan-out of four
+    """One aggregate for the whole page: at most ten lines, so a per-line fan-out of four
     requests each would be pure overhead."""
     now = int(time.time())
     rows = []
