@@ -586,5 +586,73 @@ class HardwareRuntimeTests(unittest.TestCase):
                 ATPort.__new__(ATPort)._update_dtr_state()
 
 
+
+class AdaptiveCadenceTests(unittest.TestCase):
+    """A pass forks mmcli/nmcli per modem. At a fixed 3 s cadence that was about a fifth of a
+    Raspberry Pi core for a modem nobody was touching."""
+
+    def run_wait(self, app, signatures):
+        clock = [0.0]
+        with patch("runtime.hardware.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("runtime.hardware.time.sleep",
+                      side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+                patch.object(app, "wake_signature", side_effect=signatures):
+            app.wait_for_next_pass()
+        return clock[0]
+
+    def test_a_settled_plane_waits_the_idle_interval(self):
+        from runtime import hardware
+        app = HardwareSupervisor(interval=3.0)
+        app.settled = True
+        waited = self.run_wait(app, lambda: "same")
+        self.assertGreaterEqual(waited, hardware.IDLE_INTERVAL - 0.11)
+        self.assertLess(waited, hardware.IDLE_INTERVAL + 0.2)
+
+    def test_a_change_wakes_the_next_pass_at_once(self):
+        app = HardwareSupervisor(interval=3.0)
+        app.settled = True
+        calls = iter(["before", "before", "after"])
+        waited = self.run_wait(app, lambda: next(calls, "after"))
+        self.assertLess(waited, 1.2)
+
+    def test_work_in_flight_keeps_the_fast_cadence(self):
+        app = HardwareSupervisor(interval=3.0)
+        app.settled = False
+        signature = Mock(return_value="same")
+        clock = [0.0]
+        with patch("runtime.hardware.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("runtime.hardware.time.sleep",
+                      side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+                patch.object(app, "wake_signature", signature):
+            app.wait_for_next_pass()
+        self.assertLess(clock[0], 3.2)
+        signature.assert_not_called()
+
+    def test_stopping_ends_the_wait(self):
+        app = HardwareSupervisor(interval=3.0)
+        app.settled = True
+        app.stop = True
+        self.assertEqual(self.run_wait(app, lambda: "same"), 0.0)
+
+    def test_the_signature_sees_a_new_kernel_device_and_a_bridge_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = HardwareSupervisor(data_path=Path(temp))
+            process = Mock(); process.poll.return_value = None
+            app.bridges = {"modem-a": process}
+            with patch("runtime.hardware.kernel_objects", return_value={("tty", "ttyUSB2")}):
+                before = app.wake_signature()
+            with patch("runtime.hardware.kernel_objects",
+                       return_value={("tty", "ttyUSB2"), ("tty", "ttyUSB3")}):
+                self.assertNotEqual(app.wake_signature(), before)
+            process.poll.return_value = 1
+            with patch("runtime.hardware.kernel_objects", return_value={("tty", "ttyUSB2")}):
+                self.assertNotEqual(app.wake_signature(), before)
+
+    def test_the_idle_interval_leaves_room_for_the_health_check(self):
+        from runtime import hardware
+        # Dockerfile.hardware fails the check when status.json is older than 15 s.
+        self.assertLessEqual(hardware.IDLE_INTERVAL + 5, 15)
+
+
 if __name__ == "__main__":
     unittest.main()
