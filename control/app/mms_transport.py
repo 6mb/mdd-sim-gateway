@@ -434,6 +434,10 @@ class ModemSocketHttp:
 
     name = "modem"
     CONNECT_ID = 11          # the highest socket id, well away from anything else using QI*
+    # The request deadline scales with the upload (two seconds a chunk), so it can be an hour.
+    # A connection that has not opened in this long will not open, and an MMS send retries
+    # a failed connection, so waiting the whole deadline each time held the modem ~12 minutes.
+    CONNECT_TIMEOUT = 30.0
     READ = 1500
 
     def __init__(self, command: ModemCommand, settings: dict, *, sleep=time.sleep,
@@ -508,7 +512,8 @@ class ModemSocketHttp:
             try:
                 self._require(f'AT+QICFG="dataformat",{self.at.DATAFORMAT}')
                 self._require(f'AT+QIOPEN={cid},{sid},"TCP","{host}",{port},0,0', 10)
-                self._wait_connected(sid, deadline)
+                self._wait_connected(
+                    sid, min(deadline, self.clock() + self.CONNECT_TIMEOUT))
             except MmsTransportError as exc:
                 exc.unsent = True
                 raise

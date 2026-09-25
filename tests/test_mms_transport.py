@@ -247,6 +247,30 @@ class ModemSocketTests(unittest.TestCase):
             self.client(fake).request("GET", "http://mmsc.example.test:8002/?id=1")
         self.assertTrue(raised.exception.unsent)
 
+    def test_a_connection_that_stays_closed_gives_up_long_before_the_upload_deadline(self):
+        fake = FakeQuectel(http_reply(b"ok"))
+        original = fake.handle
+
+        def never_open(command, timeout):
+            if command.startswith("AT+QISTATE="):
+                return True, ""
+            return original(command, timeout)
+
+        fake.handle = never_open
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        client = t.ModemSocketHttp(
+            t.ModemCommand("/org/freedesktop/ModemManager1/Modem/0", fake), SETTINGS,
+            sleep=sleep, clock=lambda: now[0])
+        with self.assertRaisesRegex(t.MmsTransportError, "timed out connecting") as raised:
+            client.request("POST", "http://mmsc.example.test:8002/", body=b"x" * 700,
+                           timeout=3000.0)
+        self.assertTrue(raised.exception.unsent)
+        self.assertLessEqual(now[0], t.ModemSocketHttp.CONNECT_TIMEOUT + 1)
+
     def test_unsupported_modem_falls_back_to_host_in_auto(self):
         fake = FakeQuectel(b"", supported=False)
         client = t.client_for(SETTINGS, "/org/freedesktop/ModemManager1/Modem/0", runner=fake)
