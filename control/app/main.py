@@ -3367,7 +3367,9 @@ def _modem_active_slot_capacity(hardware_id: str, sibling_count: int) -> int:
     identity = (_device_identities().get(hardware_id)
                 or _modem_identity_for_reader(f"VoWiFi Modem {hardware_id} 00 00")
                 or {})
-    raw = (identity.get("channel_allocated")
+    # A card with too few channels still serves every slot on a shared one.
+    raw = (identity.get("slots_served")
+           or identity.get("channel_allocated")
            or identity.get("channel_capacity")
            or identity.get("slots")
            or sibling_count)
