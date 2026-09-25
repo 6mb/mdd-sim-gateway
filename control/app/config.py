@@ -27,7 +27,7 @@ _lock = threading.RLock()
 # Product safety boundary. This is intentionally a source-level limit rather than an environment
 # variable: operators must not be able to turn the gateway into a bulk-SIM service by changing
 # deployment configuration.
-MAX_SIM_LINES = 5
+MAX_SIM_LINES = 10
 
 # Values added by the instances API for display only. They may ride back on a complete WebUI
 # form, but they are not part of the desired line configuration and must never reach config.yaml.

@@ -323,7 +323,7 @@ const zh = {
   Enable: '启用', Disable: '禁用', 'Delete profile {iccid}?': '确定删除配置文件 {iccid}？', Notifications: '通知', 'Process all': '全部处理',
   'Click Load to list notifications.': '点击“读取”列出通知。', 'No pending notifications.': '没有待处理通知。', 'No notifications to show.': '没有可显示的通知。',
   Overview: '概览', Devices: '设备', 'Balance & keeping': '余额与保号', 'Network exits': '网络出口', 'System settings': '系统设置', Diagnostics: '诊断', '4G + VoWiFi unified': '4G 与 VoWiFi 一体化', device: '个设备', devices: '个设备', 'Close menu': '关闭菜单', 'Live device control': '实时设备控制', 'Compatibility view': '兼容视图',
-  'Responsible use notice': '合规提示：仅限号码实名持有人在运营商允许的范围内自用，最多 5 条 SIM 线路。严禁诈骗、群呼、骚扰、验证码接收、出租线路、代拨转接或向第三人提供电信服务；使用者须遵守所在地法律与运营商协议。',
+  'Responsible use notice': '合规提示：仅限号码实名持有人在运营商允许的范围内自用，最多 10 条 SIM 线路。严禁诈骗、群呼、骚扰、验证码接收、出租线路、代拨转接或向第三人提供电信服务；使用者须遵守所在地法律与运营商协议。',
   'page.overview.subtitle': '所有模块、SIM 和通信能力的实时状态', 'page.devices.subtitle': '按物理模块管理 4G、VoWiFi、SIM 和硬件', 'page.calls.subtitle': '统一拨号、来电控制和通话记录', 'page.messages.subtitle': '跨模块查看、发送和管理短信', 'page.esim.subtitle': '管理 eUICC 配置文件与下载任务', 'page.keepalive.subtitle': '余额、套餐到期与保号动作；运营商按计费使用判定号码是否活跃', 'page.egress.subtitle': '为每个 SIM 提供经过 UDP 验证的国家出口', 'page.notifications.subtitle': '配置 Webhook、Telegram、PushPlus、飞书/Lark 和投递状态', 'page.settings.subtitle': '常规、Web、通话、安全、备份和维护', 'page.diagnostics.subtitle': '健康检查、实时日志和脱敏支持包',
   'Number keeping': '保号', 'Keeping OK': '保号正常',
   'Expiring in 7 days': '7 天内到期', Lines: '线路', Line: '线路', Network: '在网状态',
@@ -418,7 +418,7 @@ const zh = {
   'Save update connection': '保存升级联网设置',
   'Unknown carrier': '未知运营商',
   'cap.off': '已关闭', 'cap.starting': '正在开启', 'cap.on': '已开启', 'cap.stopping': '正在关闭', 'cap.degraded': '需要处理', 'cap.error': '异常', 'cap.unsupported': '不支持', 'cap.help.off': '当前未运行', 'cap.help.starting': '正在初始化，请稍候', 'cap.help.on': '运行正常', 'cap.help.stopping': '正在安全停止', 'cap.help.degraded': '部分功能异常，请查看具体原因', 'cap.help.error': '启动失败，请查看原因', 'cap.help.unsupported': '此设备或后端不支持',
-  'Number unavailable': '号码不可用', Offline: '离线', Detected: '已检测', 'Not connected': '未连接', 'Country exit': '国家出口', Message: '短信', Details: '详情', 'Stable hardware path unavailable': '稳定硬件路径不可用', 'Desired and actual states are shown separately. A failed capability does not imply the other one stopped.': '期望状态与实际状态分别显示；一项能力失败不表示另一项也已停止。', Registration: '注册状态', Operator: '运营商', 'IP address': 'IP 地址', Signal: '信号', Traffic: '流量', 'Cellular data not connected': '蜂窝数据未连接', 'This backend has not exposed per-device cellular status yet.': '当前后端没有该设备的蜂窝状态。', 'Data channel rekey': '数据通道换钥', 'Initiated by carrier': '由运营商发起', Hardware: '硬件', Model: '型号', Firmware: '固件', Unavailable: '不可用', 'Stable path': '稳定路径', 'SIM logical channels': 'SIM 逻辑通道', '{used} / {total} allocated': '已分配 {used} / {total}', 'Logical channel {channel}': '逻辑通道 {channel}', 'channel.status.allocating': '正在分配', 'channel.status.ready': '就绪', 'channel.status.error': '分配失败', 'channel.status.stopped': '未占用', 'channel.role.pin': 'PIN 保活', 'channel.role.swu': 'VoWiFi / EAP-AKA', 'channel.role.ims': 'IMS / Asterisk',
+  'Number unavailable': '号码不可用', Offline: '离线', Detected: '已检测', 'Not connected': '未连接', 'Country exit': '国家出口', Message: '短信', Details: '详情', 'Stable hardware path unavailable': '稳定硬件路径不可用', 'Desired and actual states are shown separately. A failed capability does not imply the other one stopped.': '期望状态与实际状态分别显示；一项能力失败不表示另一项也已停止。', Registration: '注册状态', Operator: '运营商', 'IP address': 'IP 地址', Signal: '信号', Traffic: '流量', 'Cellular data not connected': '蜂窝数据未连接', 'This backend has not exposed per-device cellular status yet.': '当前后端没有该设备的蜂窝状态。', 'Data channel rekey': '数据通道换钥', 'Initiated by carrier': '由运营商发起', Hardware: '硬件', Model: '型号', Firmware: '固件', Unavailable: '不可用', 'Stable path': '稳定路径', 'SIM logical channels': 'SIM 逻辑通道', '{used} / {total} allocated': '已分配 {used} / {total}', 'Logical channel {channel}': '逻辑通道 {channel}', 'channel.status.allocating': '正在分配', 'channel.status.ready': '就绪', 'channel.status.error': '分配失败', 'channel.status.stopped': '未占用', 'channel.shared': '卡的通道不够，多个用途共用', 'channel.role.pin': 'PIN 保活', 'channel.role.swu': 'VoWiFi / EAP-AKA', 'channel.role.ims': 'IMS / Asterisk',
   'Hardware IMEI': '硬件 IMEI', 'IMEI must contain exactly 15 digits': 'IMEI 必须正好包含 15 位数字',
   '15-digit IMEI required for VoWiFi': 'VoWiFi 需要 15 位 IMEI', 'Save hardware IMEI': '保存硬件 IMEI',
   'Hardware IMEI saved': '硬件 IMEI 已保存', 'Hardware IMEI saved and the active line was restarted': '硬件 IMEI 已保存，当前线路已重启并应用',
@@ -590,7 +590,7 @@ const zh = {
 }
 
 const en = {
-  'Responsible use notice': 'Compliance notice: for use only by the verified subscriber where the carrier permits it, with at most five SIM lines. No fraud, bulk or nuisance calling, verification-code collection, line rental, third-party call forwarding, or telecommunications service for others. Follow local law and carrier terms.',
+  'Responsible use notice': 'Compliance notice: for use only by the verified subscriber where the carrier permits it, with at most ten SIM lines. No fraud, bulk or nuisance calling, verification-code collection, line rental, third-party call forwarding, or telecommunications service for others. Follow local law and carrier terms.',
   'page.overview.subtitle': 'Live status of every modem, SIM and communication capability',
   'page.devices.subtitle': 'Manage 4G, VoWiFi, SIM and hardware by physical device',
   'page.calls.subtitle': 'Unified dialer, incoming call controls and call history',
@@ -610,7 +610,7 @@ const en = {
   'cap.help.on': 'Running normally', 'cap.help.stopping': 'Stopping safely',
   'cap.help.degraded': 'Some functions are impaired; review the reason',
   'cap.help.error': 'Startup failed; review the reason', 'cap.help.unsupported': 'Unsupported by this device or backend',
-  'channel.status.allocating': 'Allocating', 'channel.status.ready': 'Ready', 'channel.status.error': 'Allocation failed', 'channel.status.stopped': 'Not allocated', 'channel.role.pin': 'PIN keeper', 'channel.role.swu': 'VoWiFi / EAP-AKA', 'channel.role.ims': 'IMS / Asterisk',
+  'channel.status.allocating': 'Allocating', 'channel.status.ready': 'Ready', 'channel.status.error': 'Allocation failed', 'channel.status.stopped': 'Not allocated', 'channel.shared': 'Too few on this card; roles share them', 'channel.role.pin': 'PIN keeper', 'channel.role.swu': 'VoWiFi / EAP-AKA', 'channel.role.ims': 'IMS / Asterisk',
   'update.error.no_release': 'No release is available yet',
   'update.error.rate_limited': 'GitHub temporarily rate-limited update checks; try again later',
   'update.error.github': 'The GitHub update service returned an error',
