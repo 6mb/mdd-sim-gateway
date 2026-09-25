@@ -2,10 +2,33 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
-## [Unreleased]
+## [1.12.0-rc9] - 2026-09-25
+
+Ninth release candidate. The automatic update channel stays on 1.9.5.
+
+### Added
+
+- A device's 4G tab shows whether the modem can hand cellular call audio to the gateway, from a
+  read-only probe. The DJI-customised EC25/EG25-G reports `firmware_locked`: calls can be answered
+  but carry no audio, so auto-answer, recording and browser calls are not possible on it.
+
+### Changed
+
+- Idle CPU on a Raspberry Pi 3 drops from about one core to a quarter: the configuration and the
+  country-exit subscription are parsed once per change instead of on every request, Hardware
+  checks every 8 s when nothing is in flight (waking at once on hotplug or a UI change), and the
+  container health checks run every 30 s.
 
 ### Fixed
 
+- A container update failed, and so did its rollback, when an old base container took longer than
+  Docker's stop timeout to exit, leaving Hardware and Egress stopped. The updater now stops each
+  base container itself, waits up to two minutes for it to exit, and removes containers a failed
+  recreate left behind. This protects the update *after* the one that installs it, since the
+  updater comes from the release being updated from.
+- A modem ModemManager gave up on at start-up (its QMI port timed out) stayed unused until someone
+  reset it by hand. Hardware now resets such a modem through its AT port after two minutes, at
+  most once every five minutes.
 - **An upgraded gateway no longer serves the old WebUI from the browser's cache.** The page that
   names which build to load is now marked `no-cache`, so every client revalidates it, and the
   files it names -- whose names contain a hash of their contents -- are marked immutable. Before
