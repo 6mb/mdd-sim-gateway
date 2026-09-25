@@ -9,6 +9,7 @@ non-autoconnecting and never-default.
 """
 import argparse
 import collections
+import errno
 import hashlib
 import json
 import os
@@ -19,6 +20,11 @@ import signal
 import subprocess
 import sys
 import time
+
+try:
+    import serial
+except ImportError:  # the image inherits pyserial from Control; tests may not have it
+    serial = None
 
 
 EVENT_ROOTS = (
@@ -34,6 +40,21 @@ VPCD_SLOTS = 3
 # its age, while producing it means a seek-read of every bridge log plus a write of a few
 # tens of kilobytes. There is no reason to pay that on every reconcile pass.
 DIAGNOSTICS_INTERVAL = 15
+# A reconcile pass forks mmcli and nmcli several times per modem, which on a Raspberry Pi
+# cost about a fifth of a core at the old fixed 3 s cadence. Once nothing is in flight the
+# pass runs this often instead, while a cheap check every WAKE_CHECK_SECONDS starts the next
+# pass at once when hardware, the requested state or a bridge changes. The health check wants
+# a status younger than 15 s, so this plus one pass must stay well inside that.
+IDLE_INTERVAL = 8.0
+WAKE_CHECK_SECONDS = 0.5
+# How long a present modem may go without a ModemManager object before it is reset over
+# its AT port. ModemManager's own probing of a freshly enumerated EC25 finishes well inside
+# a minute, and a timed-out QMI port is only declared invalid after ten attempts, so two
+# minutes does not race a probe that is still going to succeed.
+UNCLAIMED_RESET_GRACE = 120
+# Shared by both firmware-reset paths: a reset re-enumerates the modem, which takes
+# ModemManager tens of seconds to probe again; resetting faster than that only restarts it.
+MODEM_RESET_INTERVAL = 300
 
 
 def tail_lines(path, count=25, max_bytes=128 * 1024):
@@ -79,6 +100,33 @@ def atomic_json(path, value):
     os.replace(temporary, path)
 
 
+class ATPort(serial.Serial if serial else object):
+    """A Serial that tolerates absent modem control lines.
+
+    Mirrors ATSerial in host/vpcd_modem_bridge.py, which this process cannot import: it
+    runs as /app/runtime/hardware.py and /app is not on its path. pyserial raises DTR and
+    RTS inside open(); on virtualised USB passthrough that control transfer can fail with
+    EPROTO and a port with no modem-control support answers ENOTTY. Writing one AT
+    command needs neither line.
+    """
+
+    _TOLERATED = (errno.EPROTO, errno.ENOTTY)
+
+    def _update_dtr_state(self):
+        try:
+            super()._update_dtr_state()
+        except OSError as exc:
+            if exc.errno not in self._TOLERATED:
+                raise
+
+    def _update_rts_state(self):
+        try:
+            super()._update_rts_state()
+        except OSError as exc:
+            if exc.errno not in self._TOLERATED:
+                raise
+
+
 class HardwareSupervisor:
     def __init__(self, status_path=Path("/run/mdd-hardware/status.json"), interval=1.0,
                  data_path=Path("/data")):
@@ -97,12 +145,19 @@ class HardwareSupervisor:
         self.cellular_states = {}
         self.data_attempt_at = {}
         self.qmi_reset_at = {}
+        # device id -> monotonic time this process first saw it present with no
+        # ModemManager object; see recover_unclaimed_modem().
+        self.unclaimed_since = {}
+        self.unclaimed_reset_at = {}
         self.bridge_restart_request_dir = (
             self.data_path / "orchestrator" / "bridge-restart-requests")
         self.bridge_restart_status_dir = (
             self.data_path / "orchestrator" / "bridge-restart-status")
         self.bridge_restarts = {}
         self.log_ring = collections.deque(maxlen=200)
+        # Whether the last pass left nothing in flight; only then may the loop slow down.
+        self.settled = False
+        self.transitioning = True
         # Cleared at the start of every reconcile pass; see mmcli_keyvalue().
         self._mmcli_details = {}
         # `None` means "never published", which is not the same as "published at time zero".
@@ -767,11 +822,17 @@ class HardwareSupervisor:
             # likely to be holding a stale QMI session.
             last_reset = self.qmi_reset_at.get(device_id)
             if (obj and qmi_present and net_present and not snapshot.get("network_interface")
-                    and (last_reset is None or time.monotonic() - last_reset >= 300)):
+                    and (last_reset is None
+                         or time.monotonic() - last_reset >= MODEM_RESET_INTERVAL)):
                 self.qmi_reset_at[device_id] = time.monotonic()
                 self.terminate_qmi_proxy()
                 self.command("mmcli", "-m", obj, "--reset")
                 self.forget_mmcli_details()
+                self.cellular_states[device_id] = snapshot
+                continue
+            if obj:
+                self.unclaimed_since.pop(device_id, None)
+            elif self.recover_unclaimed_modem(modem):
                 self.cellular_states[device_id] = snapshot
                 continue
             radio_enabled = not wanted["flight_mode"]
@@ -795,6 +856,65 @@ class HardwareSupervisor:
             self.cellular_states[device_id] = snapshot
         self.cellular_states = {key: value for key, value in self.cellular_states.items()
                                 if key in live}
+        # An unplugged modem that comes back is a fresh enumeration and earns a fresh grace
+        # period; its reset rate limit is kept, since replugging is what a reset looks like.
+        self.unclaimed_since = {key: value for key, value in self.unclaimed_since.items()
+                                if key in live}
+
+    def recover_unclaimed_modem(self, modem):
+        """Reset a modem ModemManager has given up on, through its bare AT port.
+
+        Seen on an EC25 whose QMI port hit a USB protocol error (-71) at enumeration:
+        ModemManager timed out on cdc-wdm0 ten times, marked the modem invalid and dropped
+        it, leaving no object at all. The AT-only recovery above needs an object to send
+        `--reset` through, so nothing ever retried and 4G stayed down, although the AT port
+        itself was registered on LTE. AT+CFUN=1,1 re-enumerates the modem and ModemManager
+        then claims it normally. ModemManager holds no port of a modem it has dropped, so
+        a non-exclusive write here cannot interleave with its own AT traffic.
+
+        Returns True only when the reset command was written.
+        """
+        device_id = modem["id"]
+        now = time.monotonic()
+        first_seen = self.unclaimed_since.setdefault(device_id, now)
+        if now - first_seen < UNCLAIMED_RESET_GRACE:
+            return False
+        # Missing means "never reset", not "reset at monotonic zero"; see the qmi_reset_at
+        # comment in reconcile_cellular() for what a 0 default cost at boot.
+        last_reset = self.unclaimed_reset_at.get(device_id)
+        if last_reset is not None and now - last_reset < MODEM_RESET_INTERVAL:
+            return False
+        # Charged before the attempt: a port that fails to open must not be retried every
+        # pass, and the grace clock restarts so the next try again waits for ModemManager.
+        self.unclaimed_reset_at[device_id] = now
+        self.unclaimed_since.pop(device_id, None)
+        tty = modem["tty"]
+        self.log(f"modem {device_id} has had no ModemManager object for "
+                 f"{int(now - first_seen)}s; resetting it with AT+CFUN=1,1 on {tty}")
+        if serial is None:
+            self.log(f"modem {device_id} reset skipped: pyserial is not installed")
+            return False
+        written = False
+        reply = ""
+        try:
+            with ATPort(tty, 115200, timeout=1, write_timeout=2, exclusive=False) as port:
+                port.write(b"AT+CFUN=1,1\r")
+                port.flush()
+                written = True
+                # The modem answers OK before it drops off the bus; no reply is not a
+                # failure, since the reset may already have taken the port away.
+                reply = port.read(64).decode("ascii", errors="replace").strip()
+        except Exception as exc:  # noqa: BLE001 - a failed reset must not fail the pass
+            # pyserial wraps most failures in SerialException (an OSError), but the port
+            # vanishing mid-reset can surface as others; any of them would otherwise abort
+            # reconcile and mark every other modem unhealthy for this one.
+            if not written:
+                self.log(f"modem {device_id} reset via {tty} failed: {exc}")
+                return False
+            reply = reply or f"port lost after write ({exc})"
+        self.forget_mmcli_details()
+        self.log(f"modem {device_id} reset via {tty} sent; reply: {reply or '(none)'}")
+        return True
 
     def publish_control_state(self, discovered, ready_ids, bridge_errors=None):
         """Publish the subset of the host-orchestrator contract this container owns.
@@ -852,6 +972,7 @@ class HardwareSupervisor:
                 "error": error,
             }
         now = int(time.time())
+        self.transitioning = any(item["transitioning"] for item in devices.values())
         atomic_json(root / "hardware-state.json", {
             "version": 1, "updated_at": now, "assignments": assignments})
         atomic_json(root / "devices-status.json", {
@@ -1021,6 +1142,8 @@ class HardwareSupervisor:
             "kernel_objects": [f"{subsystem}/{name}" for subsystem, name in sorted(current)],
         })
         self.publish_control_state(discovered, ready_ids, bridge_errors)
+        self.settled = (not maintenance_ids and not self.transitioning
+                        and ready_bridges + len(bridge_errors) >= len(discovered))
         if (self._diagnostics_at is None
                 or time.monotonic() - self._diagnostics_at >= DIAGNOSTICS_INTERVAL):
             self._diagnostics_at = time.monotonic()
@@ -1089,9 +1212,37 @@ class HardwareSupervisor:
                 except Exception as publish_exc:
                     self.log("could not publish hardware retry state: "
                              f"{type(publish_exc).__name__}: {publish_exc}")
-            deadline = time.monotonic() + self.interval
-            while not self.stop and time.monotonic() < deadline:
-                time.sleep(0.1)
+            self.wait_for_next_pass()
+
+    def wake_signature(self):
+        """Everything that should start a pass at once, cheap enough to check twice a second:
+        a kernel device, the requested per-device state, a bridge restart request, a bridge
+        process exiting."""
+        root = self.data_path / "orchestrator"
+        try:
+            desired = (root / "devices-desired.json").stat().st_mtime_ns
+        except OSError:
+            desired = None
+        try:
+            requests = tuple(sorted(path.name for path in
+                                    self.bridge_restart_request_dir.glob("*.json")))
+        except OSError:
+            requests = ()
+        bridges = tuple(sorted((device_id, process.poll() is None)
+                               for device_id, process in self.bridges.items()))
+        return (frozenset(kernel_objects()), desired, requests, bridges)
+
+    def wait_for_next_pass(self):
+        interval = max(self.interval, IDLE_INTERVAL) if self.settled else self.interval
+        signature = self.wake_signature() if self.settled else None
+        now = time.monotonic()
+        deadline, next_check = now + interval, now + WAKE_CHECK_SECONDS
+        while not self.stop and time.monotonic() < deadline:
+            time.sleep(0.1)
+            if signature is not None and time.monotonic() >= next_check:
+                next_check = time.monotonic() + WAKE_CHECK_SECONDS
+                if self.wake_signature() != signature:
+                    return
 
     def close(self):
         try:
