@@ -78,7 +78,7 @@ class ContainerComposeTests(unittest.TestCase):
         self.assertIn("host/mdd_container_update.py", dockerfile)
         self.assertIn("docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose",
                       dockerfile)
-        self.assertIn("HEALTHCHECK --interval=10s", dockerfile)
+        self.assertIn("HEALTHCHECK --interval=30s --start-interval=5s", dockerfile)
 
     def test_an_operator_owned_data_directory_can_be_used(self):
         """A folder created in File Station belongs to the operator's account with mode

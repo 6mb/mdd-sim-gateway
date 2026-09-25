@@ -134,6 +134,9 @@ LABEL io.mdd-sim-gateway.managed="true" \
       io.mdd-sim-gateway.component="control" \
       org.opencontainers.image.version="${MDD_VERSION}" \
       org.opencontainers.image.title="MDD Sim Gateway control plane"
-HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
+# Each check is a docker exec that starts a fresh Python: on a Raspberry Pi the three
+# containers' checks cost about a fifth of a core every 10 s. 30 s once running;
+# Docker 25+ still checks every 5 s while starting (older engines ignore it).
+HEALTHCHECK --interval=30s --start-interval=5s --timeout=3s --start-period=20s --retries=3 \
     CMD python -c 'import socket; s=socket.create_connection(("127.0.0.1",8443),2); s.close()'
 ENTRYPOINT ["python", "run.py"]

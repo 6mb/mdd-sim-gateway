@@ -40,6 +40,13 @@ VPCD_SLOTS = 3
 # its age, while producing it means a seek-read of every bridge log plus a write of a few
 # tens of kilobytes. There is no reason to pay that on every reconcile pass.
 DIAGNOSTICS_INTERVAL = 15
+# A reconcile pass forks mmcli and nmcli several times per modem, which on a Raspberry Pi
+# cost about a fifth of a core at the old fixed 3 s cadence. Once nothing is in flight the
+# pass runs this often instead, while a cheap check every WAKE_CHECK_SECONDS starts the next
+# pass at once when hardware, the requested state or a bridge changes. The health check wants
+# a status younger than 15 s, so this plus one pass must stay well inside that.
+IDLE_INTERVAL = 8.0
+WAKE_CHECK_SECONDS = 0.5
 # How long a present modem may go without a ModemManager object before it is reset over
 # its AT port. ModemManager's own probing of a freshly enumerated EC25 finishes well inside
 # a minute, and a timed-out QMI port is only declared invalid after ten attempts, so two
@@ -148,6 +155,9 @@ class HardwareSupervisor:
             self.data_path / "orchestrator" / "bridge-restart-status")
         self.bridge_restarts = {}
         self.log_ring = collections.deque(maxlen=200)
+        # Whether the last pass left nothing in flight; only then may the loop slow down.
+        self.settled = False
+        self.transitioning = True
         # Cleared at the start of every reconcile pass; see mmcli_keyvalue().
         self._mmcli_details = {}
         # `None` means "never published", which is not the same as "published at time zero".
@@ -962,6 +972,7 @@ class HardwareSupervisor:
                 "error": error,
             }
         now = int(time.time())
+        self.transitioning = any(item["transitioning"] for item in devices.values())
         atomic_json(root / "hardware-state.json", {
             "version": 1, "updated_at": now, "assignments": assignments})
         atomic_json(root / "devices-status.json", {
@@ -1131,6 +1142,8 @@ class HardwareSupervisor:
             "kernel_objects": [f"{subsystem}/{name}" for subsystem, name in sorted(current)],
         })
         self.publish_control_state(discovered, ready_ids, bridge_errors)
+        self.settled = (not maintenance_ids and not self.transitioning
+                        and ready_bridges + len(bridge_errors) >= len(discovered))
         if (self._diagnostics_at is None
                 or time.monotonic() - self._diagnostics_at >= DIAGNOSTICS_INTERVAL):
             self._diagnostics_at = time.monotonic()
@@ -1199,9 +1212,37 @@ class HardwareSupervisor:
                 except Exception as publish_exc:
                     self.log("could not publish hardware retry state: "
                              f"{type(publish_exc).__name__}: {publish_exc}")
-            deadline = time.monotonic() + self.interval
-            while not self.stop and time.monotonic() < deadline:
-                time.sleep(0.1)
+            self.wait_for_next_pass()
+
+    def wake_signature(self):
+        """Everything that should start a pass at once, cheap enough to check twice a second:
+        a kernel device, the requested per-device state, a bridge restart request, a bridge
+        process exiting."""
+        root = self.data_path / "orchestrator"
+        try:
+            desired = (root / "devices-desired.json").stat().st_mtime_ns
+        except OSError:
+            desired = None
+        try:
+            requests = tuple(sorted(path.name for path in
+                                    self.bridge_restart_request_dir.glob("*.json")))
+        except OSError:
+            requests = ()
+        bridges = tuple(sorted((device_id, process.poll() is None)
+                               for device_id, process in self.bridges.items()))
+        return (frozenset(kernel_objects()), desired, requests, bridges)
+
+    def wait_for_next_pass(self):
+        interval = max(self.interval, IDLE_INTERVAL) if self.settled else self.interval
+        signature = self.wake_signature() if self.settled else None
+        now = time.monotonic()
+        deadline, next_check = now + interval, now + WAKE_CHECK_SECONDS
+        while not self.stop and time.monotonic() < deadline:
+            time.sleep(0.1)
+            if signature is not None and time.monotonic() >= next_check:
+                next_check = time.monotonic() + WAKE_CHECK_SECONDS
+                if self.wake_signature() != signature:
+                    return
 
     def close(self):
         try:
