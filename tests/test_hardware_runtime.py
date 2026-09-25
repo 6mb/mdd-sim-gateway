@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from runtime.hardware import HardwareSupervisor, kernel_objects
 
@@ -430,6 +430,160 @@ class HardwareRuntimeTests(unittest.TestCase):
         app.command.assert_called_once_with(
             "mmcli", "-m", "/org/freedesktop/ModemManager1/Modem/0", "--reset")
         app.terminate_qmi_proxy.assert_called_once_with()
+
+    def unclaimed_modem_app(self):
+        """A supervisor whose one modem is present but has no ModemManager object."""
+        app = HardwareSupervisor()
+        app.assert_networkmanager_isolated = Mock()
+        app.desired_devices = Mock(return_value={
+            "modem-a": {"cellular_enabled": True, "vowifi_enabled": True,
+                        "flight_mode": False}})
+        app.modem_snapshot = Mock(return_value={
+            "available": False, "registration": "unknown", "data_active": False})
+        app.command = Mock(return_value=Mock(returncode=0, stdout=""))
+        app.ensure_modem_data = Mock(return_value=False)
+        app.disconnect_modem_data = Mock(return_value=False)
+        app.log = Mock()
+        return app
+
+    def pass_at(self, app, now, port_class):
+        with patch("runtime.hardware.Path.glob", return_value=[]), \
+                patch("runtime.hardware.time.monotonic", return_value=now), \
+                patch("runtime.hardware.ATPort", port_class):
+            app.reconcile_cellular([{"id": "modem-a", "tty": "/dev/ttyUSB2"}], [])
+
+    @staticmethod
+    def fake_port():
+        port_class = MagicMock()
+        port = port_class.return_value.__enter__.return_value
+        port.read.return_value = b"\r\nOK\r\n"
+        return port_class, port
+
+    def test_unclaimed_modem_is_left_alone_while_modemmanager_may_still_probe_it(self):
+        app = self.unclaimed_modem_app()
+        port_class, _port = self.fake_port()
+
+        self.pass_at(app, 5.0, port_class)
+        self.pass_at(app, 5.0 + 119, port_class)
+
+        port_class.assert_not_called()
+        self.assertEqual(app.unclaimed_since, {"modem-a": 5.0})
+
+    def test_modem_modemmanager_gave_up_on_is_reset_through_its_at_port(self):
+        """The EC25 whose QMI port timed out at enumeration: no object, 4G never came up."""
+        app = self.unclaimed_modem_app()
+        port_class, port = self.fake_port()
+        app.forget_mmcli_details = Mock()
+
+        self.pass_at(app, 5.0, port_class)
+        self.pass_at(app, 5.0 + 120, port_class)
+
+        port_class.assert_called_once()
+        self.assertEqual(port_class.call_args.args[0], "/dev/ttyUSB2")
+        self.assertFalse(port_class.call_args.kwargs["exclusive"])
+        port.write.assert_called_once_with(b"AT+CFUN=1,1\r")
+        app.forget_mmcli_details.assert_called()
+        # The reset re-enumerates the modem; there is nothing to configure on this pass.
+        app.ensure_modem_data.assert_called_once()
+
+    def test_unclaimed_modem_reset_is_rate_limited(self):
+        app = self.unclaimed_modem_app()
+        port_class, port = self.fake_port()
+
+        self.pass_at(app, 5.0, port_class)
+        self.pass_at(app, 125.0, port_class)
+        # Still unclaimed after the reset: the grace period elapses again, but the last
+        # reset was under five minutes ago.
+        self.pass_at(app, 250.0, port_class)
+        self.pass_at(app, 424.0, port_class)
+        self.assertEqual(port.write.call_count, 1)
+
+        self.pass_at(app, 425.0, port_class)
+        self.assertEqual(port.write.call_count, 2)
+
+    def test_grace_clock_clears_once_modemmanager_claims_the_modem(self):
+        app = self.unclaimed_modem_app()
+        port_class, _port = self.fake_port()
+
+        self.pass_at(app, 5.0, port_class)
+        self.assertIn("modem-a", app.unclaimed_since)
+
+        app.modem_snapshot.return_value = {
+            "available": True, "mm_object": "/org/freedesktop/ModemManager1/Modem/0",
+            "network_interface": "wwan0", "radio_enabled": True,
+            "registration": "home", "data_active": True}
+        self.pass_at(app, 60.0, port_class)
+        self.assertNotIn("modem-a", app.unclaimed_since)
+
+        # Losing the object again starts a new grace period rather than resuming the old one.
+        app.modem_snapshot.return_value = {
+            "available": False, "registration": "unknown", "data_active": False}
+        self.pass_at(app, 130.0, port_class)
+        port_class.assert_not_called()
+        self.assertEqual(app.unclaimed_since, {"modem-a": 130.0})
+
+    def test_grace_clock_clears_when_the_modem_disappears(self):
+        app = self.unclaimed_modem_app()
+        port_class, _port = self.fake_port()
+
+        self.pass_at(app, 5.0, port_class)
+        with patch("runtime.hardware.Path.glob", return_value=[]):
+            app.reconcile_cellular([], [])
+        self.assertEqual(app.unclaimed_since, {})
+
+    def test_a_serial_error_during_the_reset_does_not_escape_reconcile(self):
+        import serial
+
+        app = self.unclaimed_modem_app()
+        for error in (serial.SerialException("could not open port /dev/ttyUSB2"),
+                      OSError(71, "Protocol error"), RuntimeError("unexpected")):
+            with self.subTest(error=type(error).__name__):
+                app.unclaimed_since.clear()
+                app.unclaimed_reset_at.clear()
+                app.log.reset_mock()
+                port_class = Mock(side_effect=error)
+
+                self.pass_at(app, 5.0, port_class)
+                self.pass_at(app, 125.0, port_class)
+
+                port_class.assert_called_once()
+                self.assertIn("failed", app.log.call_args.args[0])
+                # A failed attempt still counts against the rate limit.
+                self.pass_at(app, 250.0, port_class)
+                port_class.assert_called_once()
+
+    def test_a_port_that_vanishes_after_the_write_still_counts_as_a_reset(self):
+        """CFUN=1,1 drops the modem off the bus, which can fail the read or the close."""
+        app = self.unclaimed_modem_app()
+        app.forget_mmcli_details = Mock()
+        port_class, port = self.fake_port()
+        port.read.side_effect = OSError(5, "Input/output error")
+
+        self.pass_at(app, 5.0, port_class)
+        self.pass_at(app, 125.0, port_class)
+
+        port.write.assert_called_once_with(b"AT+CFUN=1,1\r")
+        app.forget_mmcli_details.assert_called()
+        self.assertIn("sent", app.log.call_args.args[0])
+
+    def test_at_port_tolerates_missing_modem_control_lines(self):
+        import errno
+        import serial
+
+        from runtime.hardware import ATPort
+
+        for code in (errno.EPROTO, errno.ENOTTY):
+            with patch.object(serial.Serial, "_update_dtr_state",
+                              side_effect=OSError(code, "control")), \
+                    patch.object(serial.Serial, "_update_rts_state",
+                                 side_effect=OSError(code, "control")):
+                port = ATPort.__new__(ATPort)
+                port._update_dtr_state()
+                port._update_rts_state()
+        with patch.object(serial.Serial, "_update_dtr_state",
+                          side_effect=OSError(errno.EIO, "io")):
+            with self.assertRaises(OSError):
+                ATPort.__new__(ATPort)._update_dtr_state()
 
 
 if __name__ == "__main__":
