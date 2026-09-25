@@ -450,7 +450,7 @@ const zh = {
   'Type the line ID “{id}” to confirm deletion.': '请输入线路 ID“{id}”以确认删除。',
   'Line ID did not match. Nothing was deleted.': '线路 ID 不匹配，未删除任何内容。',
   'Backend activity': '后台状态', Now: '当前', Next: '下一步', Reason: '原因', 'Recovery progress': '恢复进度', 'Checking line status': '正在检查线路状态',
-  'Restart line': '重新启动', 'Restart the VoWiFi line now? The SIM, ePDG and IMS connection will be rebuilt.': '现在重新启动 VoWiFi 线路吗？系统将重新读取 SIM，并重建 ePDG 和 IMS 连接。',
+  'Restart line': '重新启动', 'This carrier does not offer Wi-Fi Calling to ordinary subscribers. You can still try it.': '该运营商未向普通用户开放 Wi-Fi 通话，仍可手动尝试。', "Mainland China carriers do not offer Wi-Fi Calling to ordinary subscribers; China Telecom's pilot needs China Telecom home broadband in selected cities. You can still try it.": '中国大陆运营商未向普通用户开放 Wi-Fi 通话；中国电信的试点仅限部分城市，且需使用电信家庭宽带。仍可手动尝试。', 'The carrier publishes no VoWiFi (ePDG) address, so Wi-Fi Calling is most likely not offered. You can still try it.': '运营商没有公开 VoWiFi（ePDG）地址，大概率不提供 Wi-Fi 通话，仍可手动尝试。', 'VoWiFi is enabled but no configured line is running': 'VoWiFi 已开启，但没有正在运行的线路', '4G': '4G', 'Mobile data connected': '移动数据已连接', 'Try anyway': '仍然尝试', 'Try again': '再试一次', 'Restart the VoWiFi line now? The SIM, ePDG and IMS connection will be rebuilt.': '现在重新启动 VoWiFi 线路吗？系统将重新读取 SIM，并重建 ePDG 和 IMS 连接。',
   'Rebuilding the VoWiFi line automatically': '正在自动重建 VoWiFi 线路',
   'The SIM will be read again, then ePDG and IMS will reconnect.': '系统将重新读取 SIM，然后依次重连 ePDG 和 IMS。',
   'Automatic recovery is waiting': '自动恢复正在等待',

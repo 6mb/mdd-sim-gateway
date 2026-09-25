@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_media, mms_transport, softphone_ws)
+               mms_media, mms_transport, softphone_ws, vowifi_support)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -1113,9 +1113,18 @@ def _auto_promote_card_draft(inst: dict, card_info: dict, cards: list[dict]) -> 
             "reader_index": int(card_info.get("index") or inst.get("reader_index") or 0),
             "reader_port": str(card_info.get("reader_port") or inst.get("reader_port") or ""),
         })
+    # A phone hides the Wi-Fi Calling switch for a carrier that does not offer it. Doing the
+    # same here keeps cellular working without a line that can only fail; the device page
+    # says why and the switch still lets the user try.
+    support = vowifi_support.for_instance({"mcc": mcc, "mnc": mnc, "epdg": inst.get("epdg")},
+                                          probe_now=True)
+    if support["status"] == vowifi_support.UNSUPPORTED:
+        update["enabled"] = False
     promoted = cfg.upsert_instance(update, unique_name=generated_name)
     egress.publish()
-    log.info("hotplug draft %s auto-provisioned for MCC %s", inst["id"], mcc)
+    log.info("hotplug draft %s auto-provisioned for MCC %s%s", inst["id"], mcc,
+             f" (VoWiFi left off: {support['source']})"
+             if support["status"] == vowifi_support.UNSUPPORTED else "")
     return promoted
 
 
@@ -2586,6 +2595,22 @@ def apply_health(iid, inst, st, container_id: str | None = None):
         h["retry_count"] = 0
         st["retry"] = {"count": 0, "max": rmax}
         return st
+    if state == "EPDG_UNRESOLVED":
+        support = vowifi_support.for_instance(inst)
+        if support["source"] == "carrier_table":
+            # The user chose to try a carrier that does not offer Wi-Fi Calling. Retrying on
+            # a timer only repeats the same DNS answer; stop and say why. Only the carrier
+            # table is trusted this far: a missing DNS answer can also be an outage.
+            h["frozen_code"] = st["reason_code"]
+            h["frozen_reason"] = support["reason"]
+            h["next_retry_at"] = None
+            _record_lifecycle(iid, "recovery_cancelled", "carrier_unsupported",
+                              retry_count=h.get("retry_count"), card_present=True)
+            asyncio.create_task(asyncio.to_thread(
+                engine.capture_and_stop, iid, inst, "health-freeze:carrier_unsupported",
+                container_id))
+            asyncio.create_task(hub.drop_ami(str(iid)))
+            return _frozen(h, st, rmax)
     if state == "PIN_PROBLEM":
         # wrong/blocked PIN won't recover by retrying — surface immediately.
         h["frozen_code"] = st["reason_code"]
@@ -4135,6 +4160,11 @@ async def _unified_devices() -> list[dict]:
                       "flight_mode": False})
         cell_desired = bool(wanted.get("cellular_enabled"))
         vowifi_desired = bool(wanted.get("vowifi_enabled"))
+        if inst and not is_native_reader:
+            # A modem's switch is device-wide, but the line it would start can be disabled on
+            # its own (a carrier without VoWiFi is provisioned that way). Showing the switch on
+            # over a disabled line read as "enabled but no line is running" forever.
+            vowifi_desired = vowifi_desired and bool(inst.get("enabled", True))
         flight_desired = bool(wanted.get("flight_mode"))
         line_status = _cached_line_status(inst) if inst else None
         running = bool(inst) and (line_status or {}).get("state") != "STOPPED"
@@ -4149,6 +4179,12 @@ async def _unified_devices() -> list[dict]:
         elif is_draft:
             vowifi.update(available=False,
                           reason="Automatic setup is waiting for SIM or hardware information")
+        support_source = inst or native_card or {}
+        vowifi["support"] = vowifi_support.for_instance(
+            support_source if support_source.get("mcc") else {})
+        if (vowifi["support"]["status"] == vowifi_support.UNSUPPORTED
+                and vowifi.get("actual") == "off" and not vowifi.get("reason")):
+            vowifi["reason"] = vowifi["support"]["reason"]
 
         actual_state = observed.get("actual") or {}
         # Published by the orchestrator when this gateway is configured VoWiFi-only
