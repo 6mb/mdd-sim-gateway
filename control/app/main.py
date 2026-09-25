@@ -5312,7 +5312,8 @@ async def api_instances():
     return {"instances": out}
 
 
-def _only_instance_name_changed(before: dict | None, after: dict) -> bool:
+def _only_instance_name_changed(before: dict | None, after: dict,
+                                live_binding: dict | None = None) -> bool:
     """Whether a saved edit changed display metadata and no engine configuration.
 
     A line name is resolved by the manager whenever it builds UI, notification or diagnostic
@@ -5320,12 +5321,32 @@ def _only_instance_name_changed(before: dict | None, after: dict) -> bool:
     for a rename only interrupts working calls and tunnels without applying anything useful.
     Compare the persisted documents rather than trusting a client-side flag: a request that also
     changes any operational field must continue through the normal fail-closed rebuild.
+
+    The WebUI sends the whole form back, and two of its fields differ from the stored document
+    without changing anything the engine sees. It pads the MNC to three digits ("15" -> "015"),
+    and the engine pads it the same way wherever it uses it. /api/instances also replaces the
+    stored reader_index/reader_port with the live binding (``live_binding``), which is the
+    binding the running engine already resolves. Either one alone restarted a line on rename.
     """
     if before is None or before == after:
         return False
     ignored = cfg.RUNTIME_ONLY_INSTANCE_FIELDS | {"name"}
-    before_runtime = {key: value for key, value in before.items() if key not in ignored}
-    after_runtime = {key: value for key, value in after.items() if key not in ignored}
+    live_binding = live_binding or {}
+
+    def operational(inst: dict) -> dict:
+        fields = {key: value for key, value in inst.items() if key not in ignored}
+        for key in ("mcc", "mnc"):
+            if fields.get(key) not in (None, ""):
+                fields[key] = str(fields[key]).zfill(3)
+        return fields
+
+    before_runtime, after_runtime = operational(before), operational(after)
+    for key, kind in (("reader_index", int), ("reader_port", str)):
+        live = live_binding.get(key)
+        if (isinstance(live, kind) and not isinstance(live, bool)
+                and after_runtime.get(key) == live):
+            before_runtime.pop(key, None)
+            after_runtime.pop(key, None)
     return before_runtime == after_runtime
 
 
@@ -5342,12 +5363,17 @@ async def api_instance_upsert(body: dict):
         raise HTTPException(409, "another line already uses that name")
     previous = cfg.get_instance(iid)
     was_running = await asyncio.to_thread(engine.is_running, iid)
+    live_binding = {}
+    if previous:
+        live_binding = {
+            "reader_index": await asyncio.to_thread(_reader_index_for_instance, previous),
+            "reader_port": await asyncio.to_thread(_reader_port_for_instance, previous)}
     try:
         inst = cfg.upsert_instance(body)
     except cfg.LineLimitError as exc:
         raise HTTPException(409, {
             "code": "line_limit", "message": str(exc)}) from exc
-    name_only_change = _only_instance_name_changed(previous, inst)
+    name_only_change = _only_instance_name_changed(previous, inst, live_binding)
     applied = False
     # A running line holds its config in the engine container (rendered instance.json:
     # WebRTC credentials, IMEI, SMSC, User-Agent, …). Editing the config alone doesn't reach
