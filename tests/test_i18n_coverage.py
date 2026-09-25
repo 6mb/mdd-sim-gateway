@@ -49,6 +49,14 @@ class BackendStringCoverageTests(unittest.TestCase):
                    if not translated(text, block)]
         self.assertEqual(missing, [], f"untranslated status reasons: {missing}")
 
+    def test_every_modem_ims_message_is_translated(self):
+        source = (ROOT / "control" / "app" / "modem_ims.py").read_text(encoding="utf-8")
+        messages = set(re.findall(r'"reason":\s*"([^"]+)"', source))
+        messages |= set(re.findall(r'"reason":\s*\(?\s*"([^"]+)"', source))
+        self.assertTrue(messages)
+        block = zh_block()
+        self.assertEqual(sorted(m for m in messages if not translated(m, block)), [])
+
     def test_every_vowifi_support_reason_is_translated(self):
         from control.app import vowifi_support
         block = zh_block()
