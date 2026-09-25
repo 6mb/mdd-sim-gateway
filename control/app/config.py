@@ -23,11 +23,26 @@ import yaml
 DATA_DIR = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
 CONFIG_PATH = os.path.join(DATA_DIR, "config.yaml")
 _lock = threading.RLock()
+# libyaml parses config.yaml an order of magnitude faster than the pure-Python loader. Same
+# safe schema; fall back where PyYAML was built without it.
+_SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+# (path, inode, size, mtime_ns) of the file behind the cached load(), and the merged result.
+# Every settings read, line lookup and device listing used to parse the whole file again:
+# on a Raspberry Pi with the device page open that was ~70 % of Control's CPU.
+_loaded: tuple | None = None
 
 # Product safety boundary. This is intentionally a source-level limit rather than an environment
 # variable: operators must not be able to turn the gateway into a bulk-SIM service by changing
 # deployment configuration.
-MAX_SIM_LINES = 5
+MAX_SIM_LINES = 10
+
+# Values added by the instances API for display only. They may ride back on a complete WebUI
+# form, but they are not part of the desired line configuration and must never reach config.yaml.
+# Keep this list shared with the save/restart diff so removing pollution written by an older
+# release does not itself look like an operational edit and rebuild a running line.
+RUNTIME_ONLY_INSTANCE_FIELDS = frozenset({
+    "status", "has_pin", "proxy_country_effective",
+})
 
 # SIP User-Agent a line presents to the IMS core. The product identifies itself honestly by
 # default; a line may override it because some carriers gate IMS registration on a User-Agent
@@ -226,7 +241,8 @@ def internal_event_token() -> str:
 # engine through the control surface relay (softphone_ws), so the key is ignored. WebRTC
 # *media* (ICE, DTLS-SRTP) is unaffected and still uses the rtp_start..rtp_span range below.
 PORT_BASE = {"sip_udp": 5060, "sip_tls": 5061, "ami": 5038,
-             "rtp_start": 10000, "rtp_end": 11000}
+             "rtp_start": int(os.environ.get("MDD_RTP_BASE", "10000")),
+             "rtp_end": int(os.environ.get("MDD_RTP_BASE", "10000")) + 1000}
 PORT_STRIDE = {"sip_udp": 10, "sip_tls": 10, "ami": 10,
                "rtp_start": 2000, "rtp_end": 2000}
 
@@ -297,11 +313,23 @@ def _ensure():
     os.chmod(CONFIG_PATH, 0o600)
 
 
+def _file_key() -> tuple:
+    st = os.stat(CONFIG_PATH)
+    return (CONFIG_PATH, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def load() -> dict:
+    """The merged configuration. Callers get their own copy and may mutate it freely."""
+    global _loaded
     with _lock:
         _ensure()
+        # Taken before reading: a write that lands in between changes the key, so the next
+        # call parses again instead of serving the older content under the newer key.
+        file_key = _file_key()
+        if _loaded is not None and _loaded[0] == file_key:
+            return deepcopy(_loaded[1])
         with open(CONFIG_PATH) as f:
-            data = yaml.safe_load(f) or {}
+            data = yaml.load(f, Loader=_SafeLoader) or {}
         # merge defaults (shallow for settings)
         out = deepcopy(DEFAULTS)
         out["settings"].update(data.get("settings", {}))
@@ -521,6 +549,7 @@ def load() -> dict:
             # the product never provisions standalone SIP accounts.
             (inst.setdefault("sip", {}))["external"] = []
         out["internal"] = data.get("internal", {})
+        _loaded = (file_key, deepcopy(out))
         return out
 
 
@@ -533,7 +562,9 @@ def esim_settings() -> dict:
 
 
 def save(data: dict):
+    global _loaded
     with _lock:
+        _loaded = None
         _private_dir(DATA_DIR)
         tmp = CONFIG_PATH + ".tmp"
         with _private_text_writer(tmp) as f:
@@ -623,14 +654,18 @@ def _host_port_free(port: int) -> bool:
 
 
 def _block_free(block: dict, reserved: set[int]) -> bool:
-    """A candidate block is usable if none of its ports collide with reserved ports and
-    none of its 3 service ports are already listening on the host."""
+    """A candidate block is usable if none of its TCP or UDP ports are occupied."""
     bp = _block_ports(block)
     if bp & reserved:
         return False
-    # Only probe the 3 service ports on the host (probing 60 RTP ports every try is slow;
-    # RTP conflicts are caught by the reserved-set check against other instances).
-    for port in (block["sip_udp"], block["sip_tls"], block["ami"]):
+    # Engine ports are published in the host namespace, which is not visible from Control's
+    # bridge namespace. Docker remains authoritative when it creates the Engine container.
+    if os.environ.get("MDD_CONTAINER_STACK") == "1":
+        return True
+    # A compact block probes 16 ports and a legacy block 64. This runs only while
+    # provisioning, and avoids discovering an RTP collision after Docker has already
+    # removed/replaced the previous Engine.
+    for port in sorted(bp):
         if not _host_port_free(port):
             return False
     return True
@@ -753,9 +788,11 @@ def upsert_instance(inst: dict, unique_name: bool = False) -> dict:
 def _upsert_instance_locked(inst: dict, unique_name: bool = False) -> dict:
     data = load()
     iid = str(inst["id"])
-    # Runtime-only fields sometimes ride along on the instance object (the API returns
-    # instances with a computed `status` and `has_pin`); never persist them to config.
-    inst = {k: v for k, v in inst.items() if k not in ("status", "has_pin")}
+    # Runtime-only fields sometimes ride along on the instance object returned by the API;
+    # never persist them to config. `proxy_country_effective` is particularly important here:
+    # it is computed from MCC/default routing and feeding it back used to make a display-name
+    # edit look operational, unnecessarily rebuilding the running engine.
+    inst = {k: v for k, v in inst.items() if k not in RUNTIME_ONLY_INSTANCE_FIELDS}
     existing = data["instances"].get(iid, {})
     if not existing and len(data["instances"]) >= MAX_SIM_LINES:
         raise LineLimitError(
@@ -784,6 +821,10 @@ def _upsert_instance_locked(inst: dict, unique_name: bool = False) -> dict:
         if existing.get("pin"):
             inst["pin"] = existing["pin"]
     merged = {**existing, **inst}
+    # Self-heal documents polluted by an older release. The restart diff also ignores these
+    # keys, so this cleanup remains metadata-only when the operator merely renames a line.
+    for key in RUNTIME_ONLY_INSTANCE_FIELDS:
+        merged.pop(key, None)
     # Production Asterisk debug can expose complete SIP messages and subscriber identities.
     # Diagnostic SIP logging is enabled briefly at runtime by the dedicated number-learning
     # flow instead; it must never be persisted on a line.
@@ -1109,15 +1150,19 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         "msisdn": inst.get("msisdn", ""),
         "smsc": inst.get("smsc", ""),
         "pcscf": inst.get("pcscf", ""),
+        # Usually blank so the Engine derives the carrier ePDG hostname.  In an
+        # isolated country-egress run Control resolves that hostname first and
+        # writes the one-run IPv4 peer here because the Engine has no public DNS.
+        "epdg": inst.get("epdg", ""),
         "ami_user": inst.get("ami_user", "vowifi"),
         "ami_secret": ami_secret,
         # Where engine notify.py POSTs events. Explicit setting wins; else MDD_MANAGER_URL
         # env (the installer sets this to the PUBLISHED host port when the control plane runs
-        # in a bridge-networked container with a non-8443 port map); else the default assumes
+        # in a bridge-networked container with a different host port); else the default assumes
         # a 1:1 host.docker.internal:<http_port> mapping.
         "manager_url": settings.get("manager_url")
                        or os.environ.get("MDD_MANAGER_URL")
-                       or f"https://host.docker.internal:{settings.get('http_port', 8443)}",
+                       or f"https://host.docker.internal:{settings.get('http_port', 10443)}",
         "manager_event_token": internal_event_token(),
         "domain": settings.get("tls", {}).get("domain", ""),
         "rtp_start": ports["rtp_start"],
