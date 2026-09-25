@@ -2,6 +2,17 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc11] - 2026-09-26
+
+Eleventh release candidate. The automatic update channel stays on 1.9.5.
+
+### Fixed
+
+- In the full-container deployment a line behind a country exit never connected: its Engine sits
+  on an internal network with no default route, and the SWu client crashed looking for one, first
+  at start-up and then, once the tunnel was up, while pinning the ePDG route. It now needs no
+  default route there, since IKE and ESP reach the ePDG through the exit's SOCKS proxy.
+
 ## [1.12.0-rc10] - 2026-09-26
 
 Tenth release candidate. The automatic update channel stays on 1.9.5.
