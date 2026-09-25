@@ -5238,8 +5238,9 @@ def _only_instance_name_changed(before: dict | None, after: dict) -> bool:
     """
     if before is None or before == after:
         return False
-    before_runtime = {key: value for key, value in before.items() if key != "name"}
-    after_runtime = {key: value for key, value in after.items() if key != "name"}
+    ignored = cfg.RUNTIME_ONLY_INSTANCE_FIELDS | {"name"}
+    before_runtime = {key: value for key, value in before.items() if key not in ignored}
+    after_runtime = {key: value for key, value in after.items() if key not in ignored}
     return before_runtime == after_runtime
 
 
