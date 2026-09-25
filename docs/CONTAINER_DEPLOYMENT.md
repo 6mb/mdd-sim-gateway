@@ -27,13 +27,15 @@ Compose 只声明前三个基础服务。不要手工为每张 SIM 复制 Engine
 - 至少 6 GiB 可用空间，以便首次拉取和以后保留一代回滚镜像；
 - 一个只用于本项目的数据目录；群晖示例为 `/volume1/docker/mdd-sim-gateway`；
 - 一个未占用的 HTTPS 管理端口，默认 `10443`；
-- NAS 的固定 LAN 地址或局域网 DNS 名称；
+- 宿主的固定 LAN 地址或局域网 DNS 名称；
 - USB 设备能出现在宿主 `/dev/bus/usb`。蜂窝模块还应生成串口、QMI/MBIM 和网卡节点。
 
 不要先在宿主安装 pcscd、ModemManager 或 NetworkManager。全容器模式由 Hardware 容器管理
-这些用户态服务，宿主同类服务可能抢占 USB 设备。
+这些用户态服务，宿主同类服务可能抢占 USB 设备。Ubuntu 等发行版默认启用 ModemManager，部署前先停用：
+`sudo systemctl disable --now ModemManager`。宿主必须是 Linux；Docker Desktop（macOS/Windows）
+无法把 USB 设备交给容器，rootless Docker 也不支持。
 
-## 2. 判断是否需要 NAS 驱动
+## 2. 判断宿主是否需要驱动
 
 先插入 USB 模块或读卡器。普通 Linux/Pi 和部分 NAS 的内核已经包含驱动，可以直接部署。
 蜂窝模块通常需要看到类似节点：
