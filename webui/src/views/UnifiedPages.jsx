@@ -361,10 +361,48 @@ export function DevicesPage({ devices, discovering, loadErrors, refreshDevices, 
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
       {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch key={`${d.id}:cellular`} device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch key={`${d.id}:flight`} device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch key={`${d.id}:vowifi`} device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onSetup={openSetup}/><LineActivity device={d}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d}/></div>}
-      {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}</div>}
+      {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<ModemImsPanel key={d.id} device={d} showToast={showToast}/></div>}
       {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected'))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Data channel rekey')}</span><b>{(d.vowifi?.rekey_minutes ?? 30) === 0 ? t(d.vowifi?.accept_epdg_rekey ? 'Initiated by carrier' : 'Off') : `${d.vowifi?.rekey_minutes ?? 30} ${t('minutes')}`}</b></div><div className="u-detail"><span>{t('Control channel rekey')}</span><b>{(d.vowifi?.ike_rekey_minutes ?? 150) === 0 ? t('Off') : `${d.vowifi?.ike_rekey_minutes ?? 150} ${t('minutes')}`}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='hardware' && <HardwarePanel device={d} refreshDevices={refreshDevices} showToast={showToast} focusImei={focusImei} onSetup={openSetup}/>}
     </section></div>
+}
+
+// The modem's own VoLTE/IMS on the cellular network — separate from the VoWiFi line. Carriers
+// with no circuit-switched fallback on LTE (China Telecom, for one) carry 4G calls and texts
+// only over IMS, so with it off every text fails and callers hear "switched off".
+function ModemImsPanel({ device, showToast }) {
+  const { t } = useI18n()
+  const [ims, setIms] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const load = async () => {
+    try { setIms(await api.getDeviceIms(device.id)) } catch (e) { setIms({ supported: false, reason: e.message }) }
+  }
+  useEffect(() => { if (device.present !== false) load() }, [device.id, device.present])  // eslint-disable-line react-hooks/exhaustive-deps
+  if (!ims) return null
+  const change = async (enabled) => {
+    if (!window.confirm(t('The modem restarts to apply this (about a minute). 4G and any VoWiFi line on this modem reconnect afterwards. Continue?'))) return
+    setBusy(true)
+    try {
+      await api.setDeviceIms(device.id, enabled)
+      showToast?.(t('Modem restarting; the IMS state refreshes in about a minute'))
+      setTimeout(() => { load(); setBusy(false) }, 60000)
+    } catch (e) { showToast?.(`${t('Error')}: ${e.message}`); setBusy(false) }
+  }
+  const state = !ims.supported ? 'unsupported' : ims.registered ? 'on' : ims.enabled ? 'starting' : 'off'
+  const label = !ims.supported ? t('cap.unsupported') : ims.registered ? t('IMS registered')
+    : ims.enabled ? t('Enabled, not registered') : t('cap.off')
+  return <div className="u-note" style={{ marginTop: 16 }}>
+    <div className="u-capability compact">
+      <div><b>{t('Modem VoLTE / IMS')}</b>
+        <div className="u-cap-detail">{ims.supported
+          ? t('Needed for 4G calls and texts on VoLTE-only carriers such as China Telecom. This is the modem\'s own setting, separate from VoWiFi.')
+          : t(ims.reason || 'IMS is not supported')}</div>
+        {ims.supported && ims.active_profile && <div className="u-cap-detail">{t('Carrier profile')}: {ims.active_profile}{ims.auto_select ? ` (${t('automatic')})` : ''}</div>}
+      </div>
+      <div className="u-cap-actions"><Badge state={state}>{label}</Badge>
+        {ims.supported && <button className="btn btn-ghost" disabled={busy} onClick={() => change(!ims.enabled)}>{t(busy ? 'Restarting…' : ims.enabled ? 'Turn off' : 'Turn on')}</button>}</div>
+    </div>
+  </div>
 }
 
 function CountryExitControl({ device, refresh, showToast }) {

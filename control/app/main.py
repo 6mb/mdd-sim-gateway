@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_media, mms_transport, softphone_ws)
+               mms_media, mms_transport, softphone_ws, modem_ims)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -4471,6 +4471,44 @@ async def api_device_cellular(device_id: str):
         raise HTTPException(404, "no such physical device")
     return {"device_id": device_id, "capability": device["capabilities"]["cellular"],
             "cellular": device.get("cellular")}
+
+
+def _device_modem_path(device_id: str) -> str:
+    """The live ModemManager object of a present modem, or ""."""
+    _desired, observed, _assignments = _device_sources()
+    item = (observed.get("devices") or {}).get(device_id) or {}
+    if not item.get("present"):
+        return ""
+    return str((item.get("cellular") or {}).get("mm_object") or item.get("mm_object") or "")
+
+
+@app.get("/api/devices/{device_id}/ims")
+async def api_device_ims(device_id: str):
+    path = _device_modem_path(device_id)
+    if not path:
+        return {"supported": False, "reason": "The modem is not available."}
+    return await asyncio.to_thread(modem_ims.status, path)
+
+
+@app.put("/api/devices/{device_id}/ims")
+async def api_device_ims_set(device_id: str, body: dict):
+    enabled = (body or {}).get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(400, "enabled must be boolean")
+    async with capability_lock:
+        path = _device_modem_path(device_id)
+        if not path:
+            raise HTTPException(409, "The modem is not available.")
+        current = await asyncio.to_thread(modem_ims.status, path)
+        if not current.get("supported"):
+            raise HTTPException(409, current.get("reason") or "IMS is not supported")
+        result = await asyncio.to_thread(modem_ims.set_enabled, path, enabled)
+    if not result.get("ok"):
+        raise HTTPException(502, result.get("error") or "the modem rejected the change")
+    log.info("modem %s: VoLTE/IMS %s; modem restarting", device_id,
+             "enabled" if enabled else "disabled")
+    await hub.broadcast({"type": "capability", "device": device_id, "ims": enabled})
+    return result
 
 
 @app.post("/api/devices/{device_id}/diagnostics")
