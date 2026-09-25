@@ -2,6 +2,24 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0-rc6] - 2026-09-25
+
+Sixth release candidate. The automatic update channel stays on 1.9.5.
+
+### Fixed
+
+- Renaming a line restarted it. The SIM tab sent back `proxy_country_effective`, a value the
+  lines API computes for display, and saving it looked like a configuration change. It is no
+  longer sent or stored; copies written by earlier releases are removed on the next save
+  without counting as a change.
+- After a one-click update, Synology Container Manager could not stop or delete the MDD
+  containers ("container undefined does not exist"). The update helper ran Compose from its
+  own `/data` mount, so the containers were labelled with a project path that does not exist
+  on the NAS. It now runs Compose from the data directory's host path, producing the same
+  labels as Container Manager. This takes effect from updates performed by rc6; containers
+  created by an earlier helper keep the old labels until the project is built again in
+  Container Manager.
+
 ## [1.12.0-rc5] - 2026-09-25
 
 Fifth release candidate. The rc3 -> rc4 rollback drill passed on a DS1621+: every container
