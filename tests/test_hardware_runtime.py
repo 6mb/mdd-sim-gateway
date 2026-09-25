@@ -587,6 +587,48 @@ class HardwareRuntimeTests(unittest.TestCase):
 
 
 
+class ModemProfileTests(unittest.TestCase):
+    """The container read modem profiles from config.json, a file Control never writes, so
+    every modem was named "Cellular modem" where the native install showed its model."""
+
+    def test_without_a_config_the_built_in_profile_names_the_dji_module(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = HardwareSupervisor(data_path=Path(temp))
+            self.assertEqual(app.modem_profiles(), [("2c7c", "0125", 2, "DJI/Quectel EC25")])
+
+    def test_profiles_and_names_come_from_config_yaml(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            (data / "config.yaml").write_text(
+                "hardware:\n  modem_profiles:\n"
+                "  - {name: Quectel EG25-G, vid: 2C7C, pid: '0125', at_interface: 3}\n"
+                "  - {vid: 1e0e, pid: '9001'}\n")
+            app = HardwareSupervisor(data_path=data)
+            self.assertEqual(app.modem_profiles(), [("2c7c", "0125", 3, "Quectel EG25-G"),
+                                                    ("1e0e", "9001", 2, "")])
+
+    def test_an_unreadable_config_keeps_the_built_in_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            (data / "config.yaml").write_text("hardware: [unterminated\n")
+            app = HardwareSupervisor(data_path=data)
+            self.assertEqual(app.modem_profiles()[0][3], "DJI/Quectel EC25")
+
+    def test_the_config_is_parsed_again_only_after_it_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            path = data / "config.yaml"
+            path.write_text("hardware:\n  modem_profiles: [{name: A, vid: '1', pid: '2'}]\n")
+            app = HardwareSupervisor(data_path=data)
+            with patch("runtime.hardware.yaml.load", wraps=__import__("yaml").load) as load:
+                app.modem_profiles()
+                app.modem_profiles()
+                self.assertEqual(load.call_count, 1)
+                path.write_text("hardware:\n  modem_profiles: [{name: Bee, vid: '1', pid: '2'}]\n")
+                self.assertEqual(app.modem_profiles()[0][3], "Bee")
+                self.assertEqual(load.call_count, 2)
+
+
 class AdaptiveCadenceTests(unittest.TestCase):
     """A pass forks mmcli/nmcli per modem. At a fixed 3 s cadence that was about a fifth of a
     Raspberry Pi core for a modem nobody was touching."""
