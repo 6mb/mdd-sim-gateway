@@ -270,7 +270,7 @@ jobs:
           source = source.replace(
               "${MDD_ADVERTISE_ADDR:?set the NAS LAN address}",
               "192.168.1.100")
-          header = """# Synology Container Manager project example.\n# Before creating the project, replace 192.168.1.100 with this NAS's LAN address.\n# Change /volume1/docker/mdd-sim-gateway if the shared-folder path is different.\n\n"""
+          header = """# MDD Sim Gateway full-container deployment (Docker Compose v2, Linux host).\n# Before starting, replace 192.168.1.100 with this host's LAN address, and replace\n# /volume1/docker/mdd-sim-gateway (the Synology example) with your data directory.\n# Ordinary Linux: save as docker-compose.yml in the data directory and run `docker compose up -d`.\n# Synology: paste into a new Container Manager project.\n\n"""
           Path(sys.argv[1]).write_text(
               header + source, encoding="utf-8")
           PY

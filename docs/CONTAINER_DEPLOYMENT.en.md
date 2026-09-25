@@ -29,14 +29,17 @@ Before deployment, prepare:
 - at least 6 GiB of free space for the first pull and one rollback image generation;
 - a dedicated persistent directory, such as `/volume1/docker/mdd-sim-gateway` on Synology;
 - an unused HTTPS host port; the default is `10443`;
-- a fixed NAS LAN address or a stable LAN DNS name;
+- a fixed LAN address or stable LAN DNS name for the host;
 - host USB enumeration under `/dev/bus/usb`. Cellular modems also need their serial, QMI/MBIM and
   network-interface device nodes.
 
 Do not install host pcscd, ModemManager or NetworkManager first. The Hardware container owns those
 user-space services in full-container mode; a host copy can claim the USB device before it does.
+Ubuntu and some other distributions enable ModemManager by default; disable it before deploying:
+`sudo systemctl disable --now ModemManager`. The host must run Linux: Docker Desktop (macOS/Windows)
+cannot hand USB devices to containers, and rootless Docker is not supported.
 
-## 2. Decide whether the NAS needs a driver
+## 2. Decide whether the host needs a driver
 
 Plug in the modem or reader before deployment. A modem normally exposes nodes similar to:
 
