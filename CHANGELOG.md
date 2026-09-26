@@ -53,6 +53,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   and is unchanged. Relay mode needs nf_tables with its socket match in the host kernel. On a
   full-container deployment it has been tested on Debian only, without a registered line, and
   not on a Synology NAS.
+- Client apps can sign in with the administrator's credentials and receive a long-lived bearer
+  token (`POST /api/auth/client/login`). A token is shown once and stored only as a digest,
+  expires after 90 days without use, and ends when the administrator revokes it
+  (`DELETE /api/auth/clients/{id}`) or changes the password. With it an app may use a line's
+  texts, MMS, calls, voicemail and softphone relay; every other route is refused to it, and
+  routes added later stay refused until they are listed in `authz.py`.
 
 ### Changed
 

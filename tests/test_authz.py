@@ -1,0 +1,108 @@
+"""Who may ask for what, as a table, and checked against the routes that really exist."""
+import re
+import unittest
+
+from starlette.routing import Route, WebSocketRoute
+
+from control.app import authz, gate, main
+
+ADMIN = gate.Principal("admin", csrf="c", credential="session:k")
+CLIENT = gate.Principal("client", client_id=3, credential="client:3")
+
+
+def routes():
+    """Every (method, example path) the application serves under /api/ or as a socket."""
+    found = []
+    for route in main.app.routes:
+        example = re.sub(r"\{[^}]+\}", "x", route.path)
+        if isinstance(route, WebSocketRoute):
+            found.append(("WEBSOCKET", example))
+        elif isinstance(route, Route) and example.startswith("/api/"):
+            found.extend((method, example) for method in route.methods - {"HEAD"})
+    return found
+
+
+class AuthorizationTableTests(unittest.TestCase):
+    def test_the_administrator_may_do_anything(self):
+        for method, path in routes():
+            with self.subTest(method=method, path=path):
+                self.assertTrue(authz.allowed(ADMIN, method, path))
+
+    def test_the_engine_may_only_deliver_its_callback(self):
+        self.assertTrue(authz.allowed(gate.ENGINE, "POST", "/api/engine/event"))
+        for method, path in routes():
+            if path != "/api/engine/event":
+                with self.subTest(method=method, path=path):
+                    self.assertFalse(authz.allowed(gate.ENGINE, method, path))
+
+    def test_nobody_else_is_allowed_anything(self):
+        for who in (gate.ANONYMOUS, gate.Principal("someone-new"), None):
+            self.assertFalse(authz.allowed(who, "GET", "/api/instances"))
+
+    def test_a_client_may_talk_on_a_line(self):
+        for method, path in (
+            ("GET", "/api/auth/status"),
+            ("POST", "/api/auth/client/logout"),
+            ("GET", "/api/instances/sim1/status"),
+            ("GET", "/api/instances/sim1/messages/threads"),
+            ("GET", "/api/instances/sim1/messages/+61400000000"),
+            ("POST", "/api/instances/sim1/sms/send"),
+            ("POST", "/api/instances/sim1/mms/send"),
+            ("POST", "/api/instances/sim1/messages/42/mms/download"),
+            ("GET", "/api/instances/sim1/messages/42/mms/parts/1"),
+            ("POST", "/api/instances/sim1/call"),
+            ("POST", "/api/instances/sim1/hangup"),
+            ("POST", "/api/instances/sim1/cellular-call"),
+            ("GET", "/api/instances/sim1/voicemails/7/audio"),
+            ("POST", "/api/instances/sim1/voicemails/7/listened"),
+            ("GET", "/api/instances/sim1/softphone"),
+            ("WEBSOCKET", "/api/instances/sim1/softphone/ws"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertTrue(authz.allowed(CLIENT, method, path))
+
+    def test_a_client_may_not_administer_anything(self):
+        for method, path in (
+            ("GET", "/api/instances"),
+            ("WEBSOCKET", "/ws"),
+            ("POST", "/api/instances"),
+            ("DELETE", "/api/instances/sim1"),
+            ("PUT", "/api/instances/sim1/country"),
+            ("POST", "/api/instances/sim1/stop"),
+            ("GET", "/api/instances/sim1/logs"),
+            ("PUT", "/api/instances/sim1/allowance"),
+            ("GET", "/api/devices"),
+            ("GET", "/api/auth/clients"),
+            ("DELETE", "/api/auth/clients/4"),
+            ("POST", "/api/auth/password"),
+            ("POST", "/api/auth/logout"),
+            ("POST", "/api/engine/event"),
+            ("GET", "/api/readers"),
+            ("GET", "/api/system/update/check"),
+            # A method that is not listed for a listed path.
+            ("DELETE", "/api/instances/sim1/messages/threads"),
+            # Traversal-looking paths do not match a suffix rule.
+            ("GET", "/api/instances/sim1/status/../logs"),
+            ("GET", "/api/instances//status"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertFalse(authz.allowed(CLIENT, method, path))
+
+    def test_every_client_rule_names_a_route_that_exists(self):
+        # A rule left behind by a renamed or removed route would silently grant nothing today
+        # and something unintended once a new route happens to match it.
+        served = routes()
+        prefix = "/api/instances/x"
+        for methods, pattern in authz.CLIENT_LINE_RULES:
+            for method in methods:
+                with self.subTest(method=method, pattern=pattern.pattern):
+                    self.assertTrue(any(m == method and p.startswith(prefix + "/")
+                                        and pattern.match(p[len(prefix):]) for m, p in served))
+        for methods, pattern in authz.CLIENT_GLOBAL_RULES:
+            for method in methods:
+                with self.subTest(method=method, pattern=pattern.pattern):
+                    self.assertTrue(any(m == method and pattern.match(p) for m, p in served))
+
+
+if __name__ == "__main__":
+    unittest.main()

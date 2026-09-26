@@ -34,7 +34,7 @@ from . import (store, engine, status as status_mod, sim, card, notify_push, lpa,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
                mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice,
-               gate, line_offline, contacts, media)
+               gate, line_offline, contacts, media, clients, authz)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -3025,8 +3025,14 @@ app.add_middleware(gate.Gate)
 @app.get("/api/auth/status")
 def api_auth_status(request: Request):
     who = gate.current(request)
-    return {"configured": auth.configured(), "authenticated": who.kind == "admin",
-            "username": auth.username(), "csrf": who.csrf}
+    body = {"configured": auth.configured(), "authenticated": who.kind == "admin",
+            "username": auth.username(), "csrf": who.csrf,
+            # What this gateway offers a client app, which may be newer or older than it.
+            "api": 1, "features": ["client_tokens"]}
+    if who.kind == "client":
+        # A client that reaches this is signed in: its token was checked on the way.
+        body.update({"authenticated": True, "kind": "client", "client_id": who.client_id})
+    return body
 
 
 @app.post("/api/auth/setup")
@@ -3087,9 +3093,56 @@ def api_auth_password(body: dict, request: Request):
                              str(body.get("new_password") or ""))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # A new password ends every sign-in made with the old one: browsers and client apps alike.
+    clients.revoke_all()
     response = JSONResponse({"ok": True, "reauthenticate": True})
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     return response
+
+
+@app.post("/api/auth/client/login")
+def api_auth_client_login(body: dict, request: Request):
+    """Sign a client app in with the administrator's credentials; it gets a bearer token.
+
+    The token is returned this once. Only its digest is stored, so it cannot be shown again."""
+    if not auth.configured():
+        raise HTTPException(409, "administrator setup is required")
+    peer = request.client.host if request.client else ""
+    retry = auth.throttled(peer)
+    if retry:
+        return JSONResponse({"detail": "too many attempts", "retry_after": retry},
+                            status_code=429, headers={"Retry-After": str(retry)})
+    if not auth.verify(str(body.get("username") or "admin"), str(body.get("password") or ""),
+                       peer):
+        raise HTTPException(401, "invalid username or password")
+    try:
+        client, token = clients.register(str(body.get("name") or ""),
+                                         str(body.get("platform") or "other"),
+                                         str(body.get("app_version") or ""))
+    except clients.ClientError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"token": token, "client": client}
+
+
+@app.post("/api/auth/client/logout")
+def api_auth_client_logout(request: Request):
+    who = gate.current(request)
+    if who.kind != "client":
+        raise HTTPException(400, "only a client app signs itself out here")
+    clients.revoke(who.client_id)
+    return {"ok": True}
+
+
+@app.get("/api/auth/clients")
+def api_auth_clients():
+    return {"clients": clients.list_clients()}
+
+
+@app.delete("/api/auth/clients/{client_id}")
+def api_auth_client_revoke(client_id: int):
+    if not clients.revoke(client_id):
+        raise HTTPException(404, "no such client")
+    return {"ok": True}
 
 
 def _audit_client(request: Request, settings: dict) -> str:

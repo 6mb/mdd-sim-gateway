@@ -14,6 +14,13 @@ cookie is SameSite=Strict, but "site" means the registrable domain: a page on a 
 (``other.example.net`` beside ``gateway.example.net``) still gets the cookie attached. Browsers
 always send ``Origin`` on a WebSocket handshake and a page cannot change it, so the handshake is
 accepted only when that origin is the host the browser asked for.
+
+A client app (clients.py) presents ``Authorization: Bearer`` instead. A request that carries
+that header is judged by the token alone -- the cookie is ignored -- so it needs no CSRF token
+(nothing attaches a bearer token by itself) and no origin (it is not a page), and the cookie's
+own CSRF and origin checks are untouched by it.
+
+Once the caller is known, authz.allowed decides whether they may make this request.
 """
 from __future__ import annotations
 
@@ -28,21 +35,25 @@ from starlette.requests import cookie_parser
 from starlette.responses import JSONResponse
 from starlette.websockets import WebSocket
 
-from . import auth
+from . import auth, authz, clients
 from . import config as cfg
 
 log = logging.getLogger("mdd.gate")
 
-PUBLIC_PATHS = frozenset({"/api/auth/status", "/api/auth/setup", "/api/auth/login"})
+# Where one signs in. They ignore any credential the caller still holds: an app signing in
+# again after its token was revoked would otherwise be refused for presenting the old one.
+SIGN_IN_PATHS = frozenset({"/api/auth/setup", "/api/auth/login", "/api/auth/client/login"})
+PUBLIC_PATHS = SIGN_IN_PATHS | {"/api/auth/status"}
 ENGINE_EVENT_PATH = "/api/engine/event"
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 CSRF_HEADER = "x-mdd-csrf-token"
 ENGINE_TOKEN_HEADER = "x-mdd-engine-token"
 
-# WebSocket close codes. 4401 tells the WebUI its session is gone (show the login screen);
-# 4403 tells it the page is not one the gateway serves, which signing in again would not fix.
+# WebSocket close codes. 4401: the credential is missing, expired or revoked -- sign in again.
+# 4403: this caller may not open this socket, or the page is not one the gateway serves;
+# signing in again would not change that, so clients do not retry.
 WS_UNAUTHENTICATED = 4401
-WS_FORBIDDEN_ORIGIN = 4403
+WS_FORBIDDEN = 4403
 
 # The control surface is served only over TLS (run.py) and its cookie is Secure, so the page a
 # signed-in socket comes from is always https; a Host without a port means 443.
@@ -53,12 +64,20 @@ HTTPS_PORT = 443
 class Principal:
     """The caller of one request or socket."""
 
-    kind: str           # "admin" | "engine" | "anonymous"
-    csrf: str = ""      # the session's CSRF token; only a cookie session has one
+    kind: str                   # "admin" | "client" | "engine" | "anonymous"
+    csrf: str = ""              # the session's CSRF token; only a cookie session has one
+    client_id: int | None = None
+    # Names the credential for revocation without being it: "session:<digest>" or "client:<id>".
+    credential: str = ""
 
     @property
     def authenticated(self) -> bool:
         return self.kind != "anonymous"
+
+    @property
+    def label(self) -> str:
+        """Who acted, for the audit log."""
+        return f"client:{self.client_id}" if self.kind == "client" else self.kind
 
 
 ANONYMOUS = Principal("anonymous")
@@ -86,8 +105,28 @@ def _cookie(headers: dict[str, str], name: str) -> str:
 
 
 def _session(headers: dict[str, str]) -> Principal | None:
-    current = auth.session(_cookie(headers, auth.SESSION_COOKIE) or None)
-    return Principal("admin", csrf=str(current.get("csrf") or "")) if current else None
+    token = _cookie(headers, auth.SESSION_COOKIE) or None
+    current = auth.session(token)
+    if not current:
+        return None
+    return Principal("admin", csrf=str(current.get("csrf") or ""),
+                     credential="session:" + auth.session_key(token))
+
+
+def bearer_token(headers: dict[str, str]) -> str:
+    value = headers.get("authorization", "").strip()
+    return value[7:].strip() if value[:7].lower() == "bearer " else ""
+
+
+def _has_bearer(scope, headers: dict[str, str]) -> bool:
+    return "authorization" in headers and scope.get("path") not in SIGN_IN_PATHS
+
+
+def _client(headers: dict[str, str]) -> Principal | None:
+    record = clients.resolve(bearer_token(headers))
+    if not record:
+        return None
+    return Principal("client", client_id=record["id"], credential=f"client:{record['id']}")
 
 
 def _engine(headers: dict[str, str]) -> Principal | None:
@@ -100,7 +139,7 @@ def _nobody(headers: dict[str, str]) -> Principal | None:
     return None
 
 
-def _api(scope) -> bool:
+def _api(scope, headers=None) -> bool:
     return (scope.get("path") or "").startswith("/api/")
 
 
@@ -116,7 +155,7 @@ class Source:
 
     name: str
     transport: str                          # "http" | "websocket"
-    matches: Callable[[dict], bool]
+    matches: Callable[[dict, dict[str, str]], bool]
     resolve: Callable[[dict[str, str]], Principal | None]
     required: bool = True
     refusal: str = "authentication required"
@@ -129,21 +168,27 @@ class Source:
 # engine callback, the session cookie nowhere on it.
 SOURCES: tuple[Source, ...] = (
     # Static assets stay public so the browser can render the login screen.
-    Source("static", "http", lambda scope: not _api(scope), _nobody, required=False),
+    Source("static", "http", lambda scope, headers: not _api(scope), _nobody, required=False),
+    # A request that names a bearer token is judged by it alone, wherever it goes under /api/.
+    Source("bearer", "http", lambda scope, headers: _has_bearer(scope, headers), _client,
+           refusal="invalid or revoked client token"),
     # Reachable signed out; a session, if there is one, is still reported to the handler.
-    Source("public", "http", lambda scope: scope.get("path") in PUBLIC_PATHS, _session,
+    Source("public", "http", lambda scope, headers: scope.get("path") in PUBLIC_PATHS, _session,
            required=False),
-    Source("engine", "http", lambda scope: scope.get("path") == ENGINE_EVENT_PATH, _engine,
-           refusal="invalid engine token"),
+    Source("engine", "http", lambda scope, headers: scope.get("path") == ENGINE_EVENT_PATH,
+           _engine, refusal="invalid engine token"),
     Source("session", "http", _api, _session, csrf=True),
-    Source("socket", "websocket", lambda scope: True, _session, origin=True),
+    Source("bearer socket", "websocket", lambda scope, headers: _has_bearer(scope, headers),
+           _client),
+    Source("socket", "websocket", lambda scope, headers: True, _session, origin=True),
 )
 
 
-def source_for(scope) -> Source | None:
+def source_for(scope, headers: dict[str, str] | None = None) -> Source | None:
     """The one credential source that decides this request, if the gate handles it at all."""
+    headers = headers if headers is not None else _headers(scope)
     for source in SOURCES:
-        if source.transport == scope.get("type") and source.matches(scope):
+        if source.transport == scope.get("type") and source.matches(scope, headers):
             return source
     return None
 
@@ -153,8 +198,9 @@ def principal(scope) -> Principal:
 
     Only says who; whether that is enough for the path is the middleware's decision.
     """
-    source = source_for(scope)
-    return (source.resolve(_headers(scope)) if source else None) or ANONYMOUS
+    headers = _headers(scope)
+    source = source_for(scope, headers)
+    return (source.resolve(headers) if source else None) or ANONYMOUS
 
 
 def current(connection) -> Principal:
@@ -225,25 +271,31 @@ class Gate:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        source = source_for(scope)
+        headers = _headers(scope) if scope["type"] in ("http", "websocket") else {}
+        source = source_for(scope, headers)
         if source is None:
             return await self.app(scope, receive, send)
-        headers = _headers(scope)
         who = source.resolve(headers)
         if who is None and source.required:
             return await self._deny(scope, receive, send, 401, source.refusal,
                                     WS_UNAUTHENTICATED)
         who = who or ANONYMOUS
-        if source.csrf and scope.get("method", "GET").upper() in MUTATING_METHODS:
+        method = "WEBSOCKET" if scope["type"] == "websocket" else \
+            scope.get("method", "GET").upper()
+        if source.csrf and method in MUTATING_METHODS:
             if not hmac.compare_digest(headers.get(CSRF_HEADER, ""), who.csrf):
                 return await self._deny(scope, receive, send, 403, "invalid CSRF token",
-                                        WS_FORBIDDEN_ORIGIN)
+                                        WS_FORBIDDEN)
         if source.origin and not origin_allowed(scope, headers):
             log.warning("refused WebSocket %s from origin %r (host %r, forwarded host %r)",
                         scope.get("path"), headers.get("origin", ""), headers.get("host", ""),
                         headers.get("x-forwarded-host", ""))
             return await self._deny(scope, receive, send, 403, "origin not allowed",
-                                    WS_FORBIDDEN_ORIGIN)
+                                    WS_FORBIDDEN)
+        # Anonymous callers only get this far on a source that does not require a credential,
+        # which is what makes those paths public; everyone else asks authz.
+        if who.authenticated and not authz.allowed(who, method, scope.get("path") or ""):
+            return await self._deny(scope, receive, send, 403, "not permitted", WS_FORBIDDEN)
         scope.setdefault("state", {})["principal"] = who
         await self.app(scope, receive, send)
 
@@ -257,11 +309,15 @@ class Gate:
         """Close a handshake the way its client can read.
 
         A browser that asked for a subprotocol (the softphone's ``sip``) fails any handshake whose
-        answer does not name one, so that socket is closed before it is accepted. Anything else is
+        answer does not name one, so that socket is refused before it is accepted; the client sees
+        a failed handshake (HTTP 403). A native client learns why from any API request, which
+        answers 401 for a revoked token. (An ASGI denial response would carry the status itself,
+        but uvicorn's default implementation logs every one as an error.) Anything else is
         accepted first, because a browser reports the close code only for an open socket: the
         WebUI's event socket relies on seeing 4401 to know the session has ended.
         """
         ws = WebSocket(scope, receive, send)
-        if not scope.get("subprotocols"):
-            await ws.accept()
+        if scope.get("subprotocols"):
+            return await ws.close(code=code)
+        await ws.accept()
         await ws.close(code=code)
