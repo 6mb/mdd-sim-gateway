@@ -10,6 +10,9 @@ rules can be tested as a table.
   is an allow-list: a route added later is refused to clients until somebody decides a client
   needs it, and the pull request that adds such a route adds its row here.
 * Anything else is refused.
+
+Events on the live WebSocket follow the same idea (``may_receive``): a client hears about its
+lines' conversations and calls, not about the host.
 """
 from __future__ import annotations
 
@@ -44,11 +47,18 @@ CLIENT_LINE_RULES = _rules(
     ("WEBSOCKET", r"^/softphone/ws$"),
 )
 
-# Paths outside /api/instances/<line>/ a client may use.
+# Paths outside /api/instances/<line>/ a client may use. The line list is answered with a
+# client's cut of each line (see main.api_instances).
 CLIENT_GLOBAL_RULES = _rules(
+    ("GET", r"^/api/instances$"),
     ("GET", r"^/api/auth/status$"),
     ("POST", r"^/api/auth/client/logout$"),
+    ("WEBSOCKET", r"^/ws$"),
 )
+
+# Live events a client receives, and only for a line: its conversations, calls and the line's
+# own state. Host alerts, hardware, cards and engine maintenance stay with the administrator.
+CLIENT_EVENTS = frozenset({"sms", "call", "voicemail", "status", "line"})
 
 
 def allowed(principal, method: str, path: str) -> bool:
@@ -70,3 +80,12 @@ def allowed(principal, method: str, path: str) -> bool:
                    for methods, pattern in CLIENT_GLOBAL_RULES)
     return False
 
+
+def may_receive(principal, message: dict) -> bool:
+    """Whether a broadcast event goes to this caller's live WebSocket. Fails closed."""
+    kind = getattr(principal, "kind", "")
+    if kind == "admin":
+        return True
+    if kind == "client":
+        return message.get("type") in CLIENT_EVENTS and bool(message.get("instance"))
+    return False

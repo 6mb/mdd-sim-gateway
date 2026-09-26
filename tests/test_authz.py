@@ -41,8 +41,10 @@ class AuthorizationTableTests(unittest.TestCase):
 
     def test_a_client_may_talk_on_a_line(self):
         for method, path in (
+            ("GET", "/api/instances"),
             ("GET", "/api/auth/status"),
             ("POST", "/api/auth/client/logout"),
+            ("WEBSOCKET", "/ws"),
             ("GET", "/api/instances/sim1/status"),
             ("GET", "/api/instances/sim1/messages/threads"),
             ("GET", "/api/instances/sim1/messages/+61400000000"),
@@ -63,8 +65,6 @@ class AuthorizationTableTests(unittest.TestCase):
 
     def test_a_client_may_not_administer_anything(self):
         for method, path in (
-            ("GET", "/api/instances"),
-            ("WEBSOCKET", "/ws"),
             ("POST", "/api/instances"),
             ("DELETE", "/api/instances/sim1"),
             ("PUT", "/api/instances/sim1/country"),
@@ -102,6 +102,25 @@ class AuthorizationTableTests(unittest.TestCase):
             for method in methods:
                 with self.subTest(method=method, pattern=pattern.pattern):
                     self.assertTrue(any(m == method and pattern.match(p) for m, p in served))
+
+
+class EventScopeTests(unittest.TestCase):
+    def test_a_client_hears_its_lines_conversations_and_calls_only(self):
+        for event in ({"type": "sms", "instance": "sim1"}, {"type": "call", "instance": "sim1"},
+                      {"type": "voicemail", "instance": "sim1"},
+                      {"type": "status", "instance": "sim1"}, {"type": "line", "instance": "sim1"}):
+            with self.subTest(event=event):
+                self.assertTrue(authz.may_receive(CLIENT, event))
+        for event in ({"type": "host_alert"}, {"type": "cards"}, {"type": "hardware"},
+                      {"type": "engine", "instance": "sim1"}, {"type": "capability", "device": 1},
+                      {"type": "sms", "instance": ""}, {"type": "something-added-later",
+                                                        "instance": "sim1"}):
+            with self.subTest(event=event):
+                self.assertFalse(authz.may_receive(CLIENT, event))
+
+    def test_the_administrator_hears_everything_and_nobody_else_anything(self):
+        self.assertTrue(authz.may_receive(ADMIN, {"type": "host_alert"}))
+        self.assertFalse(authz.may_receive(gate.ANONYMOUS, {"type": "sms", "instance": "sim1"}))
 
 
 if __name__ == "__main__":

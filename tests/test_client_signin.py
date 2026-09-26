@@ -84,6 +84,17 @@ class ClientSignInTests(unittest.TestCase):
         self.assertEqual(body["csrf"], "")
         self.assertIn("client_tokens", body["features"])
 
+    def test_a_client_sees_a_cut_of_each_line(self):
+        token = self.sign_in()[1]["token"]
+        with patch.object(main, "_cached_line_status", return_value={
+                "state": "REGISTERED", "label": "Registered", "reason_code": "ok",
+                "reason": "", "detail": {"internal": "x"}}):
+            status, body = self.call("GET", "/api/instances", token=token)
+        self.assertEqual(status, 200)
+        (line,) = body["instances"]
+        self.assertEqual(set(line), {"id", "name", "msisdn", "enabled", "status"})
+        self.assertNotIn("detail", line["status"])
+
     def test_the_administrator_lists_and_revokes_clients(self):
         token = self.sign_in()[1]["token"]
         status, body = self.call("GET", "/api/auth/clients", browser=True)

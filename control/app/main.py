@@ -598,6 +598,8 @@ class Hub:
     async def broadcast(self, msg: dict):
         dead = []
         for ws in list(self.clients):
+            if not authz.may_receive(gate.current(ws), msg):
+                continue
             try:
                 await ws.send_json(msg)
             except Exception:
@@ -5666,10 +5668,18 @@ async def api_support_bundle():
 
 # ----------------------------- instances -----------------------------
 @app.get("/api/instances")
-async def api_instances():
+async def api_instances(request: Request):
     out = []
+    client = gate.current(request).kind == "client"
     for inst in cfg.list_instances():
         st = _cached_line_status(inst)
+        if client:
+            # A client app lists lines to talk on; the line's configuration is not its business.
+            out.append({"id": inst["id"], "name": inst.get("name", ""),
+                        "msisdn": inst.get("msisdn", ""), "enabled": inst.get("enabled", True),
+                        "status": {key: st.get(key) for key in
+                                   ("state", "label", "reason_code", "reason")}})
+            continue
         safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
         safe["has_pin"] = bool(inst.get("pin"))
         safe["proxy_country_effective"] = egress.line_country(inst)

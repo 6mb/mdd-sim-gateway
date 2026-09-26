@@ -58,7 +58,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   expires after 90 days without use, and ends when the administrator revokes it
   (`DELETE /api/auth/clients/{id}`) or changes the password. With it an app may use a line's
   texts, MMS, calls, voicemail and softphone relay; every other route is refused to it, and
-  routes added later stay refused until they are listed in `authz.py`.
+  routes added later stay refused until they are listed in `authz.py`. Its line list shows only
+  each line's name, number and state, and its live event socket carries only its lines'
+  messages, calls, voicemail and state -- not host, hardware or engine events.
 
 ### Changed
 
