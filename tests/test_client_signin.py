@@ -67,6 +67,11 @@ class ClientSignInTests(unittest.TestCase):
                          {"username": "admin", "password": PASSWORD, "name": "Phone",
                           "platform": "ios", "app_version": "1.0", **extra})
 
+    def audit(self):
+        with open(os.path.join(self.temp.name, "audit", "operations.jsonl"),
+                  encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle]
+
     def test_sign_in_needs_the_administrator_password(self):
         status, _ = self.call("POST", "/api/auth/client/login",
                               {"username": "admin", "password": "wrong password"})
@@ -106,11 +111,14 @@ class ClientSignInTests(unittest.TestCase):
         self.assertEqual(self.call("DELETE", f"/api/auth/clients/{listed['id']}",
                                    browser=True)[0], 404)
 
-    def test_a_client_signs_itself_out(self):
+    def test_a_client_signs_itself_out_and_the_audit_names_it(self):
         body = self.sign_in()[1]
         status, _ = self.call("POST", "/api/auth/client/logout", {}, token=body["token"])
         self.assertEqual(status, 200)
         self.assertEqual(self.call("GET", "/api/auth/status", token=body["token"])[0], 401)
+        actors = {(record["path"], record["actor"]) for record in self.audit()}
+        self.assertIn(("/api/auth/client/logout", f"client:{body['client']['id']}"), actors)
+        self.assertIn(("/api/auth/client/login", "anonymous"), actors)
 
     def test_changing_the_password_signs_every_client_out(self):
         token = self.sign_in()[1]["token"]
@@ -120,6 +128,8 @@ class ClientSignInTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.call("GET", "/api/instances", token=token)[0], 401)
         self.assertEqual(clients.list_clients(), [])
+        self.assertIn(("/api/auth/password", "admin"),
+                      {(record["path"], record["actor"]) for record in self.audit()})
 
 
 if __name__ == "__main__":

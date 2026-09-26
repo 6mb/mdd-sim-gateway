@@ -20,10 +20,13 @@ that header is judged by the token alone -- the cookie is ignored -- so it needs
 (nothing attaches a bearer token by itself) and no origin (it is not a page), and the cookie's
 own CSRF and origin checks are untouched by it.
 
-Once the caller is known, authz.allowed decides whether they may make this request.
+Once the caller is known, authz.allowed decides whether they may make this request. Revoking a
+credential also closes the WebSockets opened with it (``revoke``), so a signed-out browser or a
+thrown-off phone stops receiving events at once rather than at its next reconnect.
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import ipaddress
 import logging
@@ -264,6 +267,48 @@ def origin_allowed(scope, headers: dict[str, str] | None = None,
         _host_port(forwarded) == wanted
 
 
+class _LiveSockets:
+    """The open WebSockets per credential, so revoking a credential can close them."""
+
+    def __init__(self):
+        self._open: dict[str, set[tuple[asyncio.AbstractEventLoop, asyncio.Event]]] = {}
+
+    def add(self, credential: str) -> tuple[asyncio.AbstractEventLoop, asyncio.Event]:
+        entry = (asyncio.get_running_loop(), asyncio.Event())
+        self._open.setdefault(credential, set()).add(entry)
+        return entry
+
+    def discard(self, credential: str, entry) -> None:
+        entries = self._open.get(credential)
+        if entries is not None:
+            entries.discard(entry)
+            if not entries:
+                self._open.pop(credential, None)
+
+    def revoke(self, match: Callable[[str], bool]) -> int:
+        """Close every socket whose credential matches; safe to call from any thread."""
+        closed = 0
+        for credential, entries in list(self._open.items()):
+            if match(credential):
+                for loop, event in list(entries):
+                    loop.call_soon_threadsafe(event.set)
+                    closed += 1
+        return closed
+
+
+_live = _LiveSockets()
+
+
+def revoke(credential: str) -> int:
+    """Close the WebSockets opened with this credential (a sign-out or a revoked client)."""
+    return _live.revoke(lambda item: bool(credential) and item == credential)
+
+
+def revoke_kind(kind: str) -> int:
+    """Close every WebSocket of one kind of credential: "session" or "client"."""
+    return _live.revoke(lambda item: item.startswith(kind + ":"))
+
+
 class Gate:
     """ASGI middleware: dispatch every request and handshake to its credential source."""
 
@@ -297,7 +342,44 @@ class Gate:
         if who.authenticated and not authz.allowed(who, method, scope.get("path") or ""):
             return await self._deny(scope, receive, send, 403, "not permitted", WS_FORBIDDEN)
         scope.setdefault("state", {})["principal"] = who
+        if scope["type"] == "websocket" and who.credential:
+            return await self._revocable(scope, receive, send, who.credential)
         await self.app(scope, receive, send)
+
+    async def _revocable(self, scope, receive, send, credential: str):
+        """Run a socket that ends, with 4401, as soon as its credential is revoked."""
+        entry = _live.add(credential)
+        revoked = entry[1]
+        closed = False
+
+        async def guarded_receive():
+            nonlocal closed
+            if closed:
+                return {"type": "websocket.disconnect", "code": WS_UNAUTHENTICATED}
+            incoming = asyncio.ensure_future(receive())
+            waiting = asyncio.ensure_future(revoked.wait())
+            done, _ = await asyncio.wait({incoming, waiting}, return_when=asyncio.FIRST_COMPLETED)
+            if incoming in done:
+                waiting.cancel()
+                return incoming.result()
+            incoming.cancel()
+            closed = True
+            try:
+                await send({"type": "websocket.close", "code": WS_UNAUTHENTICATED})
+            except Exception:
+                pass
+            return {"type": "websocket.disconnect", "code": WS_UNAUTHENTICATED}
+
+        async def guarded_send(message):
+            if closed:
+                # The gate already closed the socket; the application learns so from receive.
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, guarded_receive, guarded_send)
+        finally:
+            _live.discard(credential, entry)
 
     async def _deny(self, scope, receive, send, status: int, detail: str, close_code: int):
         if scope["type"] == "websocket":

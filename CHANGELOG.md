@@ -99,6 +99,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   added later cannot be left open by forgetting a check. A socket signed in with the session
   cookie must also come from the gateway's own page: its `Origin` has to match the host the
   browser asked for, or the forwarded host from a trusted reverse proxy.
+- Signing out, changing the password or revoking a client app now also closes the event and
+  softphone sockets opened with that sign-in; before, they stayed connected until they dropped.
+- The administrative audit log records who acted: `admin`, `client:<id>`, `engine` or
+  `anonymous`.
 
 ### Removed
 

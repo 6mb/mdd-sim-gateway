@@ -323,6 +323,54 @@ class BearerTests(GateTestCase):
                 self.assertEqual(result.close_code, code)
 
 
+class RevocationTests(GateTestCase):
+    async def _open(self, scope):
+        """Open a socket through the gate; the application echoes until it is disconnected."""
+        sent, inbox, ended = [], asyncio.Queue(), asyncio.Event()
+        inbox.put_nowait({"type": "websocket.connect"})
+
+        async def application(scope, receive, send):
+            await receive()
+            await send({"type": "websocket.accept"})
+            while (await receive())["type"] != "websocket.disconnect":
+                pass
+            ended.set()
+
+        async def send(message):
+            sent.append(message)
+
+        task = asyncio.create_task(gate.Gate(application)(scope, inbox.get, send))
+        await asyncio.sleep(0.01)
+        return task, sent, ended
+
+    def test_revoking_a_credential_closes_its_sockets_only(self):
+        async def scenario():
+            phone, phone_sent, phone_ended = await self._open(
+                websocket(cookie=None, origin=None, headers=BEARER))
+            browser, browser_sent, browser_ended = await self._open(websocket())
+            self.assertEqual(gate.revoke("client:3"), 1)
+            await asyncio.wait_for(phone, 5)
+            self.assertTrue(phone_ended.is_set())
+            self.assertIn({"type": "websocket.close", "code": gate.WS_UNAUTHENTICATED}, phone_sent)
+            self.assertFalse(browser_ended.is_set())
+            self.assertEqual(gate.revoke_kind("session"), 1)
+            await asyncio.wait_for(browser, 5)
+            self.assertEqual(gate.revoke("client:3"), 0)
+
+        asyncio.run(scenario())
+
+    def test_revocation_is_safe_from_a_worker_thread(self):
+        # Synchronous handlers (logout, revoke) run in FastAPI's thread pool.
+        async def scenario():
+            phone, _, ended = await self._open(websocket(cookie=None, origin=None,
+                                                         headers=BEARER))
+            await asyncio.to_thread(gate.revoke, "client:3")
+            await asyncio.wait_for(phone, 5)
+            self.assertTrue(ended.is_set())
+
+        asyncio.run(scenario())
+
+
 class SourceTableTests(unittest.TestCase):
     # One representative request per credential source; the tests above exercise each of them.
     EXAMPLES = {

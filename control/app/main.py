@@ -3083,6 +3083,7 @@ def api_auth_login(body: dict, request: Request):
 @app.post("/api/auth/logout")
 def api_auth_logout(request: Request):
     auth.logout(request.cookies.get(auth.SESSION_COOKIE))
+    gate.revoke(gate.current(request).credential)
     response = JSONResponse({"ok": True})
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     return response
@@ -3097,6 +3098,8 @@ def api_auth_password(body: dict, request: Request):
         raise HTTPException(400, str(exc)) from exc
     # A new password ends every sign-in made with the old one: browsers and client apps alike.
     clients.revoke_all()
+    gate.revoke_kind("session")
+    gate.revoke_kind("client")
     response = JSONResponse({"ok": True, "reauthenticate": True})
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     return response
@@ -3132,6 +3135,7 @@ def api_auth_client_logout(request: Request):
     if who.kind != "client":
         raise HTTPException(400, "only a client app signs itself out here")
     clients.revoke(who.client_id)
+    gate.revoke(who.credential)
     return {"ok": True}
 
 
@@ -3144,6 +3148,7 @@ def api_auth_clients():
 def api_auth_client_revoke(client_id: int):
     if not clients.revoke(client_id):
         raise HTTPException(404, "no such client")
+    gate.revoke(f"client:{client_id}")
     return {"ok": True}
 
 
@@ -3165,7 +3170,8 @@ async def audit_mutations(request: Request, call_next):
         settings = cfg.get_settings()
         _write_audit_record({"at": int(time.time()), "method": request.method,
                              "path": request.url.path, "status": response.status_code,
-                             "client": _audit_client(request, settings)}, settings)
+                             "client": _audit_client(request, settings),
+                             "actor": gate.current(request).label}, settings)
     return response
 
 
