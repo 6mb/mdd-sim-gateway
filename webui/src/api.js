@@ -89,6 +89,8 @@ export const api = {
   resolveContacts: (numbers, line) => j('POST', '/api/contacts/resolve', { numbers, line }),
   importContacts: (file) => { const fd = new FormData(); fd.append('file', file, file.name); return form('POST', '/api/contacts/import', fd) },
   contactsExportUrl: (format) => `/api/contacts/export?format=${encodeURIComponent(format)}`,
+  authClients: () => j('GET', '/api/auth/clients'),
+  revokeAuthClient: (id) => j('DELETE', `/api/auth/clients/${encodeURIComponent(id)}`),
   // Unified physical-device control plane. Older deployments may return 404;
   // App.jsx then derives read-only device cards from /api/instances + /api/cards.
   devices: () => j('GET', '/api/devices'),
