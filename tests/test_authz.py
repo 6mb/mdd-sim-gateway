@@ -14,7 +14,8 @@ def routes():
     """Every (method, example path) the application serves under /api/ or as a socket."""
     found = []
     for route in main.app.routes:
-        example = re.sub(r"\{[^}]+\}", "x", route.path)
+        # "1" fits a parameter whether a rule expects any segment or a numeric id.
+        example = re.sub(r"\{[^}]+\}", "1", route.path)
         if isinstance(route, WebSocketRoute):
             found.append(("WEBSOCKET", example))
         elif isinstance(route, Route) and example.startswith("/api/"):
@@ -59,6 +60,17 @@ class AuthorizationTableTests(unittest.TestCase):
             ("POST", "/api/instances/sim1/voicemails/7/listened"),
             ("GET", "/api/instances/sim1/softphone"),
             ("WEBSOCKET", "/api/instances/sim1/softphone/ws"),
+            ("GET", "/api/instances/sim1/messages/unread"),
+            ("POST", "/api/instances/sim1/messages/read"),
+            ("GET", "/api/messages/unread"),
+            ("GET", "/api/instances/sim1/mms/settings"),
+            ("GET", "/api/contacts"),
+            ("GET", "/api/contacts/export"),
+            ("POST", "/api/contacts"),
+            ("POST", "/api/contacts/resolve"),
+            ("POST", "/api/contacts/import"),
+            ("PUT", "/api/contacts/12"),
+            ("DELETE", "/api/contacts/12"),
         ):
             with self.subTest(method=method, path=path):
                 self.assertTrue(authz.allowed(CLIENT, method, path))
@@ -79,6 +91,8 @@ class AuthorizationTableTests(unittest.TestCase):
             ("POST", "/api/engine/event"),
             ("GET", "/api/readers"),
             ("GET", "/api/system/update/check"),
+            ("PUT", "/api/instances/sim1/mms/settings"),
+            ("DELETE", "/api/contacts/not-a-number"),
             # A method that is not listed for a listed path.
             ("DELETE", "/api/instances/sim1/messages/threads"),
             # Traversal-looking paths do not match a suffix rule.
@@ -92,7 +106,7 @@ class AuthorizationTableTests(unittest.TestCase):
         # A rule left behind by a renamed or removed route would silently grant nothing today
         # and something unintended once a new route happens to match it.
         served = routes()
-        prefix = "/api/instances/x"
+        prefix = "/api/instances/1"
         for methods, pattern in authz.CLIENT_LINE_RULES:
             for method in methods:
                 with self.subTest(method=method, pattern=pattern.pattern):

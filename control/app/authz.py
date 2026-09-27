@@ -30,10 +30,12 @@ def _rules(*rows: tuple[str, str]) -> tuple[tuple[frozenset[str], re.Pattern[str
 CLIENT_LINE_RULES = _rules(
     # A read-only view of the line itself.
     ("GET", r"^/(status|availability|allowance)$"),
-    # Texts and MMS. messages/<peer> also covers messages/threads.
+    # Texts and MMS. messages/<peer> also covers messages/threads and messages/unread; the MMS
+    # settings tell the composer the line's size limit (changing them stays administrative).
     ("GET", r"^/messages/[^/]+$"),
     ("GET", r"^/messages/[^/]+/mms/parts/[^/]+$"),
-    ("POST", r"^/(sms/send|mms/send|messages/delete)$"),
+    ("POST", r"^/(sms/send|mms/send|messages/delete|messages/read)$"),
+    ("GET", r"^/mms/settings$"),
     ("POST", r"^/messages/[^/]+/mms/download$"),
     # Calls, through the softphone relay and over the modem.
     ("GET", r"^/(calls|cellular-call/status)$"),
@@ -53,6 +55,12 @@ CLIENT_GLOBAL_RULES = _rules(
     ("GET", r"^/api/instances$"),
     ("GET", r"^/api/auth/status$"),
     ("POST", r"^/api/auth/client/logout$"),
+    ("GET", r"^/api/messages/unread$"),
+    # The address book is the administrator's, and a client acts for the administrator: the
+    # names a phone shows are the ones the WebUI shows.
+    ("GET", r"^/api/contacts(/export)?$"),
+    ("POST", r"^/api/contacts(/resolve|/import)?$"),
+    ("PUT DELETE", r"^/api/contacts/[0-9]+$"),
     ("WEBSOCKET", r"^/ws$"),
 )
 

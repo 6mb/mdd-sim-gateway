@@ -6080,9 +6080,10 @@ def _owner(request: Request) -> int:
 
     An address book belongs to whoever keeps it, not to the gateway, so the rows carry an
     owner and every query names one instead of assuming it. This gateway has a single
-    administrator, so that is the answer for every request that gets this far.
+    administrator, so that is the answer for every request that gets this far -- the
+    administrator's browser, or a client app signed in with the administrator's credentials.
     """
-    if gate.current(request).kind != "admin":
+    if gate.current(request).kind not in ("admin", "client"):
         raise HTTPException(401, "authentication required")
     return store.ADMIN_OWNER
 

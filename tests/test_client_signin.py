@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from control.app import auth, clients, main
+from control.app import auth, clients, main, store
 
 PASSWORD = "correct horse battery"
 HOST = "gateway.example.net"
@@ -22,6 +22,8 @@ class ClientSignInTests(unittest.TestCase):
             patch.object(auth, "SESSIONS_PATH", path("sessions.json")),
             patch.object(clients, "CLIENTS_PATH", path("clients.json")),
             patch.object(main.cfg, "DATA_DIR", self.temp.name),
+            patch.multiple(store, DATA_DIR=self.temp.name, DB_PATH=path("history.sqlite"),
+                           PREVIOUS_DB_PATH=path("previous.sqlite")),
             patch.object(main.cfg, "get_settings", return_value={}),
             patch.object(main.cfg, "list_instances", return_value=[
                 {"id": "sim1", "name": "Work", "msisdn": "+61400000000", "enabled": True,
@@ -29,6 +31,7 @@ class ClientSignInTests(unittest.TestCase):
         ):
             p.start()
             self.addCleanup(p.stop)
+        store.init()
         auth._sessions.clear()
         auth._failures.clear()
         clients._load()
@@ -99,6 +102,18 @@ class ClientSignInTests(unittest.TestCase):
         (line,) = body["instances"]
         self.assertEqual(set(line), {"id", "name", "msisdn", "enabled", "status"})
         self.assertNotIn("detail", line["status"])
+
+    def test_a_client_keeps_the_administrators_address_book_and_read_marks(self):
+        token = self.sign_in()[1]["token"]
+        status, body = self.call("POST", "/api/contacts",
+                                 {"name": "Alice", "numbers": ["+61491570006"]}, token=token)
+        self.assertEqual(status, 200, body)
+        status, body = self.call("GET", "/api/contacts", browser=True)
+        self.assertEqual([c["name"] for c in body["contacts"]], ["Alice"])
+        status, body = self.call("POST", "/api/instances/sim1/messages/read", {"all": True},
+                                 token=token)
+        self.assertEqual((status, body["ok"]), (200, True))
+        self.assertEqual(self.call("GET", "/api/messages/unread", token=token)[0], 200)
 
     def test_the_administrator_lists_and_revokes_clients(self):
         token = self.sign_in()[1]["token"]
