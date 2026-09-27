@@ -107,6 +107,7 @@ class GateTestCase(unittest.TestCase):
             patch.object(gate.clients, "resolve", side_effect=lambda token: known.get(token)),
             patch.object(gate.cfg, "internal_event_token", return_value=ENGINE_TOKEN),
             patch.object(gate.cfg, "get_settings", return_value=settings),
+            patch.object(gate.auth, "configured", return_value=True),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -323,6 +324,20 @@ class BearerTests(GateTestCase):
                 self.assertEqual(result.close_code, code)
 
 
+class NoAdministratorTests(GateTestCase):
+    def test_nothing_signed_in_speaks_while_no_administrator_is_configured(self):
+        # `install.sh reset-admin` removes the account without restarting the control plane.
+        with patch.object(gate.auth, "configured", return_value=False):
+            self.assertEqual(run(http("/api/instances")).status, 401)
+            self.assertEqual(run(http("/api/instances/sim1/status", cookie=None,
+                                      headers=BEARER)).status, 401)
+            result = run(websocket())
+            self.assertIsNone(result.reached)
+            self.assertEqual(result.close_code, gate.WS_UNAUTHENTICATED)
+            # Setting the administrator up again stays possible.
+            self.assertEqual(run(http("/api/auth/setup", "POST", cookie=None)).status, 200)
+
+
 class RevocationTests(GateTestCase):
     async def _open(self, scope):
         """Open a socket through the gate; the application echoes until it is disconnected."""
@@ -358,6 +373,15 @@ class RevocationTests(GateTestCase):
             self.assertEqual(gate.revoke("client:3"), 0)
 
         asyncio.run(scenario())
+
+    def test_a_revocation_during_the_handshake_is_not_missed(self):
+        # Revoked after the credential was checked but before the socket was registered: the
+        # socket must not open with a dead credential and stay open until the next reconnect.
+        answers = iter([{"id": 3}, None])
+        with patch.object(gate.clients, "resolve", side_effect=lambda token: next(answers)):
+            result = run(websocket(cookie=None, origin=None, headers=BEARER))
+        self.assertIsNone(result.reached)
+        self.assertEqual(result.close_code, gate.WS_UNAUTHENTICATED)
 
     def test_revocation_is_safe_from_a_worker_thread(self):
         # Synchronous handlers (logout, revoke) run in FastAPI's thread pool.

@@ -136,6 +136,12 @@ def setup(password: str, username: str = "admin") -> None:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     os.chmod(temporary, 0o600)
     os.replace(temporary, AUTH_PATH)
+    # A new administrator starts with nobody signed in: sessions left from the one reset-admin
+    # removed must not carry over to the new account.
+    with _lock:
+        if _sessions:
+            _sessions.clear()
+            _save_sessions()
 
 
 def throttled(peer: str) -> int:

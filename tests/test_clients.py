@@ -86,6 +86,25 @@ class ClientTokenTests(unittest.TestCase):
         self.assertEqual(clients.resolve(token)["id"], first["id"])
         self.assertEqual(clients.register("new", "ios")[0]["id"], first["id"] + 2)
 
+    def test_expired_records_are_dropped_when_listing(self):
+        clients.register("old", "ios")
+        with patch.object(clients.time, "time", return_value=time.time() + clients.TOKEN_TTL + 1):
+            self.assertEqual(clients.list_clients(), [])
+        self.assertEqual(self.stored()["clients"], [])
+
+    def test_the_least_recently_used_makes_room_beyond_the_cap(self):
+        with patch.object(clients, "MAX_CLIENTS", 3):
+            made = [clients.register(f"phone {n}", "ios") for n in range(3)]
+            later = time.time() + clients.LAST_SEEN_SKEW + 1
+            with patch.object(clients.time, "time", return_value=later):
+                clients.resolve(made[0][1])       # the first is still in use
+                clients.resolve(made[2][1])
+            self.assertEqual(clients.make_room(), [made[1][0]["id"]])
+            clients.register("phone 3", "ios")
+            self.assertEqual(len(clients.list_clients()), 3)
+            self.assertIsNone(clients.resolve(made[1][1]))
+            self.assertIsNotNone(clients.resolve(made[0][1]))
+
     def test_listing_never_shows_the_digest(self):
         clients.register("phone", "ios", "2.1")
         (listed,) = clients.list_clients()

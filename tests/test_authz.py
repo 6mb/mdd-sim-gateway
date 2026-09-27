@@ -82,6 +82,8 @@ class AuthorizationTableTests(unittest.TestCase):
             ("PUT", "/api/instances/sim1/country"),
             ("POST", "/api/instances/sim1/stop"),
             ("GET", "/api/instances/sim1/logs"),
+            # Filed raw PDUs and SIM OTA payloads are the administrator's to diagnose.
+            ("GET", "/api/instances/sim1/messages/binary"),
             ("PUT", "/api/instances/sim1/allowance"),
             ("GET", "/api/devices"),
             ("GET", "/api/auth/clients"),
@@ -118,23 +120,40 @@ class AuthorizationTableTests(unittest.TestCase):
                     self.assertTrue(any(m == method and pattern.match(p) for m, p in served))
 
 
+STATUS = {"state": "REGISTERED", "label": "Registered", "reason_code": "ok", "reason": "",
+          "detail": {"pcscf": "10.0.0.1", "dns": ["10.0.0.2"], "pin": "verified"},
+          "activity": {"current": "Checking", "retry_count": 0}, "frozen": False}
+
+
 class EventScopeTests(unittest.TestCase):
     def test_a_client_hears_its_lines_conversations_and_calls_only(self):
         for event in ({"type": "sms", "instance": "sim1"}, {"type": "call", "instance": "sim1"},
                       {"type": "voicemail", "instance": "sim1"},
                       {"type": "status", "instance": "sim1"}, {"type": "line", "instance": "sim1"}):
             with self.subTest(event=event):
-                self.assertTrue(authz.may_receive(CLIENT, event))
+                self.assertIsNotNone(authz.event_for(CLIENT, event))
         for event in ({"type": "host_alert"}, {"type": "cards"}, {"type": "hardware"},
                       {"type": "engine", "instance": "sim1"}, {"type": "capability", "device": 1},
                       {"type": "sms", "instance": ""}, {"type": "something-added-later",
                                                         "instance": "sim1"}):
             with self.subTest(event=event):
-                self.assertFalse(authz.may_receive(CLIENT, event))
+                self.assertIsNone(authz.event_for(CLIENT, event))
 
     def test_the_administrator_hears_everything_and_nobody_else_anything(self):
-        self.assertTrue(authz.may_receive(ADMIN, {"type": "host_alert"}))
-        self.assertFalse(authz.may_receive(gate.ANONYMOUS, {"type": "sms", "instance": "sim1"}))
+        event = {"type": "status", "instance": "sim1", **STATUS}
+        self.assertIs(authz.event_for(ADMIN, event), event)
+        self.assertIsNone(authz.event_for(gate.ANONYMOUS, {"type": "sms", "instance": "sim1"}))
+
+    def test_a_clients_status_event_carries_no_diagnostics(self):
+        view = authz.event_for(CLIENT, {"type": "status", "instance": "sim1", **STATUS})
+        self.assertEqual(view, {"type": "status", "instance": "sim1", "state": "REGISTERED",
+                                "label": "Registered", "reason_code": "ok", "reason": ""})
+
+
+class StatusViewTests(unittest.TestCase):
+    def test_a_client_sees_whether_a_line_works_not_why(self):
+        self.assertEqual(set(authz.status_for(CLIENT, STATUS)), set(authz.CLIENT_STATUS_FIELDS))
+        self.assertIs(authz.status_for(ADMIN, STATUS), STATUS)
 
 
 if __name__ == "__main__":

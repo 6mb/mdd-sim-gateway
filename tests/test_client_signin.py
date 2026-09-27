@@ -115,6 +115,35 @@ class ClientSignInTests(unittest.TestCase):
         self.assertEqual((status, body["ok"]), (200, True))
         self.assertEqual(self.call("GET", "/api/messages/unread", token=token)[0], 200)
 
+    def test_a_client_is_told_whether_a_line_works_not_why(self):
+        token = self.sign_in()[1]["token"]
+        full = {"state": "REGISTERED", "label": "Registered", "reason_code": "ok", "reason": "",
+                "detail": {"pcscf": "10.0.0.1"}}
+        with patch.object(main.cfg, "get_instance", return_value={"id": "sim1"}), \
+                patch.object(main, "_cached_line_status", return_value=full):
+            _, mine = self.call("GET", "/api/instances/sim1/status", token=token)
+            _, admins = self.call("GET", "/api/instances/sim1/status", browser=True)
+        self.assertNotIn("detail", mine)
+        self.assertEqual(admins["detail"], {"pcscf": "10.0.0.1"})
+
+    def test_a_client_cannot_read_filed_binary_messages(self):
+        token = self.sign_in()[1]["token"]
+        self.assertEqual(self.call("GET", "/api/instances/sim1/messages/binary", token=token)[0],
+                         403)
+
+    def test_resetting_the_administrator_ends_every_sign_in(self):
+        token = self.sign_in()[1]["token"]
+        # `install.sh reset-admin` moves auth.json away and restarts nothing.
+        os.rename(auth.AUTH_PATH, auth.AUTH_PATH + ".reset")
+        self.assertEqual(self.call("GET", "/api/instances/sim1/status", token=token)[0], 401)
+        self.assertEqual(self.call("GET", "/api/auth/clients", browser=True)[0], 401)
+        status, _ = self.call("POST", "/api/auth/setup",
+                              {"username": "admin", "password": "a brand new password"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.call("GET", "/api/auth/status", token=token)[0], 401)
+        self.assertEqual(clients.list_clients(), [])
+        self.assertIsNone(auth.session(self.cookie))
+
     def test_the_administrator_lists_and_revokes_clients(self):
         token = self.sign_in()[1]["token"]
         status, body = self.call("GET", "/api/auth/clients", browser=True)

@@ -598,10 +598,11 @@ class Hub:
     async def broadcast(self, msg: dict):
         dead = []
         for ws in list(self.clients):
-            if not authz.may_receive(gate.current(ws), msg):
+            view = authz.event_for(gate.current(ws), msg)
+            if view is None:
                 continue
             try:
-                await ws.send_json(msg)
+                await ws.send_json(view)
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -3045,6 +3046,11 @@ def api_auth_setup(body: dict, request: Request):
         auth.setup(str(body.get("password") or ""), str(body.get("username") or "admin"))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # Setting up again follows `install.sh reset-admin` -- typically because a phone or a
+    # password was lost -- so nothing signed in with the old account survives it.
+    clients.revoke_all()
+    gate.revoke_kind("session")
+    gate.revoke_kind("client")
     remember = bool(body.get("remember"))
     result = auth.login(str(body.get("username") or "admin"), str(body.get("password") or ""),
                         request.client.host if request.client else "", remember=remember)
@@ -3120,6 +3126,8 @@ def api_auth_client_login(body: dict, request: Request):
     if not auth.verify(str(body.get("username") or "admin"), str(body.get("password") or ""),
                        peer):
         raise HTTPException(401, "invalid username or password")
+    for evicted in clients.make_room():
+        gate.revoke(f"client:{evicted}")
     try:
         client, token = clients.register(str(body.get("name") or ""),
                                          str(body.get("platform") or "other"),
@@ -5683,8 +5691,7 @@ async def api_instances(request: Request):
             # A client app lists lines to talk on; the line's configuration is not its business.
             out.append({"id": inst["id"], "name": inst.get("name", ""),
                         "msisdn": inst.get("msisdn", ""), "enabled": inst.get("enabled", True),
-                        "status": {key: st.get(key) for key in
-                                   ("state", "label", "reason_code", "reason")}})
+                        "status": authz.status_for(gate.current(request), st)})
             continue
         safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
         safe["has_pin"] = bool(inst.get("pin"))
@@ -6001,11 +6008,11 @@ async def _stop_instance(iid: str, cancel_reason: str) -> dict:
 
 
 @app.get("/api/instances/{iid}/status")
-async def api_instance_status(iid: str):
+async def api_instance_status(iid: str, request: Request):
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
-    return _cached_line_status(inst)
+    return authz.status_for(gate.current(request), _cached_line_status(inst))
 
 
 def _availability_window(now: int, recorded_since: int | None) -> int:

@@ -36,6 +36,9 @@ TOKEN_TTL = 90 * 24 * 60 * 60
 # Writing "last used" on every request would rewrite the file continuously on an SD card; a
 # client's activity is not interesting at a finer grain than this.
 LAST_SEEN_SKEW = 5 * 60
+# Every sign-in adds a record, and a record only goes when it is revoked or expires. Beyond this
+# many, the one unused for longest makes room -- a phone reinstalled a few times, not a person.
+MAX_CLIENTS = 20
 PLATFORMS = ("ios", "android", "other")
 NAME_MAX = 64
 VERSION_MAX = 32
@@ -164,11 +167,35 @@ def _save_quietly() -> None:
         pass
 
 
-def list_clients() -> list[dict]:
+def _prune() -> list[int]:
+    """Forget expired records. Callers hold the lock and save."""
     now = int(time.time())
+    expired = [cid for cid, record in _clients.items() if record["expires_at"] <= now]
+    for cid in expired:
+        _forget(cid)
+    return expired
+
+
+def make_room() -> list[int]:
+    """Before a sign-in: drop expired records, then the least recently used beyond the cap.
+
+    Returns the ids removed, so the caller can close sockets a still-live one had open."""
     with _lock:
-        return [public(record) for record in sorted(_clients.values(), key=lambda r: r["id"])
-                if record["expires_at"] > now]
+        removed = _prune()
+        while len(_clients) >= MAX_CLIENTS:
+            oldest = min(_clients.values(), key=lambda r: (r["last_seen"], r["id"]))
+            _forget(oldest["id"])
+            removed.append(oldest["id"])
+        if removed:
+            _save()
+        return removed
+
+
+def list_clients() -> list[dict]:
+    with _lock:
+        if _prune():
+            _save_quietly()
+        return [public(record) for record in sorted(_clients.values(), key=lambda r: r["id"])]
 
 
 def revoke(client_id: int) -> bool:

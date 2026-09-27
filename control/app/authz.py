@@ -11,8 +11,10 @@ rules can be tested as a table.
   needs it, and the pull request that adds such a route adds its row here.
 * Anything else is refused.
 
-Events on the live WebSocket follow the same idea (``may_receive``): a client hears about its
-lines' conversations and calls, not about the host.
+Events on the live WebSocket follow the same idea (``event_for``): a client hears about its
+lines' conversations and calls, not about the host. A line's status is cut to what a client
+needs wherever it appears -- the status route, the line list and the status event
+(``status_for``).
 """
 from __future__ import annotations
 
@@ -30,9 +32,10 @@ def _rules(*rows: tuple[str, str]) -> tuple[tuple[frozenset[str], re.Pattern[str
 CLIENT_LINE_RULES = _rules(
     # A read-only view of the line itself.
     ("GET", r"^/(status|availability|allowance)$"),
-    # Texts and MMS. messages/<peer> also covers messages/threads and messages/unread; the MMS
-    # settings tell the composer the line's size limit (changing them stays administrative).
-    ("GET", r"^/messages/[^/]+$"),
+    # Texts and MMS: messages/threads, messages/unread and messages/<peer>. Not messages/binary,
+    # the filed raw PDUs and SIM OTA payloads, which are the administrator's to diagnose. The
+    # MMS settings tell the composer the line's size limit (changing them stays administrative).
+    ("GET", r"^/messages/(?!binary$)[^/]+$"),
     ("GET", r"^/messages/[^/]+/mms/parts/[^/]+$"),
     ("POST", r"^/(sms/send|mms/send|messages/delete|messages/read)$"),
     ("GET", r"^/mms/settings$"),
@@ -89,11 +92,28 @@ def allowed(principal, method: str, path: str) -> bool:
     return False
 
 
-def may_receive(principal, message: dict) -> bool:
-    """Whether a broadcast event goes to this caller's live WebSocket. Fails closed."""
+# What a client is told about a line's state: enough to show whether it can text and call, not
+# the diagnostics (P-CSCF, DNS, PIN state, IKE reasons) the administrator troubleshoots with.
+CLIENT_STATUS_FIELDS = ("state", "label", "reason_code", "reason")
+
+
+def status_for(principal, status: dict) -> dict:
+    """A line's status as this caller may see it. Every route that shows one goes through here."""
+    if getattr(principal, "kind", "") == "admin":
+        return status
+    return {key: status.get(key) for key in CLIENT_STATUS_FIELDS}
+
+
+def event_for(principal, message: dict) -> dict | None:
+    """The broadcast event as this caller's live WebSocket receives it, or None. Fails closed."""
     kind = getattr(principal, "kind", "")
     if kind == "admin":
-        return True
-    if kind == "client":
-        return message.get("type") in CLIENT_EVENTS and bool(message.get("instance"))
-    return False
+        return message
+    if kind != "client" or message.get("type") not in CLIENT_EVENTS or \
+            not message.get("instance"):
+        return None
+    if message.get("type") == "status":
+        # A status event carries the whole status at its top level, beside type and instance.
+        return {"type": "status", "instance": message["instance"],
+                **status_for(principal, message)}
+    return message

@@ -59,9 +59,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   (`DELETE /api/auth/clients/{id}`) or changes the password. With it an app may use a line's
   texts, MMS, calls, voicemail and softphone relay, the address book and read marks; every
   other route is refused to it, and routes added later stay refused until they are listed in
-  `authz.py`. Its line list shows only each line's name, number and state, and its live event
-  socket carries only its lines' messages, calls, voicemail and state -- not host, hardware or
-  engine events.
+  `authz.py`. It sees each line's name, number and state -- wherever a line's status appears,
+  without the diagnostics -- and its live event socket carries only its lines' messages, calls,
+  voicemail and state, not host, hardware or engine events.
 
 ### Changed
 
@@ -102,6 +102,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   browser asked for, or the forwarded host from a trusted reverse proxy.
 - Signing out, changing the password or revoking a client app now also closes the event and
   softphone sockets opened with that sign-in; before, they stayed connected until they dropped.
+- `install.sh reset-admin` now ends every sign-in made with the old account: browser sessions
+  and client app tokens stop working at once, and setting up a new administrator starts with
+  nobody signed in. Before, a session or token issued by the reset account kept working.
 - The administrative audit log records who acted: `admin`, `client:<id>`, `engine` or
   `anonymous`.
 

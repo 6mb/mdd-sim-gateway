@@ -109,6 +109,11 @@ def _cookie(headers: dict[str, str], name: str) -> str:
 
 def _session(headers: dict[str, str]) -> Principal | None:
     token = _cookie(headers, auth.SESSION_COOKIE) or None
+    # Every browser session and client token was issued by an administrator. `install.sh
+    # reset-admin` removes the account without restarting anything, so until a new one is set
+    # up there is nobody for them to speak for.
+    if not token or not auth.configured():
+        return None
     current = auth.session(token)
     if not current:
         return None
@@ -126,7 +131,10 @@ def _has_bearer(scope, headers: dict[str, str]) -> bool:
 
 
 def _client(headers: dict[str, str]) -> Principal | None:
-    record = clients.resolve(bearer_token(headers))
+    token = bearer_token(headers)
+    if not token or not auth.configured():   # see _session
+        return None
+    record = clients.resolve(token)
     if not record:
         return None
     return Principal("client", client_id=record["id"], credential=f"client:{record['id']}")
@@ -320,7 +328,7 @@ class Gate:
         source = source_for(scope, headers)
         if source is None:
             return await self.app(scope, receive, send)
-        who = source.resolve(headers)
+        who = await self._resolve(source, headers)
         if who is None and source.required:
             return await self._deny(scope, receive, send, 401, source.refusal,
                                     WS_UNAUTHENTICATED)
@@ -343,12 +351,30 @@ class Gate:
             return await self._deny(scope, receive, send, 403, "not permitted", WS_FORBIDDEN)
         scope.setdefault("state", {})["principal"] = who
         if scope["type"] == "websocket" and who.credential:
-            return await self._revocable(scope, receive, send, who.credential)
+            return await self._revocable(scope, receive, send, who.credential, source, headers)
         await self.app(scope, receive, send)
 
-    async def _revocable(self, scope, receive, send, credential: str):
+    @staticmethod
+    async def _resolve(source: Source, headers: dict[str, str]) -> Principal | None:
+        """Check a credential off the event loop.
+
+        Checking reads the credential stores and now and then writes a renewed expiry to disk;
+        on an SD card that write can stall, and every other request and socket would wait on
+        it. A source that reads no credential is answered in place.
+        """
+        if source.resolve is _nobody:
+            return None
+        return await asyncio.to_thread(source.resolve, headers)
+
+    async def _revocable(self, scope, receive, send, credential: str, source: Source,
+                         headers: dict[str, str]):
         """Run a socket that ends, with 4401, as soon as its credential is revoked."""
         entry = _live.add(credential)
+        # A revocation between the check above and this registration found nothing to close;
+        # checking again now that the socket is registered leaves no such window.
+        if await self._resolve(source, headers) is None:
+            _live.discard(credential, entry)
+            return await self._refuse(scope, receive, send, WS_UNAUTHENTICATED)
         revoked = entry[1]
         closed = False
 
