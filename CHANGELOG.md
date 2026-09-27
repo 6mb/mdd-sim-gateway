@@ -61,6 +61,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- On the container stack, a modem ModemManager cannot claim is no longer reset every few
+  minutes for good. Each reset took that SIM's VoWiFi down for a minute or more. The resets now
+  double their spacing and stop after three, none is made while flight mode is on, and the count
+  starts over once ModemManager claims the modem.
+
 - In the installer's docker mode, `SWU_TUN_MTU` now reaches the control container, and a reload
   or update keeps the value the running container had. Before, the container was recreated
   without it, so the engines fell back to the default MTU and a carrier that drops fragments
