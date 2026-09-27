@@ -368,6 +368,36 @@ class MediaRelayTests(unittest.TestCase):
         self.assertTrue(client.container.removed)
         self.assertTrue(client.network.removed)
 
+    def test_once_direct_mode_is_clean_it_is_not_checked_again(self):
+        """Review of #181: after one use of relay mode, direct mode used to ask Docker for a
+        leftover relay every 30 s for good."""
+        self.media.save_state({"mode": "direct", "secret": "x"})
+        self.media._direct_clean_mtime = None
+        client = Mock()
+        client.containers.get.side_effect = self.media.docker.errors.NotFound("gone")
+        client.networks.get.side_effect = self.media.docker.errors.NotFound("gone")
+        self.media.supervise(client)
+        calls = len(client.mock_calls)
+        self.assertGreater(calls, 0)
+        self.media.supervise(client)
+        self.assertEqual(len(client.mock_calls), calls)
+        # A new switch (the state file changes) is checked again.
+        os.utime(Path(self.tmp.name, "media", "state.json"), (1, 1))
+        self.media.supervise(client)
+        self.assertGreater(len(client.mock_calls), calls)
+
+    def test_direct_mode_keeps_checking_until_the_network_is_gone(self):
+        self.media.save_state({"mode": "direct", "secret": "x"})
+        self.media._direct_clean_mtime = None
+        network = _Network(containers={"e": {"Name": "mdd-sim-gateway-engine-1"}})
+        client = _Client(self.media, network=network)
+        self.media.supervise(client)
+        self.assertIsNone(self.media._direct_clean_mtime)   # an engine still holds it
+        network.attrs["Containers"] = {}
+        self.media.supervise(client)
+        self.assertTrue(network.removed)
+        self.assertIsNotNone(self.media._direct_clean_mtime)
+
     def test_a_gateway_that_never_used_relay_mode_makes_no_docker_call(self):
         client = Mock()
         self.assertEqual(self.media.supervise(client)["state"], "off")

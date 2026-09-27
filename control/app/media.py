@@ -554,16 +554,30 @@ def _refresh_image(client, state: dict) -> dict:
     return update_state(image=wanted)
 
 
-def _remove_leftovers(client) -> None:
+# The state file's mtime when direct mode was last found clean: nothing to check again until
+# the state changes (a switch) or the control plane restarts.
+_direct_clean_mtime: float | None = None
+
+
+def _remove_leftovers(client) -> bool:
     """Direct mode: nothing of the relay may stay. A relay that outlived a switch (the switch
     and this loop raced, or a rollback left it) would keep its port open with nothing behind
-    it, and would hold the media network."""
+    it, and would hold the media network. True once neither is left."""
     remove_relay(client)
-    if not attached_engines(client):
-        try:
-            remove_network(client)
-        except Exception as exc:  # noqa: BLE001 - removed on a later pass
-            log.debug("media network not removed yet: %s", exc)
+    if attached_engines(client):
+        return False
+    try:
+        return remove_network(client)
+    except Exception as exc:  # noqa: BLE001 - removed on a later pass
+        log.debug("media network not removed yet: %s", exc)
+        return False
+
+
+def _state_mtime() -> float | None:
+    try:
+        return os.stat(_state_path()).st_mtime
+    except OSError:
+        return None
 
 
 def supervise(client=None) -> dict:
@@ -573,17 +587,21 @@ def supervise(client=None) -> dict:
     with switch_lock(blocking=False) as held:
         if not held:
             return relay_status()
+        global _direct_clean_mtime
         state = load_state()
         if mode(state) != RELAY:
             _set_status("off")
-            if state:
-                # Only a gateway that has ever used relay mode has anything to remove; one
-                # that never did makes no Docker call here at all.
+            # Only a gateway that has ever used relay mode has anything to remove, and only
+            # until it has been found clean; after that no Docker call is made here.
+            mtime = _state_mtime()
+            if state and mtime != _direct_clean_mtime:
                 try:
-                    _remove_leftovers(client or _client())
+                    if _remove_leftovers(client or _client()):
+                        _direct_clean_mtime = mtime
                 except Exception as exc:  # noqa: BLE001
                     log.warning("could not remove the media relay: %s", exc)
             return relay_status()
+        _direct_clean_mtime = None
         try:
             client = client or _client()
             state = _refresh_image(client, state)
