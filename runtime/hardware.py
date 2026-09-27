@@ -64,6 +64,12 @@ UNCLAIMED_RESET_GRACE = 120
 # Shared by both firmware-reset paths: a reset re-enumerates the modem, which takes
 # ModemManager tens of seconds to probe again; resetting faster than that only restarts it.
 MODEM_RESET_INTERVAL = 300
+# A modem ModemManager can never claim (seen: a host whose udev renames the QMI net port,
+# "Failed to find a net port in the QMI modem") would otherwise be reset every few minutes for
+# good, and each reset takes the SIM bridge, and so that SIM's VoWiFi, down for a minute or
+# more. The unclaimed-modem resets double their spacing and stop after this many; the count
+# clears once ModemManager claims the modem.
+UNCLAIMED_RESET_ATTEMPTS = 3
 
 
 def tail_lines(path, count=25, max_bytes=128 * 1024):
@@ -158,6 +164,7 @@ class HardwareSupervisor:
         # ModemManager object; see recover_unclaimed_modem().
         self.unclaimed_since = {}
         self.unclaimed_reset_at = {}
+        self.unclaimed_resets = {}
         self.bridge_restart_request_dir = (
             self.data_path / "orchestrator" / "bridge-restart-requests")
         self.bridge_restart_status_dir = (
@@ -885,7 +892,8 @@ class HardwareSupervisor:
                 continue
             if obj:
                 self.unclaimed_since.pop(device_id, None)
-            elif self.recover_unclaimed_modem(modem):
+                self.unclaimed_resets.pop(device_id, None)
+            elif self.recover_unclaimed_modem(modem, wanted=not wanted["flight_mode"]):
                 self.cellular_states[device_id] = snapshot
                 continue
             radio_enabled = not wanted["flight_mode"]
@@ -914,7 +922,7 @@ class HardwareSupervisor:
         self.unclaimed_since = {key: value for key, value in self.unclaimed_since.items()
                                 if key in live}
 
-    def recover_unclaimed_modem(self, modem):
+    def recover_unclaimed_modem(self, modem, wanted=True):
         """Reset a modem ModemManager has given up on, through its bare AT port.
 
         Seen on an EC25 whose QMI port hit a USB protocol error (-71) at enumeration:
@@ -925,25 +933,40 @@ class HardwareSupervisor:
         then claims it normally. ModemManager holds no port of a modem it has dropped, so
         a non-exclusive write here cannot interleave with its own AT traffic.
 
+        Bounded: the spacing doubles after each reset and there are at most
+        UNCLAIMED_RESET_ATTEMPTS, since a modem ModemManager cannot claim at all would
+        otherwise be reset, and its SIM's VoWiFi interrupted, every few minutes for good.
+        ``wanted`` is False in flight mode, where nothing needs ModemManager and a reset
+        would only interrupt the VoWiFi that works.
+
         Returns True only when the reset command was written.
         """
         device_id = modem["id"]
         now = time.monotonic()
         first_seen = self.unclaimed_since.setdefault(device_id, now)
-        if now - first_seen < UNCLAIMED_RESET_GRACE:
+        if not wanted or now - first_seen < UNCLAIMED_RESET_GRACE:
+            return False
+        resets = self.unclaimed_resets.get(device_id, 0)
+        if resets >= UNCLAIMED_RESET_ATTEMPTS:
             return False
         # Missing means "never reset", not "reset at monotonic zero"; see the qmi_reset_at
         # comment in reconcile_cellular() for what a 0 default cost at boot.
         last_reset = self.unclaimed_reset_at.get(device_id)
-        if last_reset is not None and now - last_reset < MODEM_RESET_INTERVAL:
+        if last_reset is not None and \
+                now - last_reset < MODEM_RESET_INTERVAL * 2 ** max(0, resets - 1):
             return False
         # Charged before the attempt: a port that fails to open must not be retried every
         # pass, and the grace clock restarts so the next try again waits for ModemManager.
         self.unclaimed_reset_at[device_id] = now
+        self.unclaimed_resets[device_id] = resets + 1
         self.unclaimed_since.pop(device_id, None)
         tty = modem["tty"]
         self.log(f"modem {device_id} has had no ModemManager object for "
-                 f"{int(now - first_seen)}s; resetting it with AT+CFUN=1,1 on {tty}")
+                 f"{int(now - first_seen)}s; resetting it with AT+CFUN=1,1 on {tty} "
+                 f"(attempt {resets + 1} of {UNCLAIMED_RESET_ATTEMPTS})")
+        if resets + 1 == UNCLAIMED_RESET_ATTEMPTS:
+            self.log(f"modem {device_id}: last automatic reset; if ModemManager still cannot "
+                     "claim it, check its log for why (the SIM bridge keeps VoWiFi going)")
         if serial is None:
             self.log(f"modem {device_id} reset skipped: pyserial is not installed")
             return False

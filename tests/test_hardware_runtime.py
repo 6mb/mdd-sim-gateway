@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
+from runtime import hardware
 from runtime.hardware import HardwareSupervisor, kernel_objects
 
 
@@ -500,6 +501,41 @@ class HardwareRuntimeTests(unittest.TestCase):
 
         self.pass_at(app, 425.0, port_class)
         self.assertEqual(port.write.call_count, 2)
+
+    def test_unclaimed_modem_resets_back_off_and_stop(self):
+        """A modem ModemManager can never claim is not reset every few minutes for good."""
+        app = self.unclaimed_modem_app()
+        port_class, port = self.fake_port()
+        now, writes = 5.0, []
+        for _ in range(60):
+            self.pass_at(app, now, port_class)
+            writes.append(port.write.call_count)
+            now += 60.0
+        self.assertEqual(port.write.call_count, hardware.UNCLAIMED_RESET_ATTEMPTS)
+        # Spaced 5 then 10 minutes apart (each also waits for the two-minute grace).
+        times = [5.0 + 60.0 * i for i, count in enumerate(writes)
+                 if count != (writes[i - 1] if i else 0)]
+        self.assertEqual([b - a for a, b in zip(times, times[1:])], [300.0, 600.0])
+
+    def test_a_claim_restores_the_reset_budget(self):
+        app = self.unclaimed_modem_app()
+        app.unclaimed_resets["modem-a"] = hardware.UNCLAIMED_RESET_ATTEMPTS
+        port_class, _port = self.fake_port()
+        app.modem_snapshot.return_value = {
+            "available": True, "mm_object": "/org/freedesktop/ModemManager1/Modem/0",
+            "network_interface": "wwan0", "radio_enabled": True,
+            "registration": "home", "data_active": True}
+        self.pass_at(app, 5.0, port_class)
+        self.assertNotIn("modem-a", app.unclaimed_resets)
+
+    def test_flight_mode_never_resets_an_unclaimed_modem(self):
+        app = self.unclaimed_modem_app()
+        app.desired_devices.return_value = {
+            "modem-a": {"cellular_enabled": False, "vowifi_enabled": True, "flight_mode": True}}
+        port_class, _port = self.fake_port()
+        self.pass_at(app, 5.0, port_class)
+        self.pass_at(app, 5.0 + 3600, port_class)
+        port_class.assert_not_called()
 
     def test_grace_clock_clears_once_modemmanager_claims_the_modem(self):
         app = self.unclaimed_modem_app()
