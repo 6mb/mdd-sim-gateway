@@ -64,6 +64,10 @@ class AuthorizationTableTests(unittest.TestCase):
             ("POST", "/api/instances/sim1/messages/read"),
             ("GET", "/api/messages/unread"),
             ("GET", "/api/instances/sim1/mms/settings"),
+            ("POST", "/api/instances/sim1/mms/attachments"),
+            ("POST", "/api/instances/sim1/mms/attachments/fit"),
+            ("GET", "/api/instances/sim1/mms/attachments/0123456789abcdef/preview"),
+            ("DELETE", "/api/instances/sim1/mms/attachments/0123456789abcdef"),
             ("GET", "/api/contacts"),
             ("GET", "/api/contacts/export"),
             ("POST", "/api/contacts"),
@@ -94,6 +98,7 @@ class AuthorizationTableTests(unittest.TestCase):
             ("GET", "/api/readers"),
             ("GET", "/api/system/update/check"),
             ("PUT", "/api/instances/sim1/mms/settings"),
+            ("GET", "/api/instances/sim1/mms/attachments"),
             ("DELETE", "/api/contacts/not-a-number"),
             # A method that is not listed for a listed path.
             ("DELETE", "/api/instances/sim1/messages/threads"),
