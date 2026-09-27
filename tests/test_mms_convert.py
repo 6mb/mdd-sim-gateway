@@ -482,6 +482,19 @@ class UploadLimitTests(unittest.TestCase):
         request, _ = self.request(self.body(*[(f"f{i}", None, b"v") for i in range(41)]))
         self.assertEqual(self.refused(request).status_code, 422)
 
+    def test_a_large_upload_is_spooled_under_the_data_directory_not_tmp(self):
+        # In the control container /tmp is a 32 MB tmpfs; one /mms/send request may carry
+        # 64 MB. starlette gives no way to say where it spools, so main replaces the name it
+        # uses -- if a starlette upgrade stops using it, this is what notices.
+        with tempfile.TemporaryDirectory() as data, patch.object(store, "DATA_DIR", data), \
+                patch.object(tempfile, "TemporaryFile", wraps=tempfile.TemporaryFile) as spool:
+            request, _ = self.request(self.body(("file", "a.bin", b"x" * (2 * 1024 * 1024))))
+            form = self.form(request, limit=4 * 1024 * 1024)
+            self.assertEqual(len(asyncio.run(form["file"].read())), 2 * 1024 * 1024)
+            asyncio.run(form.close())
+        self.assertEqual(spool.call_count, 1)
+        self.assertEqual(spool.call_args.kwargs["dir"], os.path.join(data, "uploads"))
+
 
 if __name__ == "__main__":
     unittest.main()

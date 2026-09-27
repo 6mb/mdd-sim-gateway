@@ -18,6 +18,7 @@ import logging
 import os
 import random
 import re
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -28,6 +29,7 @@ import docker
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette import formparsers as starlette_formparsers
 
 from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
@@ -6401,6 +6403,22 @@ class _BodyTooLarge(Exception):
     pass
 
 
+def _spool_upload(*args, **kwargs):
+    """Where starlette puts an uploaded file once it passes 1 MB: under the data directory.
+
+    starlette gives no way to choose, so tempfile's default applies -- /tmp, which in the
+    control container is a 32 MB tmpfs, less than one /mms/send request may carry, and shared
+    by every upload in flight. The files are unnamed (O_TMPFILE, or unlinked at once where that
+    is missing), so a process that dies leaves nothing behind."""
+    directory = os.path.join(store.DATA_DIR, "uploads")
+    os.makedirs(directory, exist_ok=True)
+    kwargs.setdefault("dir", directory)
+    return tempfile.SpooledTemporaryFile(*args, **kwargs)
+
+
+starlette_formparsers.SpooledTemporaryFile = _spool_upload
+
+
 def _limited_request(request: Request, limit: int) -> Request:
     """The request with its body held to `limit` bytes as it is read.
 
@@ -6479,10 +6497,14 @@ async def api_mms_attachment_add(iid: str, request: Request):
     as the original until the MMS is sent or the attachment removed."""
     await _mms_line(iid)
     form = await _mms_form(request, files=1, limit=MMS_UPLOAD_LIMIT + MMS_FIELD_LIMIT)
-    upload = form.get("file")
-    if not hasattr(upload, "read"):
-        raise HTTPException(422, "no file")
-    item = await _read_upload(upload)
+    try:
+        upload = form.get("file")
+        if not hasattr(upload, "read"):
+            raise HTTPException(422, "no file")
+        item = await _read_upload(upload)
+    finally:
+        # A form parsed here rather than by FastAPI is not closed for us.
+        await form.close()
     _checked, problem = await asyncio.to_thread(mms.check_attachments, [item], convert=True)
     if problem:
         raise HTTPException(422, problem)
@@ -6556,18 +6578,21 @@ async def api_mms_send(iid: str, request: Request):
     # staging area gives a line: one request can never carry more than the line may hold.
     form = await _mms_form(request, files=mms_staging.MAX_PER_LINE,
                            limit=mms_staging.MAX_BYTES_PER_LINE + MMS_FIELD_LIMIT)
-    recipients = _recipient_list(form.get("to"))
-    text = str(form.get("text") or "")
-    subject = str(form.get("subject") or "").strip()[:80]
-    split = str(form.get("split") or "").lower() in ("1", "true", "yes")
-    staged_ids = _staged_ids(form.getlist("attachment_ids"))
     try:
-        attachments = await asyncio.to_thread(mms_staging.load, iid, staged_ids)
-    except KeyError as exc:
-        raise HTTPException(404, f"no such attachment: {exc.args[0]}") from None
-    for upload in form.getlist("attachments"):
-        if hasattr(upload, "read"):
-            attachments.append(await _read_upload(upload))
+        recipients = _recipient_list(form.get("to"))
+        text = str(form.get("text") or "")
+        subject = str(form.get("subject") or "").strip()[:80]
+        split = str(form.get("split") or "").lower() in ("1", "true", "yes")
+        staged_ids = _staged_ids(form.getlist("attachment_ids"))
+        try:
+            attachments = await asyncio.to_thread(mms_staging.load, iid, staged_ids)
+        except KeyError as exc:
+            raise HTTPException(404, f"no such attachment: {exc.args[0]}") from None
+        for upload in form.getlist("attachments"):
+            if hasattr(upload, "read"):
+                attachments.append(await _read_upload(upload))
+    finally:
+        await form.close()
     messages, problem, _summary = await asyncio.to_thread(
         mms.prepare_outgoing, recipients, text, attachments, settings, subject, split=split)
     if problem:
