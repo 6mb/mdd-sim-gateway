@@ -47,8 +47,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   for every line instead of each engine publishing its own RTP ports. Switch with
   `install.sh media relay|direct|status` on a host install, or
   `python -m app.media relay|direct|status` inside the Control container on a full-container
-  deployment; the relay image is published to ghcr and pulled only when relay mode is enabled.
-  Direct mode (each line publishing its own ports) stays the default and is unchanged.
+  deployment. The relay is the unmodified upstream `coturn/coturn:4.17.2-alpine`, pinned by
+  digest, shipped per architecture as a Release asset and mirrored to ghcr; it is fetched only
+  when relay mode is enabled. Direct mode (each line publishing its own ports) stays the default
+  and is unchanged. Relay mode needs nf_tables with its socket match in the host kernel, and has
+  not been tested on a full-container deployment.
 
 ### Changed
 

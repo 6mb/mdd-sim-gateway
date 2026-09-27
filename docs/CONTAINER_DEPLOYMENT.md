@@ -166,6 +166,9 @@ https://NAS_LAN_IP:10443/
 
 ### 通话媒体模式
 
+> **未实测**：relay 模式只在原生安装（install.sh 的 local 和 docker 模式，Debian 13，内核
+> 6.12）上验证过，没有在全容器部署或 Synology NAS 上运行过。下面的说明来自代码，不是实测结果。
+
 通话音频默认使用 direct 模式：每条线路各自发布 RTP 端口（见上文）。也可以切换到 relay
 模式，改由一个 coturn 中继容器统一转发媒体，此时不再有任何 Engine 发布端口。中继容器
 （`mdd-sim-gateway-relay`）和它使用的内部媒体网络（`mdd-sim-gateway-media`）都由 Control
@@ -180,11 +183,19 @@ sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media rel
     [--port N] [--bind ADDR] [--public-host HOST] [--public-port N]
 ```
 
-启用 relay 会先拉取本版本对应的中继镜像（`ghcr.io/mddidd/mdd-sim-gateway-relay:vX.Y.Z`），
-创建媒体网络，在临时 Engine 容器中确认内核支持所需的 nftables 规则，并等待中继应答 STUN
-请求；任一步失败都会回滚且不修改当前模式。切换会依次重建所有运行中的线路。启用后需要在
-NAS 前端的路由器/防火墙放行中继端口的 UDP 和 TCP；经反向代理部署时该端口不是 HTTP，需要
-单独做 TCP/UDP 转发。
+中继使用未经修改的上游镜像 `coturn/coturn:4.17.2-alpine`（按摘要固定）。本地没有时，首次启用
+依次尝试本版本发布在 ghcr 上的副本和 Docker Hub 上游，两者都连不上则启用失败。之后每次一键
+更新，更新助手会和其他镜像一样从 Release 附件导入本版本的中继镜像（走相同的下载线路和校验）；
+导入失败不影响更新，中继继续使用原有镜像。
+
+启用时会先创建媒体网络，在临时 Engine 容器中确认内核支持所需的 nftables 规则（nf_tables 及其
+socket 匹配），并等待中继应答 STUN 请求；任一步失败都会回滚且不修改当前模式。Synology DSM
+的内核较旧（DS1621+ 为 4.4），很可能不满足这个要求，届时启用会被拒绝并给出原因，直连模式
+不受影响。切换会依次重建所有运行中的线路。启用后需要在 NAS 前端的路由器/防火墙放行中继端口
+的 UDP 和 TCP；经反向代理部署时该端口不是 HTTP，需要单独做 TCP/UDP 转发。
+
+整栈回滚时，更新助手会删除中继容器：回滚到的版本如果支持 relay 模式，会在一分钟内重新创建它；
+不支持则不会留下一个无人使用却仍对外开放的端口。
 
 ## 6. 数据、备份和证书
 
@@ -251,6 +262,13 @@ Engine 容器由 Control 按线路动态创建，不属于 Compose 项目，删�
 
 ```sh
 sudo docker ps -aq --filter "label=io.mdd-sim-gateway.component=engine" | xargs -r sudo docker rm -f
+```
+
+启用过 relay 模式时，中继容器和媒体网络同样不属于 Compose 项目，也要一并删除：
+
+```sh
+sudo docker rm -f mdd-sim-gateway-relay
+sudo docker network rm mdd-sim-gateway-media
 ```
 
 不要手工删除仍被其他容器使用的 Docker 网络、卷或镜像。MDD 只管理带

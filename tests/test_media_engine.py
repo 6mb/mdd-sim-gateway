@@ -247,6 +247,46 @@ class MediaEngineContainerTests(unittest.TestCase):
             _calls, container, _written = self.start(
                 engine, {"network": network, "instance": RELAY})
 
+    def test_container_stack_order_engine_network_media_then_uplink(self):
+        """Full-container deployment (not run on a real stack): the Engine is created on
+        MDD_ENGINE_NETWORK, joins the media network before its first start, and is connected
+        to the direct uplink afterwards, as before relay mode existed."""
+        engine = self.engine_module()
+        order = []
+        container = Mock(id="cid", name="engine")
+        container.start.side_effect = lambda: order.append("start")
+        media_network = Mock()
+        media_network.connect.side_effect = lambda c: order.append("media")
+        uplink = Mock()
+        uplink.connect.side_effect = lambda c: order.append("uplink")
+        created = {}
+
+        class Containers:
+            def get(self, name):
+                raise engine.docker.errors.NotFound(name)
+
+            def create(self, image, **kwargs):
+                created.update(kwargs)
+                order.append("create")
+                return container
+
+        client = SimpleNamespace(containers=Containers(),
+                                 networks=SimpleNamespace(get=lambda name: uplink))
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(engine, "_client", lambda: client), \
+                patch.object(engine, "ENGINE_NETWORK", "mdd-sim-gateway-engine"), \
+                patch.object(engine, "DIRECT_NETWORK", "mdd-sim-gateway-uplink"), \
+                patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
+                patch.object(engine, "_clear_runtime_state", lambda base: None), \
+                patch.object(engine.egress, "ensure_line", lambda i, s: None), \
+                patch.object(engine.media, "engine_attachment",
+                             return_value={"network": media_network, "instance": RELAY}), \
+                patch.object(engine.cfg, "write_instance_json"):
+            engine.start({"id": "sim1", "ports": {"rtp_start": 30000, "rtp_span": 12}}, {})
+        self.assertEqual(order, ["create", "media", "start", "uplink"])
+        self.assertEqual(created["network"], "mdd-sim-gateway-engine")
+        self.assertEqual(created["ports"], {})
+
     def test_control_never_addresses_an_engine_by_its_media_address(self):
         engine = self.engine_module()
         container = SimpleNamespace(
