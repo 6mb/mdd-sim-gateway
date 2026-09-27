@@ -364,12 +364,84 @@ function HardwarePanel({ device, refreshDevices, showToast, focusImei = false, o
         placeholder={t('15-digit IMEI required for VoWiFi')} />
       <button className="btn btn-primary" disabled={saving} onClick={save}>{t(!device.imei && device.provisioning?.missing?.includes('imei') ? 'Save IMEI and start line' : 'Save')}</button>
     </div>}
+    <CustomModelNotice device={device} refreshDevices={refreshDevices} showToast={showToast}/>
     <div className="u-hardware-action u-hardware-danger">
       <div className="u-hardware-action-copy"><h4>{t('Remove device record')}</h4>
         <p>{t('Only disconnected devices can be removed; SIM and line configurations are preserved.')}</p>
       </div>
       <button className="btn btn-danger-outline" disabled={device.present} onClick={forget}>{t('Remove device')}</button>
     </div>
+  </div>
+}
+
+const PROBE_MESSAGES = {
+  usable: 'Added as a custom model. Its SIM reader appears in a few seconds.',
+  unverified: 'Added as a custom model. No usable SIM was inserted, so insert one to confirm it can carry VoWiFi.',
+  unsupported: 'The module did not let the SIM open a logical channel through AT+CSIM, so it cannot carry VoWiFi.',
+  no_at_port: 'None of its serial ports answered AT commands.',
+  port_busy: 'Its serial port is in use by another program: {detail}',
+  modemmanager_failed: 'ModemManager could not pass commands to the module: {detail}',
+  not_found: 'The device is no longer connected, or is already recognised.',
+}
+
+// Modem-like USB devices that match no known model. Nothing is sent to them until the
+// operator asks; the test finds the AT port and checks SIM access through AT+CSIM.
+function UnrecognizedUsbDevices({ refreshDevices, showToast }) {
+  const { t } = useI18n()
+  const [candidates, setCandidates] = useState([])
+  const [probing, setProbing] = useState('')
+  const [outcome, setOutcome] = useState(null)
+  const load = () => api.usbCandidates().then(value => setCandidates(value.candidates || [])).catch(() => {})
+  useEffect(() => { load(); const timer = setInterval(load, 15000); return () => clearInterval(timer) }, [])
+  const tryDevice = async candidate => {
+    setProbing(candidate.usb_path); setOutcome(null)
+    try {
+      const result = await api.probeUsbCandidate(candidate.usb_path)
+      setOutcome({ ...result, usb_path: candidate.usb_path })
+      if (result.saved) { showToast(t('Custom modem model added')); await refreshDevices?.(); await load() }
+    } catch (error) { showToast(`${t('Error')}: ${error.message}`) }
+    finally { setProbing('') }
+  }
+  if (!candidates.length && !outcome) return null
+  return <div className="card u-panel u-usb-candidates">
+    <h3>{t('Unrecognised USB devices')}</h3>
+    <p className="u-note">{t('These look like cellular modules but match no known model. Testing one finds its AT port and checks that the SIM can be reached through standard AT+CSIM commands; a module that passes is added as a custom model.')}</p>
+    {candidates.map(candidate => <div className="u-hardware-action" key={candidate.usb_path}>
+      <div className="u-hardware-action-copy">
+        <h4>{candidate.product || candidate.manufacturer || t('USB device')}</h4>
+        <p className="mono">{candidate.vid}:{candidate.pid} · USB {candidate.usb_path} · {t('{count} serial ports', { count: candidate.serial_ports })}</p>
+      </div>
+      <button className="btn btn-primary" disabled={!!probing} onClick={() => tryDevice(candidate)}>
+        {probing === candidate.usb_path ? t('Testing… (up to a minute)') : t('Try this device')}</button>
+    </div>)}
+    {outcome && <div className={outcome.saved ? 'u-note' : 'u-error'}>
+      <p>{t(PROBE_MESSAGES[outcome.result] || 'The test did not finish: {detail}', { detail: outcome.detail || '' })}</p>
+      {!!outcome.steps?.length && <details><summary>{t('Test details')}</summary>
+        <pre className="mono">{outcome.steps.join('\n')}</pre></details>}
+    </div>}
+    <p className="u-note">{t('Custom models are supported for VoWiFi and SMS. MMS, call audio and the IMS switch depend on the module.')}</p>
+  </div>
+}
+
+function CustomModelNotice({ device, refreshDevices, showToast }) {
+  const { t } = useI18n()
+  const model = device.custom_model
+  if (!model) return null
+  const remove = async () => {
+    if (!window.confirm(t('Remove this custom model? The gateway stops using this module until it is tested again.'))) return
+    try {
+      await api.deleteModemProfile(model.vid, model.pid)
+      await refreshDevices()
+      showToast(t('Custom modem model removed'))
+    } catch (error) { showToast(`${t('Error')}: ${error.message}`) }
+  }
+  return <div className="u-hardware-action">
+    <div className="u-hardware-action-copy"><h4>{t('Custom model (experimental)')}</h4>
+      <p>{t(model.verified ? 'Added by a test on this gateway, and its SIM logical channels have worked.'
+        : 'Added by a test on this gateway without a usable SIM. It is confirmed once its SIM logical channels work.')}</p>
+      <p className="mono">{model.vid}:{model.pid}</p>
+    </div>
+    <button className="btn btn-danger-outline" onClick={remove}>{t('Remove custom model')}</button>
   </div>
 }
 
@@ -415,9 +487,9 @@ export function DevicesPage({ devices, discovering, loadErrors, refreshDevices, 
   useEffect(() => { if (d && !supportsCellular(d) && tab === 'cellular') setTab('status') }, [d, tab])
   if (loadErrors?.devices && !devices.length) return <p className="u-error">{t('Loading failed')}</p>
   if (discovering) return <Discovering t={t} />
-  if (!d) return discovering ? <Discovering t={t} /> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} />
+  if (!d) return discovering ? <Discovering t={t} /> : <><Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} /><UnrecognizedUsbDevices refreshDevices={refreshDevices} showToast={showToast}/></>
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')]]
-  return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><DeviceStatusBadges device={x} /></span></button>)}</aside>
+  return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><DeviceStatusBadges device={x} /></span></button>)}<UnrecognizedUsbDevices refreshDevices={refreshDevices} showToast={showToast}/></aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
       {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch key={`${d.id}:cellular`} device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch key={`${d.id}:flight`} device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch key={`${d.id}:vowifi`} device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onSetup={openSetup}/><LineActivity device={d}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d}/></div>}

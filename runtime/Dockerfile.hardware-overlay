@@ -28,6 +28,8 @@ RUN if [ -n "${DEBIAN_MIRROR}" ]; then \
         > /etc/NetworkManager/conf.d/90-mdd-cellular-only.conf
 
 COPY runtime/hardware.py /app/runtime/hardware.py
+COPY host/modem_probe.py /app/host/modem_probe.py
+COPY host/vpcd_modem_bridge.py /app/host/vpcd_modem_bridge.py
 
 LABEL io.mdd-sim-gateway.component="hardware" \
       io.mdd-sim-gateway.managed="true" \

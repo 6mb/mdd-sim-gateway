@@ -27,6 +27,11 @@ import urllib.request
 from pathlib import Path
 
 try:
+    from host import modem_probe
+except ImportError:  # run as host/mdd_orchestrator.py, with host/ itself on the path
+    import modem_probe
+
+try:
     import serial
 except ImportError:  # pragma: no cover - host installer provides pyserial
     serial = None
@@ -554,6 +559,9 @@ class Orchestrator:
         self.device_status_path = self.root / "devices-status.json"
         self.bridge_restart_request_dir = self.root / "bridge-restart-requests"
         self.bridge_restart_status_dir = self.root / "bridge-restart-status"
+        # USB devices that look like a modem but match no model, and operator-requested tests.
+        self.usb_candidates = modem_probe.CandidateScanner(self.root / "usb-candidates.json")
+        self.modem_probes = modem_probe.ProbeRequests(self.root)
         self.generated = self.root / "sing-box.json"
         self.xray_generated = self.root / "xray.json"
         self.cache = self.root / "subscription.yaml"
@@ -3274,6 +3282,7 @@ class Orchestrator:
                 except Exception:
                     pass
             discovered = self.usb_modems(desired.get("hardware") or {})
+            self.reconcile_usb_candidates(desired.get("hardware") or {})
             self.migrate_device_ids(discovered)
             desired_devices, _migrated = self.desired_devices(discovered)
             present_ids = {modem["id"] for modem in discovered}
@@ -3355,12 +3364,28 @@ class Orchestrator:
             self._last_conclusion = fingerprint
             self._sleep_for_work(IDLE_INTERVAL_SECONDS if idle else self.interval)
 
+    def reconcile_usb_candidates(self, hardware: dict):
+        """Publish unrecognised modem-like USB devices and run any test the operator asked for.
+
+        Tests run here, before bridges are reconciled, and only on request: sending AT to a
+        serial port nobody identified is never done on the gateway's own initiative.
+        """
+        if self.dry_run:
+            return
+        known = {(str(p.get("vid", "")).lower(), str(p.get("pid", "")).lower())
+                 for p in hardware.get("modem_profiles") or [] if isinstance(p, dict)}
+        try:
+            candidates = self.usb_candidates.scan(known, run)
+            self.modem_probes.process(candidates, log=self.log)
+        except Exception as exc:  # never let discovery of extras stop the known modems
+            self.log(f"USB candidate scan failed: {exc}")
+
     def _input_mtimes(self) -> tuple:
         """Cheap change detector for the documents an operator action writes."""
         stamps = []
         for path in (self.desired_path, self.device_desired_path,
                      self.data / "config.yaml", self.reselect_path,
-                     self.bridge_restart_request_dir):
+                     self.bridge_restart_request_dir, self.modem_probes.request_dir):
             try:
                 stamps.append(path.stat().st_mtime)
             except OSError:
