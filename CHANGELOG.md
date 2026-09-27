@@ -44,6 +44,20 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   Conversations, the call log and the incoming-call overlay show the name instead of the
   number once it is known.
 
+### Fixed
+
+- In the installer's docker mode, `SWU_TUN_MTU` now reaches the control container, and a reload
+  or update keeps the value the running container had. Before, the container was recreated
+  without it, so the engines fell back to the default MTU and a carrier that drops fragments
+  never answered registration. `SWU_TUN_MTU=default ./install.sh reload` drops a carried-over
+  value, and a value outside 1280–1500 is ignored with a warning.
+- A modem that ModemManager put in state "failed" (seen as `unknown-capabilities` after
+  ModemManager restarted mid-probe) is no longer asked to enable every cycle and left marked
+  as starting. The orchestrator reboots the module when that can help, after a minute and at
+  most three times, spaced out, and not while flight mode is on, where the reboot would only
+  interrupt VoWiFi. The cellular badge says what happened, and VoWiFi, which
+  keeps working through the SIM bridge, is no longer shown as starting.
+
 ### Security
 
 - WebSocket handshakes pass the same authentication as the API, in one middleware, so a socket
