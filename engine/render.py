@@ -114,8 +114,8 @@ def container_ipv4(exclude: str = ""):
 
 
 def media_interface(subnet: str) -> tuple[str, str]:
-    """(interface, IPv4 address) this container holds on the media network, or ("", "") when
-    it is not attached. Relay media mode only; see control/app/media.py."""
+    """(interface, IPv4 address) this container holds on ``subnet``, or ("", "") when it is not
+    attached. Used for the relay media network (control/app/media.py) and the Engine network."""
     try:
         network = ipaddress.ip_network(subnet)
         out = subprocess.check_output(["ip", "-o", "-4", "addr", "show"], text=True,
@@ -221,6 +221,12 @@ def build_context(cfg):
     media_subnet = (media.get("subnet") or "") if media.get("mode") == "relay" else ""
     media_if, media_addr = (media_interface(media_subnet) if media.get("mode") == "relay"
                             else ("", ""))
+    local_addr = cfg.get("local_addr") or container_ipv4(media_subnet)
+    # The softphone listener must sit where the control surface relay connects: the Engine
+    # network. A line going direct also joins the uplink, whose default route makes local_addr
+    # the uplink address after the post-tunnel re-render (#195).
+    ws_addr = (media_interface(cfg["engine_subnet"])[1] if cfg.get("engine_subnet")
+               else "") or local_addr
     ike = cfg.get("ike", {}) or {}
     default_ike = ("aes256-sha256-prfsha256-modp2048,aes128-sha256-prfsha256-modp2048,"
                    "aes256-sha1-prfsha1-modp2048,aes128-sha1-prfsha1-modp2048,"
@@ -251,7 +257,7 @@ def build_context(cfg):
         # family or Asterisk cannot reach the P-CSCF over the tunnel: IPv6 P-CSCF (Telus, EE)
         # -> bind [::]:5060; IPv4 P-CSCF (Vodafone UK, cp_mode=v4) -> bind 0.0.0.0:5060.
         "pcscf_is_v6": (":" in pcscf),
-        "local_addr": cfg.get("local_addr") or container_ipv4(media_subnet),
+        "local_addr": local_addr,
         "ike_proposals": ike.get("proposals", default_ike),
         "esp_proposals": ike.get("esp_proposals", default_esp),
         # P-Access-Network-Info: i-wlan-node-id should be the Wi-Fi AP BSSID (MAC). The
@@ -272,6 +278,7 @@ def build_context(cfg):
         "webrtc_user": webrtc.get("username", "webrtc"),
         "webrtc_password": webrtc_password,
         # Container-internal plain WS listener; must match control/app/softphone_ws.py.
+        "webrtc_ws_addr": ws_addr,
         "webrtc_ws_port": 8088,
         "domain": cfg.get("domain", ""),
         # Host-reachable address to advertise to LOCAL SIP clients (Contact + SDP). The
@@ -294,7 +301,7 @@ def build_context(cfg):
         # The container's own RTP bind IP (docker-bridge private, e.g. 172.17.0.2). Used as the
         # LHS of rtp.conf [ice_host_candidates] to rewrite that unreachable host candidate to
         # the host LAN IP (advertise_addr) so a LAN WebRTC browser can reach our RTP.
-        "rtp_bind_addr": cfg.get("local_addr") or container_ipv4(media_subnet),
+        "rtp_bind_addr": local_addr,
         "rtp_start": cfg.get("rtp_start", 10000),
         "rtp_end": cfg.get("rtp_end", 11000),
         # Relay media mode: the browser leg's RTP binds to this line's media network address
