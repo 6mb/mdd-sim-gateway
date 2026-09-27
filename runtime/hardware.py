@@ -35,7 +35,8 @@ EVENT_ROOTS = (
     ("net", Path("/sys/class/net"), re.compile(r"wwan\d+")),
 )
 # (vid, pid, AT interface, display name); the same default as control/app/config.py.
-DEFAULT_MODEM_PROFILES = (("2c7c", "0125", 2, "DJI/Quectel EC25"),)
+DEFAULT_MODEM_PROFILES = (("2c7c", "0125", 2, "DJI/Quectel EC25"),
+                          ("05c6", "9215", 2, "Quectel EC20"))
 DEFAULT_MODEM_NAME = "Cellular modem"
 BASE_VPCD_PORT = 0x3C00
 VPCD_PORT_STRIDE = 0x100
@@ -280,12 +281,18 @@ class HardwareSupervisor:
         try:
             configured = yaml.load(path.read_text(encoding="utf-8"),
                                    Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader)) or {}
-            values = (configured.get("hardware") or {}).get("modem_profiles") or []
+            # Control keeps its settings under a top-level ``settings`` key.
+            hardware = ((configured.get("settings") or {}).get("hardware")
+                        or configured.get("hardware") or {})
+            values = hardware.get("modem_profiles") or []
             parsed = [(str(item["vid"]).lower(), str(item["pid"]).lower(),
                        int(item.get("at_interface", 2)), str(item.get("name") or ""))
                       for item in values]
-            if parsed:
-                profiles = parsed
+            # A built-in model stays recognised even though config.yaml was written before
+            # it existed; a configured entry for the same vid/pid takes precedence.
+            known = {(vid, pid) for vid, pid, _interface, _name in parsed}
+            profiles = parsed + [item for item in DEFAULT_MODEM_PROFILES
+                                 if (item[0], item[1]) not in known]
         except (OSError, ValueError, TypeError, KeyError, AttributeError, yaml.YAMLError):
             pass
         self._modem_profiles_cache = (key, tuple(profiles))

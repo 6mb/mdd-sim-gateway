@@ -594,7 +594,8 @@ class ModemProfileTests(unittest.TestCase):
     def test_without_a_config_the_built_in_profile_names_the_dji_module(self):
         with tempfile.TemporaryDirectory() as temp:
             app = HardwareSupervisor(data_path=Path(temp))
-            self.assertEqual(app.modem_profiles(), [("2c7c", "0125", 2, "DJI/Quectel EC25")])
+            self.assertEqual(app.modem_profiles(), [("2c7c", "0125", 2, "DJI/Quectel EC25"),
+                                                    ("05c6", "9215", 2, "Quectel EC20")])
 
     def test_profiles_and_names_come_from_config_yaml(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -605,7 +606,21 @@ class ModemProfileTests(unittest.TestCase):
                 "  - {vid: 1e0e, pid: '9001'}\n")
             app = HardwareSupervisor(data_path=data)
             self.assertEqual(app.modem_profiles(), [("2c7c", "0125", 3, "Quectel EG25-G"),
-                                                    ("1e0e", "9001", 2, "")])
+                                                    ("1e0e", "9001", 2, ""),
+                                                    ("05c6", "9215", 2, "Quectel EC20")])
+
+    def test_profiles_are_read_from_where_control_saves_them(self):
+        """Control keeps settings under `settings:`; reading a top-level `hardware` key meant
+        a real config.yaml never reached the container and every name fell back."""
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            (data / "config.yaml").write_text(
+                "settings:\n  hardware:\n    modem_profiles:\n"
+                "    - {name: Quectel EG25-G, vid: 2c7c, pid: '0125', at_interface: 2}\n"
+                "instances: {}\n")
+            app = HardwareSupervisor(data_path=data)
+            self.assertEqual(app.modem_profiles(), [("2c7c", "0125", 2, "Quectel EG25-G"),
+                                                    ("05c6", "9215", 2, "Quectel EC20")])
 
     def test_an_unreadable_config_keeps_the_built_in_profile(self):
         with tempfile.TemporaryDirectory() as temp:
