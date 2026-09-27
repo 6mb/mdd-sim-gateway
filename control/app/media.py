@@ -61,8 +61,11 @@ MANAGED_LABEL = "io.mdd-sim-gateway.managed"
 COMPONENT_LABEL = "io.mdd-sim-gateway.component"
 CONFIG_LABEL = "io.mdd-sim-gateway.relay-config"
 # Carried by an engine container started in relay mode. An engine without it runs in direct
-# mode, which keeps every container created before this existed where it is.
+# mode, which keeps every container created before this existed where it is. RELAY_PENDING marks
+# one started in relay mode without the media network (it could not be prepared): it matches
+# neither mode, so the control plane rebuilds it once the network can be had.
 MODE_LABEL = "io.mdd-sim-gateway.media-mode"
+RELAY_PENDING = "relay-pending"
 
 # The relay is the unmodified upstream coturn image, pinned by its multi-arch index digest so a
 # re-tagged upstream cannot change what runs. Releases ship this exact image as an asset and in

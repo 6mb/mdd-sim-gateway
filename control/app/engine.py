@@ -497,7 +497,8 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
             port_bindings[f"{p}/udp"] = p
     labels = {MANAGED_LABEL: "true", "io.mdd-sim-gateway.component": "engine"}
     if media_attachment is not None:
-        labels[media.MODE_LABEL] = media.RELAY
+        labels[media.MODE_LABEL] = (media.RELAY if media_attachment.get("network") is not None
+                                    else media.RELAY_PENDING)
 
     options = dict(
         name=container_name(iid),

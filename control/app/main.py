@@ -1622,28 +1622,51 @@ MEDIA_SUPERVISE_SECONDS = 30
 MEDIA_CONVERGE_SECONDS = 15
 
 
+MEDIA_RETRY_FIRST_SECONDS = 60
+MEDIA_RETRY_MAX_SECONDS = 600
+# iid -> {"at": monotonic time of the next attempt, "failures": consecutive failures}
+_media_retry: dict[str, dict] = {}
+
+
 async def _media_converge_once() -> bool:
     """Rebuild one running line whose container was made for the other media mode. One per
     pass, so the lines re-register one after another instead of all at once. True if a line
-    was rebuilt."""
+    was rebuilt.
+
+    A line that cannot be rebuilt (its exit is down, the uplink network is missing, the line
+    limit refuses it) fails before its old container is touched, so it would be picked again
+    on every pass and hold up every line after it. It backs off on its own instead, and the
+    pass moves on to the next line."""
     wanted = media.mode()
+    now = time.monotonic()
     for inst in cfg.list_instances():
         iid = str(inst.get("id") or "")
         if not iid:
             continue
         current = await asyncio.to_thread(engine.media_mode_of, iid)
         if current is None or current == wanted:
+            _media_retry.pop(iid, None)
+            continue
+        retry = _media_retry.get(iid) or {}
+        if now < retry.get("at", 0.0):
             continue
         log.info("line %s: rebuilding for %s media mode", iid, wanted)
         _record_lifecycle(iid, "media_mode_rebuild", reason_code=wanted)
         try:
-            await hub.drop_ami(iid)
             await asyncio.to_thread(_start_engine_checked, cfg.get_instance(iid) or inst,
                                     cfg.get_settings(),
                                     os.environ.get("MDD_DEV_MOUNTS", "") == "1", "media_mode")
-            hub.reset_health(iid, "configuration_restart")
-        except Exception as exc:  # noqa: BLE001 - retried on the next pass
-            log.warning("line %s: media mode rebuild failed: %s", iid, exc)
+        except Exception as exc:  # noqa: BLE001 - this line waits, the others go on
+            failures = int(retry.get("failures", 0)) + 1
+            delay = min(MEDIA_RETRY_MAX_SECONDS, MEDIA_RETRY_FIRST_SECONDS * 2 ** (failures - 1))
+            _media_retry[iid] = {"at": now + delay, "failures": failures}
+            log.warning("line %s: media mode rebuild failed, retrying in %ds: %s",
+                        iid, delay, exc)
+            continue
+        _media_retry.pop(iid, None)
+        # The old container is gone only now; its AMI connection goes with it.
+        await hub.drop_ami(iid)
+        hub.reset_health(iid, "configuration_restart")
         return True
     return False
 
@@ -7243,9 +7266,11 @@ def api_media():
             "port": state.get("port"),
             "public_host": state.get("public_host") or "",
             "public_port": state.get("public_port"),
-            "lines": {str(inst["id"]): _line_media_state(str(inst["id"]))
-                      for inst in cfg.list_instances()
-                      if engine.media_mode_of(str(inst["id"])) == media.RELAY},
+            "lines": {iid: (_line_media_state(iid) if line_mode == media.RELAY
+                            else "no_media_network")
+                      for iid in (str(inst["id"]) for inst in cfg.list_instances())
+                      if (line_mode := engine.media_mode_of(iid)) in {media.RELAY,
+                                                                      media.RELAY_PENDING}},
         })
     return result
 

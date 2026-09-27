@@ -279,6 +279,14 @@ class MediaEngineContainerTests(unittest.TestCase):
         container.start.assert_called_once_with()
         self.assertEqual(written["media"], RELAY)
 
+    def test_a_line_started_without_the_media_network_is_marked_pending(self):
+        engine = self.engine_module()
+        calls, _container, _written = self.start(engine, {"network": None, "instance": RELAY})
+        self.assertEqual([kind for kind, _ in calls], ["run"])
+        kwargs = calls[0][1]
+        self.assertEqual(kwargs["labels"][engine.media.MODE_LABEL], engine.media.RELAY_PENDING)
+        self.assertEqual(kwargs["ports"], {})
+
     def test_a_line_whose_media_network_cannot_be_joined_is_not_left_half_made(self):
         engine = self.engine_module()
         network = Mock()
