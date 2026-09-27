@@ -23,6 +23,10 @@ import time
 
 import yaml
 
+# /app is the working directory of `python -m runtime.hardware`, and the image ships
+# host/vpcd_modem_bridge.py and host/modem_probe.py beside it.
+from host import modem_probe
+
 try:
     import serial
 except ImportError:  # the image inherits pyserial from Control; tests may not have it
@@ -158,6 +162,10 @@ class HardwareSupervisor:
             self.data_path / "orchestrator" / "bridge-restart-requests")
         self.bridge_restart_status_dir = (
             self.data_path / "orchestrator" / "bridge-restart-status")
+        # USB devices that look like a modem but match no model, and operator-requested tests.
+        self.usb_candidates = modem_probe.CandidateScanner(
+            self.data_path / "orchestrator" / "usb-candidates.json")
+        self.modem_probes = modem_probe.ProbeRequests(self.data_path / "orchestrator")
         self.bridge_restarts = {}
         self.log_ring = collections.deque(maxlen=200)
         # Whether the last pass left nothing in flight; only then may the loop slow down.
@@ -297,6 +305,19 @@ class HardwareSupervisor:
             pass
         self._modem_profiles_cache = (key, tuple(profiles))
         return profiles
+
+    def reconcile_usb_candidates(self):
+        """Publish unrecognised modem-like USB devices and run any test the operator asked for.
+
+        ModemManager always runs here and claims every modem it can, so a test normally goes
+        through it exactly as the bridge does. Nothing is sent to a port unless asked.
+        """
+        known = {(vid, pid) for vid, pid, _interface, _name in self.modem_profiles()}
+        try:
+            candidates = self.usb_candidates.scan(known, lambda args: self.command(*args))
+            self.modem_probes.process(candidates, log=self.log)
+        except Exception as exc:  # never let discovery of extras stop the known modems
+            self.log(f"USB candidate scan failed: {type(exc).__name__}: {exc}")
 
     def discover_modems(self):
         profiles = {(vid, pid): (interface, name)
@@ -1128,6 +1149,7 @@ class HardwareSupervisor:
             raise RuntimeError("ModemManager listing failed")
         modems = sorted(set(re.findall(r"/org/freedesktop/ModemManager1/Modem/\d+", listing.stdout)))
         discovered = self.discover_modems()
+        self.reconcile_usb_candidates()
         self.process_bridge_restart_requests()
         self.reconcile_pcsc(discovered, modems)
         self.migrate_device_ids(discovered)
@@ -1258,6 +1280,8 @@ class HardwareSupervisor:
         try:
             requests = tuple(sorted(path.name for path in
                                     self.bridge_restart_request_dir.glob("*.json")))
+            requests += tuple(sorted(path.name for path in
+                                     self.modem_probes.request_dir.glob("*.json")))
         except OSError:
             requests = ()
         bridges = tuple(sorted((device_id, process.poll() is None)
