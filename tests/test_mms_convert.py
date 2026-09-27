@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from control.app import main, mms, mms_convert, mms_pdu, mms_staging, store
+from control.app import main, mms, mms_convert, mms_pdu, mms_staging, mms_workers, store
 
 TO = ["+447700900123"]
 
@@ -232,7 +232,8 @@ class ImageFitTests(unittest.TestCase):
         # the picture is decoded once and every later target starts from that copy.
         attachment = {"name": "p.jpg", "content_type": "image/jpeg",
                       "data": photo(3000, 2000, quality=95)}
-        with patch.object(mms_convert, "decode", wraps=mms_convert.decode) as decode:
+        pool = mms_workers.pool()
+        with patch.object(pool, "decode", wraps=pool.decode) as decode:
             sizes = []
             for text in ("h", "he", "hello there"):
                 _fitted, problem, summary = fit([attachment], 150 * 1024, text=text)

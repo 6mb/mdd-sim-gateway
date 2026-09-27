@@ -22,6 +22,8 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 
+from . import mms_workers
+
 try:
     from PIL import Image
 except ImportError:  # pragma: no cover - the control requirements install Pillow
@@ -58,6 +60,9 @@ class Fitted:
     width: int | None = None
     height: int | None = None
     converted: bool = False     # re-encoded, as opposed to passed through unchanged
+    # Decoded smaller than IMAGE_EDGES[0] because the full decode would not fit this gateway's
+    # memory for conversion (mms_workers); the picture is sent smaller than it could be.
+    reduced: bool = False
 
 
 # Longest edges tried from largest to smallest; about what phones themselves send by MMS. At
@@ -164,6 +169,28 @@ def decode(data: bytes, longest: int, orientation: int = 1):
     return image
 
 
+def _draft_divisor(width: int, height: int, longest: int) -> int:
+    """The DCT scale Pillow's JPEG draft() picks for decode(..., longest)."""
+    if max(width, height) <= longest:
+        return 1
+    scale = longest / max(width, height)
+    fit = min(width // (int(width * scale) + 1), height // (int(height * scale) + 1))
+    return next(d for d in (8, 4, 2, 1) if fit >= d)
+
+
+def decode_cost(info: Probe, size: int, longest: int) -> int:
+    """Bytes decode(data, longest) is expected to need at its peak: what the decoder holds
+    for the pixels it decodes -- a JPEG at its reduced scale, anything else in full -- plus
+    the file and the result travelling to and from the worker."""
+    width, height = info.width, info.height
+    divisor = _draft_divisor(width, height, longest) if info.format == "JPEG" else 1
+    pixels = -(-width // divisor) * -(-height // divisor)
+    per_pixel = mms_workers.BYTES_PER_PIXEL.get(info.format or "",
+                                                mms_workers.DEFAULT_BYTES_PER_PIXEL)
+    return (pixels * per_pixel + 2 * size
+            + 2 * 3 * min(longest, info.longest) ** 2)
+
+
 class ImageConverter:
     kind = "image"
     # Pictures already decoded and shrunk to IMAGE_EDGES[0], by content: typing in the composer
@@ -193,20 +220,66 @@ class ImageConverter:
         return not probe(data).animated
 
     def base(self, data: bytes, info: Probe, digest: bytes | None = None):
-        """The picture decoded, upright and shrunk to IMAGE_EDGES[0]; decoded once per content
-        however many times it is fitted."""
-        key = (digest or hashlib.sha256(data).digest(), IMAGE_EDGES[0])
+        """(the picture decoded, upright and shrunk to IMAGE_EDGES[0], whether it had to be
+        decoded smaller than that); decoded once per content however often it is fitted."""
+        key = digest or hashlib.sha256(data).digest()
         with self._bases_lock:
             if key in self._bases:
                 self._bases.move_to_end(key)
                 return self._bases[key]
-        image = decode(data, IMAGE_EDGES[0], info.orientation)
+        found = self._decode_within_budget(data, info)
         with self._bases_lock:
-            self._bases[key] = image
-            while len(self._bases) > 1 and sum(
-                    i.width * i.height * 3 for i in self._bases.values()) > self.BASE_CACHE_BYTES:
+            self._bases[key] = found
+            while len(self._bases) > 1 and sum(i.width * i.height * 3 for i, _r in
+                                               self._bases.values()) > self.BASE_CACHE_BYTES:
                 self._bases.popitem(last=False)
-        return image
+        return found
+
+    @staticmethod
+    def _decode_within_budget(data: bytes, info: Probe):
+        """Decode in a worker (mms_workers), at full quality when this gateway has the memory
+        for it. A JPEG that does not fit is decoded at a smaller DCT scale -- sent smaller,
+        but sent; anything else is decoded whole or not at all, so it is refused."""
+        pool = mms_workers.pool()
+        cost, failed = 0, None
+        for edge in IMAGE_EDGES:
+            cost = decode_cost(info, len(data), edge)
+            if failed is not None and cost >= failed:
+                continue        # the same decode that just killed a worker
+            if not pool.fits_alone(cost):
+                if info.format == "JPEG":
+                    continue
+                break
+            try:
+                image = pool.decode(data, edge, info.orientation, cost)
+            except mms_workers.OverBudget:
+                if info.format == "JPEG":
+                    continue
+                break
+            except mms_workers.WorkerDied:
+                failed = cost
+                if info.format == "JPEG":
+                    continue
+                raise ConversionError("the gateway ran out of memory converting the picture")
+            return image, edge < IMAGE_EDGES[0] and edge < info.longest
+        raise ConversionError(
+            f"converting a {info.width}x{info.height} picture needs about "
+            f"{(cost + mms_workers.WORKER_BYTES) // mms_workers.MB} MB, and this gateway has "
+            f"{pool.budget() // mms_workers.MB} MB for it; send it as a JPEG or a smaller "
+            f"picture (the limit is MDD_MMS_CONVERT_MEMORY)")
+
+    def warm(self, content_type: str, data: bytes, digest: bytes | None = None) -> None:
+        """Decode ahead of fit(), so the attachments of one message decode side by side
+        rather than one after another. A problem is left for fit() to report."""
+        try:
+            info = probe(data)
+            if (content_type == "image/gif" and info.animated) or (
+                    content_type in PASS_THROUGH_IMAGES and info.longest <= IMAGE_EDGES[0]
+                    and info.orientation == 1):
+                return      # quite possibly sent as it is; decode only if it has to be
+            self.base(data, info, digest)
+        except ConversionError:
+            pass
 
     @staticmethod
     def _encode(image, quality: int) -> bytes:
@@ -238,7 +311,7 @@ class ImageConverter:
                 return Fitted(content_type, clean, width, height)
         if target <= 0:
             raise ConversionError("there is no room left for this picture")
-        base = self.base(data, info, digest)
+        base, reduced = self.base(data, info, digest)
         longest = max(base.size)
         edges = [e for e in IMAGE_EDGES if e < longest]
         edges.insert(0, min(longest, IMAGE_EDGES[0]))
@@ -264,7 +337,7 @@ class ImageConverter:
                         best, low = candidate, middle
                     else:
                         high = middle
-            return Fitted("image/jpeg", best, *scaled.size, converted=True)
+            return Fitted("image/jpeg", best, *scaled.size, converted=True, reduced=reduced)
         raise ConversionError(f"the picture cannot be made smaller than {target // 1024 + 1} KB")
 
 

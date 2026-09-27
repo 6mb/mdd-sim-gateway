@@ -84,6 +84,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   the same conversion when they send files directly, or can stage them with the new
   `/mms/attachments` endpoints. Sound, video and animated GIFs are sent as they are (video
   conversion can be added later as another converter).
+- Picture conversion is held to the memory the gateway has. Pictures are decoded in worker
+  processes, each shrunk to 1600 px as soon as it is decoded and kept that way while the
+  message is written, so editing the text re-encodes without decoding again. A decode starts
+  only when its cost, estimated from the header, fits the budget: several at once where there
+  is memory (up to `MDD_MMS_CONVERT_WORKERS`, default the CPUs), one after another where there
+  is not. A JPEG too large to decode whole within `MDD_MMS_CONVERT_MEMORY` (default: worked
+  out from the control container's `mem_limit`) is sent smaller and marked so in the composer;
+  a HEIC that large is refused with the reason. A worker that runs out of memory anyway is the
+  one the kernel stops, not the control plane. Uploads over 1 MB are spooled under the data
+  directory, not the container's 32 MB `/tmp`.
 - With several attachments the sender chooses between one MMS, whose attachments share the
   line's per-MMS limit, and one MMS per attachment, each fitted to the whole limit (text and
   subject go with the first; they are submitted in order).

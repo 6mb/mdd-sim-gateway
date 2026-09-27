@@ -38,7 +38,8 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   const [binary, setBinary] = useState([])           // filed non-text payloads (see BinaryPayloads)
   // Attachments staged on the gateway for the next MMS: {key, name, localUrl, id, status
   // ('uploading'|'ready'), original_size, size, content_type, original_type, converted,
-  // adjustable, width, height, fitted}. `id` is the gateway's staged-attachment id, set once
+  // reduced, adjustable, width, height, fitted}. `reduced`: the gateway had too little memory
+  // to decode the picture whole and sends it smaller than it otherwise would. `id` is the gateway's staged-attachment id, set once
   // the upload finishes; `fitted` becomes true after the first successful fit response, which
   // is when the server preview (rather than the local object URL) becomes the thumbnail.
   const [attachments, setAttachments] = useState([])
@@ -204,6 +205,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
       content_type: file.type,
       original_type: file.type,
       converted: false,
+      reduced: false,
       adjustable: false,
       width: null,
       height: null,
@@ -784,6 +786,8 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
                 const sizeText = a.status === 'uploading' ? tr('Uploading…')
                   : shrunk ? `${formatBytes(a.original_size)} → ${formatBytes(a.size)}`
                   : formatBytes(a.size)
+                const reducedNote = a.status === 'ready' && a.reduced
+                  ? tr('Made smaller: the gateway is short of memory') : ''
                 return (
                   <div key={a.key} style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'var(--hover)',
                     borderRadius: 8, padding: '4px 6px', fontSize: 11, maxWidth: 200 }}>
@@ -792,7 +796,9 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
                       : <span style={{ flexShrink: 0 }}>📎</span>}
                     <span style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
-                      <span style={{ color: 'var(--text-mute)' }}>{sizeText}</span>
+                      <span style={{ color: 'var(--text-mute)' }} title={reducedNote || undefined}>
+                        {sizeText}{reducedNote && ' ⚠'}
+                      </span>
                     </span>
                     <button className="btn btn-ghost" type="button" style={{ padding: '0 4px', fontSize: 11, flexShrink: 0 }}
                       aria-label={tr('Remove attachment')} onClick={() => removeAttachment(a.key)}>✕</button>

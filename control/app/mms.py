@@ -15,9 +15,11 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
-from . import cellular_sms, mms_convert, mms_media, mms_pdu, mms_transport, store
+from . import (cellular_sms, mms_convert, mms_media, mms_pdu, mms_transport, mms_workers,
+               store)
 
 log = logging.getLogger("vowifi.mms")
 
@@ -356,8 +358,9 @@ _FIT_CACHE_SIZE = 64
 _fit_cache_lock = threading.Lock()
 
 
-def _fit(converter, content_type: str, data: bytes, target: int, force: bool):
-    key = (hashlib.sha256(data).digest(), content_type, int(target), bool(force))
+def _fit(converter, content_type: str, data: bytes, target: int, force: bool,
+         digest: bytes | None = None):
+    key = (digest or hashlib.sha256(data).digest(), content_type, int(target), bool(force))
     with _fit_cache_lock:
         if key in _FIT_CACHE:
             return _FIT_CACHE[key]
@@ -367,6 +370,18 @@ def _fit(converter, content_type: str, data: bytes, target: int, force: bool):
         while len(_FIT_CACHE) > _FIT_CACHE_SIZE:
             _FIT_CACHE.pop(next(iter(_FIT_CACHE)))
     return fitted
+
+
+def _warm(items: list[dict]) -> None:
+    """Decode the attachments of one message side by side, as many at once as the gateway
+    allows (mms_workers), before they are fitted one after another."""
+    pending = [i for i in items if hasattr(i["converter"], "warm")]
+    if len(pending) < 2:
+        return
+    workers = min(len(pending), mms_workers.pool().workers)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mms-warm") as executor:
+        list(executor.map(lambda i: i["converter"].warm(i["original_type"], i["original"],
+                                                         i["digest"]), pending))
 
 
 def _renamed(name: str, content_type: str) -> str:
@@ -402,7 +417,7 @@ def fit_attachments(attachments: list[dict], text: str, subject: str,
         items.append({**item, "original": item["data"], "original_type": item["content_type"],
                       "original_name": item["name"], "adjustable": adjustable,
                       "converter": converter, "force": item["policy"] == mms_media.CONVERT,
-                      "converted": False, "width": None, "height": None})
+                      "converted": False, "reduced": False, "width": None, "height": None})
     # Before any recipient is typed a placeholder of typical length stands in; sending
     # measures again with the real ones.
     to = recipients or ["+10000000000"]
@@ -413,6 +428,8 @@ def fit_attachments(attachments: list[dict], text: str, subject: str,
     shrinkable = [i for i in items if i["adjustable"] or i["force"]]
     for item in shrinkable:
         item["data"] = b""
+        item["digest"] = hashlib.sha256(item["original"]).digest()
+    _warm(shrinkable)
     # The packaging around empty shrinkable parts, plus a few bytes for their length fields.
     budget = limit - len(package()) - 4 * len(shrinkable)
     request = b""
@@ -421,11 +438,12 @@ def fit_attachments(attachments: list[dict], text: str, subject: str,
         for item, target in zip(shrinkable, targets):
             try:
                 fitted = _fit(item["converter"], item["original_type"], item["original"],
-                              target, item["force"])
+                              target, item["force"], item["digest"])
             except mms_convert.ConversionError as exc:
                 return [], f"{item['original_name']}: {exc}", {}
             item.update(data=fitted.data, content_type=fitted.content_type,
                         width=fitted.width, height=fitted.height, converted=fitted.converted,
+                        reduced=fitted.reduced,
                         name=_renamed(item["original_name"], fitted.content_type)
                         if fitted.content_type != item["original_type"] else item["original_name"])
         request = package()
@@ -438,6 +456,7 @@ def fit_attachments(attachments: list[dict], text: str, subject: str,
                          "size": len(i["data"]), "original_name": i["original_name"],
                          "original_type": i["original_type"],
                          "original_size": len(i["original"]), "converted": i["converted"],
+                         "reduced": i["reduced"],
                          "adjustable": i["adjustable"], "width": i["width"],
                          "height": i["height"]} for i in items]}
     fitted = [{k: i[k] for k in ("name", "content_type", "data", "duration_ms")} for i in items]
