@@ -64,6 +64,13 @@ CONFIG_LABEL = "io.mdd-sim-gateway.relay-config"
 # mode, which keeps every container created before this existed where it is.
 MODE_LABEL = "io.mdd-sim-gateway.media-mode"
 
+# The relay is the unmodified upstream coturn image, pinned by its multi-arch index digest so a
+# re-tagged upstream cannot change what runs. Releases ship this exact image as an asset and in
+# their registry under LOCAL_IMAGE's name (.github/workflows/release.yml reads it from here).
+UPSTREAM_IMAGE = ("coturn/coturn:4.17.2-alpine@sha256:"
+                  "771a95d04cb97bbc5bfc672e5fdf455591c7d2b2a15f02bb9ceda3e27561695f")
+LOCAL_IMAGE = "mdd-sim-gateway/relay"
+
 DEFAULT_PORT = 8478
 LISTEN_PORT = 3478                  # inside the relay container
 # Every engine's Asterisk RTP pool in relay mode. Engines have their own addresses on the media
@@ -113,10 +120,20 @@ def mode(state: dict | None = None) -> str:
 
 
 def default_image() -> str:
+    """The local tag the relay runs from. Every source below is the same upstream image."""
     override = os.environ.get("MDD_RELAY_IMAGE", "").strip()
     if override:
         return override
-    return f"ghcr.io/mddidd/mdd-sim-gateway-relay:v{VERSION}"
+    return f"{LOCAL_IMAGE}:v{VERSION}"
+
+
+def image_sources(reference: str) -> list[str]:
+    """Where a missing relay image may be fetched from, after the Release asset the installer
+    and the container updater load (host/mdd_update.py): the copy each release pushes to its
+    registry, then the upstream image itself. An override is fetched only as named."""
+    if reference != default_image() or os.environ.get("MDD_RELAY_IMAGE", "").strip():
+        return [reference]
+    return [f"ghcr.io/mddidd/mdd-sim-gateway-relay:v{VERSION}", UPSTREAM_IMAGE]
 
 
 # ------------------------------------------------------------------ media network
@@ -201,9 +218,9 @@ def render_config(secret: str, subnet: ipaddress.IPv4Network,
         # listener stay out of reach whatever the peer list says.
         "no-tcp-relay",
         "no-multicast-peers",
-        "no-cli",
+        # The admin CLI is off unless asked for (--cli) in 4.17, and the old STUN
+        # compatibility switch no longer exists.
         "no-rfc5780",
-        "no-stun-backward-compatibility",
         "no-software-attribute",
         "stale-nonce=600",
         "user-quota=10",
@@ -221,6 +238,39 @@ def render_config(secret: str, subnet: ipaddress.IPv4Network,
         "simple-log",
     ]
     return "\n".join(lines) + "\n"
+
+
+# Run by the stock image's sh before turnserver: adds what is only known once the container is
+# attached. relay-ip is its address on the media network (MDD_MEDIA_SUBNET), where allocations
+# live; every other address becomes a listening-ip, so a client cannot use the relay to reach
+# the relay itself. Loopback serves the health check.
+ENTRYPOINT = r"""set -eu
+: "${MDD_RELAY_CONFIG:?}" "${MDD_MEDIA_SUBNET:?}"
+addresses=$(ip -4 -o addr show | awk -v subnet="$MDD_MEDIA_SUBNET" '
+  function number(address,  part) {
+    split(address, part, ".")
+    return ((part[1] * 256 + part[2]) * 256 + part[3]) * 256 + part[4]
+  }
+  BEGIN { split(subnet, s, "/"); first = number(s[1]); size = 2 ^ (32 - s[2]) }
+  {
+    for (i = 1; i < NF; i++) if ($i == "inet") { split($(i + 1), a, "/"); address = a[1] }
+    if (address == "" || address ~ /^127\./) next
+    n = number(address)
+    if (n >= first && n < first + size) print "relay-ip=" address
+    else print "listening-ip=" address
+    address = ""
+  }')
+case "$addresses" in
+  *relay-ip=*) ;;
+  *) echo "mdd-relay: no address on the media network $MDD_MEDIA_SUBNET" >&2; exit 1 ;;
+esac
+{
+  printf '%s\n' "$MDD_RELAY_CONFIG"
+  printf '%s\n' "$addresses"
+  printf 'listening-ip=127.0.0.1\n'
+} > /tmp/turnserver.conf
+exec turnserver -c /tmp/turnserver.conf
+"""
 
 
 def credentials(principal: str, secret: str, ttl: int = CREDENTIAL_TTL,
@@ -257,17 +307,24 @@ def provisioning(principal: str, request_host: str, state: dict | None = None) -
 
 # ------------------------------------------------------------------ relay container
 def ensure_image(client, reference: str):
+    """The relay image under ``reference``, fetched and tagged when it is not here yet."""
     try:
         return client.images.get(reference)
     except docker.errors.ImageNotFound:
-        from .engine import _names_a_registry
-        if not _names_a_registry(reference):
-            raise MediaError(f"relay image {reference} is not present") from None
-    try:
-        client.images.pull(reference)
-        return client.images.get(reference)
-    except Exception as exc:  # noqa: BLE001 - offline, registry refused: say which image
-        raise MediaError(f"cannot fetch relay image {reference}: {exc}") from exc
+        pass
+    failures = []
+    for source in image_sources(reference):
+        try:
+            client.images.pull(source)
+            image = client.images.get(source)
+        except Exception as exc:  # noqa: BLE001 - offline, registry refused: try the next
+            failures.append(f"{source}: {exc}")
+            continue
+        if source != reference:
+            repository, _, tag = reference.rpartition(":")
+            image.tag(repository, tag)
+        return image
+    raise MediaError(f"cannot fetch relay image {reference}: " + "; ".join(failures))
 
 
 def _container(client):
@@ -290,7 +347,7 @@ def ensure_relay(client, state: dict, network=None):
     port = int(state.get("port") or DEFAULT_PORT)
     bind = str(state.get("bind") or "")
     fingerprint = hashlib.sha256("\0".join(
-        [config, image.id, str(port), bind, str(subnet)]).encode()).hexdigest()[:32]
+        [config, image.id, str(port), bind, str(subnet), ENTRYPOINT]).encode()).hexdigest()[:32]
 
     current = _container(client)
     if current is not None:
@@ -310,8 +367,14 @@ def ensure_relay(client, state: dict, network=None):
         # The published port lives on the default bridge; the media network is internal.
         network="bridge",
         ports={f"{LISTEN_PORT}/udp": publish, f"{LISTEN_PORT}/tcp": publish},
+        entrypoint=["sh", "-c", ENTRYPOINT],
         environment={"MDD_RELAY_CONFIG": config, "MDD_MEDIA_SUBNET": str(subnet)},
+        # The image runs as nobody. Upstream's turnserver carries a file capability to bind
+        # ports below 1024; the kernel refuses to execute it when that capability is outside
+        # the bounding set. With no-new-privileges it is never granted: the relay runs with an
+        # empty effective set and binds only unprivileged ports.
         cap_drop=["ALL"],
+        cap_add=["NET_BIND_SERVICE"],
         security_opt=["no-new-privileges:true"],
         read_only=True,
         tmpfs={"/tmp": "rw,nosuid,nodev,size=8m"},

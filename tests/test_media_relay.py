@@ -186,7 +186,10 @@ class MediaRelayTests(unittest.TestCase):
         first = self.media.ensure_relay(client, state)
         kwargs = client.created[0]
         self.assertEqual(kwargs["cap_drop"], ["ALL"])
-        self.assertNotIn("cap_add", kwargs)
+        # Only so the stock turnserver may be executed; no-new-privileges never grants it.
+        self.assertEqual(kwargs["cap_add"], ["NET_BIND_SERVICE"])
+        self.assertIn("no-new-privileges:true", kwargs["security_opt"])
+        self.assertEqual(kwargs["entrypoint"], ["sh", "-c", self.media.ENTRYPOINT])
         self.assertTrue(kwargs["read_only"])
         self.assertEqual(kwargs["network"], "bridge")
         self.assertEqual(kwargs["ports"], {"3478/udp": 8478, "3478/tcp": 8478})
@@ -298,17 +301,83 @@ class MediaRelayTests(unittest.TestCase):
         self.assertEqual(self.media.load_state()["image"], "relay:old")
 
 
+class RelayImageTests(unittest.TestCase):
+    def setUp(self):
+        self.media = media_module()
+
+    def client(self, available):
+        pulled, tagged = [], []
+
+        class Image:
+            id = "sha256:relay"
+
+            def tag(self, repository, tag):
+                tagged.append(f"{repository}:{tag}")
+
+        class Images:
+            def get(self, reference):
+                if reference in available or reference in pulled:
+                    return Image()
+                raise self_media.docker.errors.ImageNotFound(reference)
+
+            def pull(self, reference):
+                if reference not in available:
+                    raise RuntimeError("unreachable")
+                pulled.append(reference)
+
+        self_media = self.media
+        available = set(available)
+        return SimpleNamespace(images=Images()), pulled, tagged
+
+    def test_the_relay_is_the_pinned_upstream_image(self):
+        self.assertRegex(self.media.UPSTREAM_IMAGE,
+                         r"^coturn/coturn:4\.17\.2-alpine@sha256:[0-9a-f]{64}$")
+        self.assertEqual(self.media.default_image(),
+                         f"mdd-sim-gateway/relay:v{self.media.VERSION}")
+
+    def test_a_loaded_release_asset_is_used_as_is(self):
+        client, pulled, _tagged = self.client({self.media.default_image()})
+        self.media.ensure_image(client, self.media.default_image())
+        self.assertEqual(pulled, [])
+
+    def test_without_it_the_release_registry_then_upstream_are_tried(self):
+        client, pulled, tagged = self.client({self.media.UPSTREAM_IMAGE})
+        self.media.ensure_image(client, self.media.default_image())
+        self.assertEqual(pulled, [self.media.UPSTREAM_IMAGE])
+        self.assertEqual(tagged, [self.media.default_image()])
+
+    def test_nothing_reachable_says_what_was_tried(self):
+        client, _pulled, _tagged = self.client(set())
+        with self.assertRaisesRegex(self.media.MediaError, "ghcr.io.*coturn/coturn"):
+            self.media.ensure_image(client, self.media.default_image())
+
+    def test_release_workflow_ships_the_same_upstream_image(self):
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+        self.assertIn("control/app/media.py", workflow)
+        self.assertIn("UPSTREAM_IMAGE", workflow)
+        self.assertIn("mdd-sim-gateway-relay-${GITHUB_REF_NAME}-arm64.tar.gz", workflow)
+        self.assertIn("mdd-sim-gateway-relay-${GITHUB_REF_NAME}-amd64.tar.gz", workflow)
+
+
 class RelayEntrypointTests(unittest.TestCase):
+    """The entrypoint runs in the stock alpine image: busybox sh and awk, iproute's ip."""
+
     def run_entrypoint(self, addresses):
+        media = media_module()
+        ip_output = "\n".join(
+            f"{n}: eth{n}    inet {address}/16 brd 0.0.0.0 scope global eth{n}\\       "
+            "valid_lft forever preferred_lft forever"
+            for n, address in enumerate(addresses.split()))
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp, "bin")
             bin_dir.mkdir()
-            Path(bin_dir, "hostname").write_text(f"#!/bin/sh\necho '{addresses}'\n")
+            Path(bin_dir, "ip").write_text(
+                "#!/bin/sh\nprintf '%s\\n' '1: lo    inet 127.0.0.1/8 scope host lo'\n"
+                f"printf '%s\\n' '{ip_output}'\n")
             Path(bin_dir, "turnserver").write_text("#!/bin/sh\ncat \"$2\"\n")
-            for name in ("hostname", "turnserver"):
+            for name in ("ip", "turnserver"):
                 os.chmod(Path(bin_dir, name), 0o755)
-            script = (ROOT / "relay" / "entrypoint.sh").read_text().replace(
-                "/tmp/turnserver.conf", f"{tmp}/turnserver.conf")
+            script = media.ENTRYPOINT.replace("/tmp/turnserver.conf", f"{tmp}/turnserver.conf")
             return subprocess.run(
                 ["sh", "-c", script],
                 env={"PATH": f"{bin_dir}:/usr/bin:/bin", "MDD_RELAY_CONFIG": "realm=x",
@@ -316,13 +385,13 @@ class RelayEntrypointTests(unittest.TestCase):
                 capture_output=True, text=True)
 
     def test_allocations_live_on_the_media_network_and_listeners_everywhere_else(self):
-        result = self.run_entrypoint("172.17.0.5 172.30.0.3 ")
+        result = self.run_entrypoint("172.17.0.5 172.30.0.3")
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
         self.assertEqual(lines[0], "realm=x")
         self.assertIn("relay-ip=172.30.0.3", lines)
         self.assertIn("listening-ip=172.17.0.5", lines)
-        self.assertIn("listening-ip=127.0.0.1", lines)
+        self.assertEqual(lines.count("listening-ip=127.0.0.1"), 1)
         self.assertNotIn("listening-ip=172.30.0.3", lines)
 
     def test_without_a_media_address_the_relay_does_not_start(self):

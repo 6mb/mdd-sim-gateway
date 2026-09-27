@@ -1351,7 +1351,7 @@ cmd_reload() {
   # Only a gateway in relay media mode needs the relay image. Failing to fetch this version's
   # keeps the one in use: the update itself is not held back by an optional component.
   if [ "$(media_mode_recorded)" = relay ]; then
-    ensure_relay_image || warn "could not fetch the media relay image $(relay_image_ref); the relay keeps its current image"
+    ensure_relay_image
   fi
   if [ "$MODE" = docker ]; then
     setup_venv
@@ -1406,26 +1406,33 @@ cmd_reload() {
 # relay (one TURN relay port, nothing published by the engines). control/app/media.py does the
 # work; this runs it in the control plane's own environment and supplies the relay image.
 relay_image_ref() {
-  printf 'ghcr.io/mddidd/mdd-sim-gateway-relay:v%s' "$(tr -d '\n' < "$REPO_DIR/VERSION")"
+  printf 'mdd-sim-gateway/relay:v%s' "$(tr -d '\n' < "$REPO_DIR/VERSION")"
 }
 
 media_mode_recorded() {
   grep -q '"mode": "relay"' "$MDD_DATA_DIR/media/state.json" 2>/dev/null && echo relay || echo direct
 }
 
-# This version's relay image: from the release registry, or built from relay/ when that cannot
-# be reached (a source checkout, a release not published yet, or MDD_BUILD_IMAGES=1).
+# The relay is upstream coturn, unmodified (control/app/media.py pins it). An official release
+# ships it as a checksummed asset: import that here the way the other images are imported, so a
+# host that cannot reach Docker Hub still gets it. A checkout without the release manifest, or a
+# failed download, leaves it to the control plane, which then tries the release's registry and
+# upstream itself.
 ensure_relay_image() {
   ref=$(relay_image_ref)
   docker image inspect "$ref" >/dev/null 2>&1 && return 0
-  if [ "${MDD_BUILD_IMAGES:-0}" != 1 ] && docker pull "$ref" >/dev/null 2>&1; then
-    info "fetched the media relay image $ref"
-    return 0
+  [ -f "$ENGINE_HANDOFF_MANIFEST" ] && grep -q "mdd-sim-gateway-relay-" "$ENGINE_HANDOFF_MANIFEST" \
+    && have python3 || return 0
+  set -- python3 "$REPO_DIR/host/mdd_update.py" --repo "$REPO_DIR" --data "$MDD_DATA_DIR" \
+    --version "$(tr -d '\n' < "$REPO_DIR/VERSION")" \
+    --repository "${MDD_UPDATE_REPOSITORY:-MddIdd/mdd-sim-gateway}" --install-relay-image
+  [ -f "$MDD_DATA_DIR/update/network.json" ] && \
+    set -- "$@" --network-config "$MDD_DATA_DIR/update/network.json"
+  if "$@" >/dev/null; then
+    info "imported the media relay image $ref from the Release"
+  else
+    warn "could not import the media relay image from the Release; the control plane will try the registries"
   fi
-  [ -f "$REPO_DIR/relay/Dockerfile" ] || return 1
-  info "building the media relay image $ref from relay/"
-  docker build --build-arg MDD_VERSION="$(tr -d '\n' < "$REPO_DIR/VERSION")" \
-    -t "$ref" "$REPO_DIR/relay"
 }
 
 media_cli() {
@@ -1448,8 +1455,8 @@ cmd_media() {
   case "$sub" in
     status) media_cli status ;;
     relay)
-      ensure_relay_image || die "could not fetch or build the media relay image $(relay_image_ref); media mode unchanged"
-      media_cli relay --image "$(relay_image_ref)" "$@" || exit 1
+      ensure_relay_image
+      media_cli relay "$@" || exit 1
       info "open UDP and TCP on the relay port in any firewall or router in front of this host" ;;
     direct) media_cli direct "$@" ;;
     *) die "usage: $0 media [status | relay [--port N] [--bind ADDR] [--public-host HOST] [--public-port N] | direct]" ;;
