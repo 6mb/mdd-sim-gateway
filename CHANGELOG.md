@@ -50,8 +50,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   deployment. The relay is the unmodified upstream `coturn/coturn:4.17.2-alpine`, pinned by
   digest, shipped per architecture as a Release asset and mirrored to ghcr; it is fetched only
   when relay mode is enabled. Direct mode (each line publishing its own ports) stays the default
-  and is unchanged. Relay mode needs nf_tables with its socket match in the host kernel, and has
-  not been tested on a full-container deployment.
+  and is unchanged. Relay mode needs nf_tables with its socket match in the host kernel. On a
+  full-container deployment it has been tested on Debian only, without a registered line, and
+  not on a Synology NAS.
 
 ### Changed
 

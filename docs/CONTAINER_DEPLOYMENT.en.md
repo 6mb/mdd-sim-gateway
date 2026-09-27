@@ -177,9 +177,12 @@ firewalls.
 
 ### Call media modes
 
-> **Not tested**: relay mode has only been verified on host installs (install.sh local and docker
-> modes, Debian 13, kernel 6.12). It has not been run on a full-container deployment or on a
-> Synology NAS. What follows describes the code, not a tested result.
+> **Partly tested**: on a full-container stack on Debian 13 (x86_64, kernel 6.12) the following
+> were verified: enabling over `docker exec` and switching back to direct, the firewall probe, the
+> relay container, the Engine's network order and address choice, the media interface filter and
+> the TURN peer limits. IMS registration and browser calls in relay mode were verified on host
+> installs only (on that host the Hardware container could not take over the modem, so no line
+> registered on the stack). **It has not been run on a Synology NAS.**
 
 Call audio defaults to direct mode: each line publishes its own RTP ports (see above). It can
 be switched to relay mode instead, where a single coturn relay container carries all media and no
