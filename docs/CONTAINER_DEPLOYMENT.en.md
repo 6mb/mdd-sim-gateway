@@ -175,6 +175,12 @@ The browser phone shares the WebUI origin and needs no separate WSS host port. R
 UDP 30000 by default; allow the assigned range between clients and the NAS when crossing VLANs or
 firewalls.
 
+A line behind a country exit (SOCKS) is only on the internal Engine network, where Docker publishes
+no port. Control publishes and forwards its RTP range through a `mdd-sim-gateway-rtp-forward`
+container it creates from its own image (nothing to download). It forwards UDP only, and sends an
+Engine's answer only back to the browser address that opened that call; the Engine gains no route
+of its own. Without such a line the container is not created.
+
 ### Call media modes
 
 > **Partly tested**: on a full-container stack on Debian 13 (x86_64, kernel 6.12) the following

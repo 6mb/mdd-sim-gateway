@@ -24,7 +24,7 @@ import time
 
 import docker
 
-from . import config as cfg, egress, media, sysinfo
+from . import config as cfg, egress, media, rtp_forward, sysinfo
 from .egress_contract import ENGINE_LABEL
 
 log = logging.getLogger("mdd.engine")
@@ -126,6 +126,36 @@ def close_client():
 
 def container_name(iid: str) -> str:
     return f"mdd-sim-gateway-engine-{iid}"
+
+
+_internal_networks: dict[str, bool] = {}
+
+
+def _engine_network_is_internal(client) -> bool:
+    """Whether the Engine network is internal (the container stack's is). Docker publishes no
+    port of a container that is only on internal networks."""
+    if not ENGINE_NETWORK:
+        return False
+    if ENGINE_NETWORK not in _internal_networks:
+        attrs = client.networks.get(ENGINE_NETWORK).attrs or {}
+        _internal_networks[ENGINE_NETWORK] = bool(attrs.get("Internal"))
+    return _internal_networks[ENGINE_NETWORK]
+
+
+def reconcile_rtp_forward(client=None, exclude: str = "") -> None:
+    """Keep the RTP forwarder (rtp_forward.py) in step with the lines behind an exit. Best
+    effort: a line's registration and SMS never depend on it."""
+    if not ENGINE_NETWORK:
+        return
+    try:
+        client = client or _client()
+        if not _engine_network_is_internal(client):
+            return
+        configured = {container_name(str(inst["id"])) for inst in cfg.list_instances()
+                      if inst.get("id") is not None and inst.get("enabled", True)}
+        rtp_forward.reconcile(client, ENGINE_NETWORK, configured, exclude)
+    except Exception as exc:  # noqa: BLE001 - retried by the media supervisor
+        log.warning("RTP forwarder not updated: %s", exc)
 
 
 def _instance_paths(iid: str):
@@ -491,11 +521,21 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
     if (settings.get("debug") or {}).get("ami", False):
         port_bindings[f"{5038}/tcp"] = ("127.0.0.1", ports.get("ami", 5038))
     # RTP range. In relay mode media arrives through the relay on the media network instead.
-    if media_attachment is None:
-        rtp_start = ports.get("rtp_start", 10000)
-        for p in range(rtp_start, rtp_start + cfg.rtp_span(ports)):
+    # A line behind a SOCKS exit on an internal Engine network cannot publish ports: the RTP
+    # forwarder publishes its range and relays to it (rtp_forward.py).
+    forwarded = (media_attachment is None and bool(proxy_environment)
+                 and _engine_network_is_internal(client))
+    rtp_start = ports.get("rtp_start", 10000)
+    rtp_last = rtp_start + cfg.rtp_span(ports) - 1
+    if media_attachment is None and not forwarded:
+        for p in range(rtp_start, rtp_last + 1):
             port_bindings[f"{p}/udp"] = p
     labels = {MANAGED_LABEL: "true", "io.mdd-sim-gateway.component": "engine"}
+    if forwarded:
+        labels[rtp_forward.FORWARD_LABEL] = rtp_forward.label_value(rtp_start, rtp_last)
+    elif ENGINE_NETWORK and port_bindings:
+        # This line now publishes its own ports; the forwarder must let go of them first.
+        reconcile_rtp_forward(client, exclude=container_name(iid))
     if media_attachment is not None:
         labels[media.MODE_LABEL] = (media.RELAY if media_attachment.get("network") is not None
                                     else media.RELAY_PENDING)
@@ -551,6 +591,8 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
             c.remove(force=True)
             raise
     log.info("started engine container %s", c.name)
+    if forwarded:
+        reconcile_rtp_forward(client)
     return c.id
 
 
