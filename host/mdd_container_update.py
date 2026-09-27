@@ -10,6 +10,7 @@ images pass their architecture/component/version checks.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -328,6 +329,53 @@ def roll_engines(client, target_image_id: str, status: mdd_update.Status) -> Non
         wait_container(client, name, target_image_id, timeout=240)
 
 
+RELAY_CONTAINER = "mdd-sim-gateway-relay"
+
+
+def relay_mode(project: Path) -> bool:
+    """Whether this gateway carries call media through the relay (control/app/media.py)."""
+    try:
+        state = json.loads((project / "media" / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(state, dict) and state.get("mode") == "relay"
+
+
+def fetch_relay_image(base_url: str, version: str, arch: str, sums: Path, routes: list,
+                      active: int, sizes: dict, staging: Path) -> int:
+    """Load this release's relay image beside the one in use. It is optional and outside the
+    rollback transaction: failing leaves the relay on the image it runs, and the new Control
+    moves it over once the image is here (or fetched from a registry)."""
+    name = f"mdd-sim-gateway-relay-v{version}-{arch}.tar.gz"
+    archive = staging / name
+    try:
+        active = mdd_update.fetch_release_asset(
+            f"{base_url}/{name}", archive, name, routes, active,
+            asset_sizes=sizes, phase="relay_image")
+        mdd_update.verify_release_file(archive, sums, f"{arch} relay image")
+        mdd_update.load_relay_image(archive, version)
+    except Exception as exc:  # noqa: BLE001 - reported, never fails the update
+        print(f"media relay image not updated: {exc}", file=sys.stderr)
+    finally:
+        archive.unlink(missing_ok=True)
+    return active
+
+
+def remove_relay(client) -> None:
+    """After a rollback: the Control rolled back to may not know relay mode, and would leave
+    the relay's port open with nothing behind it. One that does recreates it within a minute.
+    Best effort: it must never turn a successful rollback into a failed one."""
+    try:
+        relay = client.containers.get(RELAY_CONTAINER)
+        labels = (relay.attrs.get("Config") or {}).get("Labels") or {}
+        if labels.get(MANAGED) == "true" and labels.get(COMPONENT) == "relay":
+            relay.remove(force=True, v=True)
+    except docker.errors.NotFound:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"could not remove the media relay after rollback: {exc}", file=sys.stderr)
+
+
 def perform(project: Path, version: str, repository: str, network_path: Path,
             status: mdd_update.Status) -> None:
     staging = Path(tempfile.mkdtemp(prefix="container-update.", dir=str(project / "update")))
@@ -397,6 +445,9 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
             run(["docker", "load", "--input", str(archives[component])], timeout=1800)
             image_ids[component] = verify_and_tag_image(
                 client, component, version, repository, targets[component])
+        if relay_mode(project):
+            active = fetch_relay_image(base_url, version, arch, sums, routes, active, sizes,
+                                       staging)
         verified_images = {
             component: {"reference": targets[component], "image_id": image_ids[component],
                         "archive_sha256": archive_digests[component]}
@@ -471,6 +522,7 @@ def perform(project: Path, version: str, repository: str, network_path: Path,
                         pass
                     recreate_engine(client, name)
                     wait_container(client, name, old_image_id, timeout=240)
+                remove_relay(client)
                 rollback_ok = True
             except Exception as rollback_exc:  # preserve both causes in the private status
                 rollback_error = str(rollback_exc)[:1000]

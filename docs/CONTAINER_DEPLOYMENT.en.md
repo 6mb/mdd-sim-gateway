@@ -175,6 +175,47 @@ The browser phone shares the WebUI origin and needs no separate WSS host port. R
 UDP 30000 by default; allow the assigned range between clients and the NAS when crossing VLANs or
 firewalls.
 
+### Call media modes
+
+> **Partly tested**: on a full-container stack on Debian 13 (x86_64, kernel 6.12) the following
+> were verified: enabling over `docker exec` and switching back to direct, the firewall probe, the
+> relay container, the Engine's network order and address choice, the media interface filter and
+> the TURN peer limits. IMS registration and browser calls in relay mode were verified on host
+> installs only (on that host the Hardware container could not take over the modem, so no line
+> registered on the stack). **It has not been run on a Synology NAS.**
+
+Call audio defaults to direct mode: each line publishes its own RTP ports (see above). It can
+be switched to relay mode instead, where a single coturn relay container carries all media and no
+Engine publishes any port. The relay container (`mdd-sim-gateway-relay`) and the internal media
+network it uses (`mdd-sim-gateway-media`) are both created and managed by Control on demand,
+**not by the Compose file** — `docker compose down`/`up` does not touch them.
+
+Switch it over SSH inside the Control container:
+
+```sh
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media status
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media direct
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media relay \
+    [--port N] [--bind ADDR] [--public-host HOST] [--public-port N]
+```
+
+The relay runs the unmodified upstream image `coturn/coturn:4.17.2-alpine`, pinned by digest.
+When it is not present, the first enable tries this release's copy on ghcr and then upstream on
+Docker Hub, and fails if neither can be reached. From then on every one-click update imports
+this release's relay image from the Release assets like the other images, over the same routes and
+checksums; a failed import does not fail the update and the relay keeps the image it has.
+
+Enabling creates the media network, checks in a throwaway Engine container that the kernel
+supports the required nftables rule (nf_tables and its socket match), and waits for the relay to
+answer a STUN request; any failure rolls back and leaves the mode unchanged. Synology DSM kernels
+are old (4.4 on a DS1621+) and very likely do not meet this, in which case enabling is refused with
+the reason and direct mode is unaffected. Switching rebuilds every running line one at a time.
+Once enabled, forward the relay port's UDP and TCP in any router or firewall in front of the NAS;
+behind a reverse proxy that port is not HTTP, so it needs a plain TCP/UDP forward of its own.
+
+A whole-stack rollback removes the relay container: a release that supports relay mode recreates it
+within a minute, and one that does not is not left with an open port and nothing behind it.
+
 ## 7. Persistent data, backup and certificates
 
 The configured data directory contains the SQLite database, messages, call records, settings,
@@ -237,6 +278,14 @@ fails with "Resource is still in use". When uninstalling over SSH, remove the En
 
 ```sh
 sudo docker ps -aq --filter "label=io.mdd-sim-gateway.component=engine" | xargs -r sudo docker rm -f
+```
+
+If relay mode was ever enabled, the relay container and the media network are not part of the
+project either; remove them too:
+
+```sh
+sudo docker rm -f mdd-sim-gateway-relay
+sudo docker network rm mdd-sim-gateway-media
 ```
 
 ## 9. Common problems
