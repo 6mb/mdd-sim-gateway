@@ -4411,6 +4411,8 @@ async def _unified_devices() -> list[dict]:
             "reader": card_info.get("name") or "", "instance_id": str(inst["id"]) if inst else None,
             "status": line_status,
             "logical_channels": logical_channels,
+            "custom_model": (None if is_native_reader
+                             else _custom_model_view(assignment, identity)),
             "sim": {"name": (((inst or {}).get("name")
                              or (cellular_view or {}).get("operator") or "SIM") if inst else ""),
                     "number": (inst or {}).get("msisdn") or "",
@@ -4471,6 +4473,126 @@ async def api_devices():
     # in the list yet. `discovering` lets the UI say so instead of reporting a confident zero.
     return {"devices": await _unified_devices(), "discovering": not hub.scanned,
             "shared": device_state.status().get("shared") or {}}
+
+
+# ------------------------------------------------------------ unrecognised USB modems
+# The host side (orchestrator or Hardware container) lists modem-like USB devices that match
+# no model and tests one on request; Control cannot see /sys and only relays.
+MODEM_PROBE_TIMEOUT = 60.0
+USB_CANDIDATES_MAX_AGE = 120.0
+
+
+def _orchestrator_path(*parts: str) -> str:
+    return os.path.join(cfg.DATA_DIR, "orchestrator", *parts)
+
+
+def _usb_candidates() -> list[dict]:
+    document = _read_json_file(_orchestrator_path("usb-candidates.json"))
+    try:
+        fresh = time.time() - float(document.get("updated_at") or 0) < USB_CANDIDATES_MAX_AGE
+    except (TypeError, ValueError):
+        fresh = False
+    candidates = document.get("candidates") if fresh else []
+    return [item for item in candidates or [] if isinstance(item, dict)]
+
+
+def _modem_profile_key(profile: dict) -> tuple[str, str]:
+    return (str(profile.get("vid") or "").lower(), str(profile.get("pid") or "").lower())
+
+
+def _custom_model_view(assignment: dict, identity: dict) -> dict | None:
+    """How the device page describes a model added through a probe, or None."""
+    key = _modem_profile_key(assignment)
+    profile = next((item for item in (cfg.get_settings().get("hardware") or {})
+                    .get("modem_profiles") or []
+                    if isinstance(item, dict) and item.get("source") == "probe"
+                    and _modem_profile_key(item) == key), None)
+    if not profile:
+        return None
+    # Saved without a SIM to test on: proven by the bridge opening its channels since.
+    verified = bool(profile.get("verified")) or identity.get("channel_status") == "ready"
+    return {"vid": key[0], "pid": key[1], "name": str(profile.get("name") or ""),
+            "verified": verified}
+
+
+def _write_modem_probe_request(candidate: dict) -> tuple[str, str]:
+    request_id = f"probe-{int(time.time() * 1000)}-{random.randrange(1_000_000):06d}"
+    request_dir = _orchestrator_path("modem-probe-requests")
+    os.makedirs(request_dir, mode=0o700, exist_ok=True)
+    path = os.path.join(request_dir, f"{request_id}.json")
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump({"request_id": request_id, "usb_path": candidate["usb_path"],
+                   "vid": candidate["vid"], "pid": candidate["pid"],
+                   "requested_at": time.time()}, handle)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return request_id, _orchestrator_path("modem-probe-status", f"{request_id}.json")
+
+
+def _save_probed_modem_profile(status: dict) -> dict:
+    hardware = dict(cfg.get_settings().get("hardware") or {})
+    key = (str(status["vid"]).lower(), str(status["pid"]).lower())
+    profiles = [item for item in hardware.get("modem_profiles") or []
+                if isinstance(item, dict) and _modem_profile_key(item) != key]
+    profile = {"name": str(status.get("name") or f"USB modem {key[0]}:{key[1]}")[:80],
+               "vid": key[0], "pid": key[1], "at_interface": int(status["at_interface"]),
+               "source": "probe", "verified": status.get("result") == "usable"}
+    hardware["modem_profiles"] = profiles + [profile]
+    cfg.update_settings({"hardware": hardware})
+    return profile
+
+
+@app.get("/api/hardware/usb-candidates")
+async def api_usb_candidates():
+    return {"candidates": [
+        {key: item.get(key) for key in ("usb_path", "vid", "pid", "manufacturer", "product")}
+        | {"serial_ports": len(item.get("interfaces") or {}),
+           "claimed_by_modemmanager": bool(item.get("mm_object"))}
+        for item in _usb_candidates()]}
+
+
+@app.post("/api/hardware/usb-candidates/{usb_path}/probe")
+async def api_probe_usb_candidate(usb_path: str):
+    """Test one unrecognised device and, if it can reach a SIM, add it as a model."""
+    candidate = next((item for item in _usb_candidates() if item.get("usb_path") == usb_path),
+                     None)
+    if candidate is None:
+        raise HTTPException(404, "this USB device is no longer listed")
+    request_id, status_path = await asyncio.to_thread(_write_modem_probe_request, candidate)
+    deadline = time.monotonic() + MODEM_PROBE_TIMEOUT
+    status: dict = {}
+    while time.monotonic() < deadline:
+        status = _read_json_file(status_path)
+        if status.get("request_id") == request_id and status.get("state") == "done":
+            break
+        await asyncio.sleep(.5)
+    else:
+        raise HTTPException(504, "the hardware service did not finish the test in time")
+    result = str(status.get("result") or "")
+    saved = None
+    if result in {"usable", "unverified"} and status.get("at_interface") is not None:
+        saved = await asyncio.to_thread(_save_probed_modem_profile, status)
+        egress.publish(settings=cfg.get_settings())
+    return {"result": result, "detail": status.get("detail") or "",
+            "steps": status.get("steps") or [], "saved": saved}
+
+
+@app.delete("/api/hardware/modem-profiles/{vid}/{pid}")
+async def api_delete_modem_profile(vid: str, pid: str):
+    """Remove a model added through a probe. Built-in models cannot be removed."""
+    key = (vid.lower(), pid.lower())
+    hardware = dict(cfg.get_settings().get("hardware") or {})
+    profiles = [item for item in hardware.get("modem_profiles") or [] if isinstance(item, dict)]
+    target = next((item for item in profiles if _modem_profile_key(item) == key), None)
+    if target is None:
+        raise HTTPException(404, "no such modem model")
+    if target.get("source") != "probe":
+        raise HTTPException(400, "built-in modem models cannot be removed")
+    hardware["modem_profiles"] = [item for item in profiles if item is not target]
+    cfg.update_settings({"hardware": hardware})
+    egress.publish(settings=cfg.get_settings())
+    return {"removed": {"vid": key[0], "pid": key[1]}}
 
 
 @app.post("/api/devices/{device_id}/sim/reread")

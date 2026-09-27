@@ -101,6 +101,10 @@ export const api = {
   getDeviceVoiceAudio: (id) => j('GET', `/api/devices/${encodeURIComponent(id)}/voice-audio`),
   setDeviceIms: (id, enabled) => j('PUT', `/api/devices/${encodeURIComponent(id)}/ims`, { enabled }),
   deleteDevice: (id) => j('DELETE', `/api/devices/${encodeURIComponent(id)}`),
+  // Modem-like USB devices no configured model matches, tested only when asked.
+  usbCandidates: () => j('GET', '/api/hardware/usb-candidates'),
+  probeUsbCandidate: (usbPath) => j('POST', `/api/hardware/usb-candidates/${encodeURIComponent(usbPath)}/probe`, {}),
+  deleteModemProfile: (vid, pid) => j('DELETE', `/api/hardware/modem-profiles/${encodeURIComponent(vid)}/${encodeURIComponent(pid)}`),
   readers: () => j('GET', '/api/readers'),
   detect: (i = 0) => j('GET', `/api/sim/detect?reader_index=${i}`),
   // `reader` (PC/SC reader NAME) lets the backend re-resolve the index at request time —
