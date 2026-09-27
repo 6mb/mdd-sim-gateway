@@ -246,6 +246,9 @@ def init():
                     ts INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_msg_inst_peer ON messages(instance, peer, ts);
+                -- What unread_counts walks: a line's inbound messages in arrival order, so
+                -- counting what is new reads only those rows, not the line's whole history.
+                CREATE INDEX IF NOT EXISTS idx_msg_inst_dir_id ON messages(instance, direction, id);
                 -- The identity of every message ever stored, kept when the message itself is
                 -- deleted: a text the modem still holds, or a carrier re-delivery, must not
                 -- bring back what the user removed. `fingerprint` is exact (network timestamp
@@ -2964,6 +2967,9 @@ def unread_counts(owner: int, instance: str) -> dict[str, int]:
 
     An outbound message is never unread -- it was sent from here. A conversation with nothing
     unread is absent rather than zero, so the caller can treat the map as the set of unread ones.
+
+    Known gap: a late part of a long SMS is joined into the message it belongs to and keeps
+    that message's id, so if the message was already read, the text it gains is not unread.
     """
     with _lock, _conn() as c:
         rows = c.execute(

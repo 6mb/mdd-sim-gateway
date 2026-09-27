@@ -52,6 +52,15 @@ class ReadStateTests(unittest.TestCase):
         self.arrive("after the upgrade")
         self.assertEqual(store.unread_counts(store.ADMIN_OWNER, LINE), {PEER: 1})
 
+    def test_counting_what_is_unread_reads_only_the_new_inbound_messages(self):
+        # The query runs on every arriving message and every open tab, under the store's lock;
+        # without this index it walks the line's whole history each time.
+        with store._conn() as c:
+            plan = " ".join(str(tuple(row)) for row in c.execute(
+                "EXPLAIN QUERY PLAN SELECT id FROM messages "
+                "WHERE instance=? AND direction='in' AND id>?", (LINE, 0)))
+        self.assertIn("idx_msg_inst_dir_id", plan)
+
     def test_a_conversation_starts_unread_and_stops_being_so_when_read(self):
         self.arrive()
         self.arrive("and another")
