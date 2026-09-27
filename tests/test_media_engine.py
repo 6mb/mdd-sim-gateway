@@ -191,6 +191,35 @@ class EngineAddressTests(unittest.TestCase):
                          ("172.18.0.5", "172.18.0.5", "172.30.0.3"))
 
 
+class SoftphoneListenerAddressTests(unittest.TestCase):
+    """#195: a line going direct joins the uplink after start. Its default route then makes
+    local_addr the uplink address, but the relay connects on the Engine network."""
+
+    def context(self, engine_subnet, addresses):
+        module = engine_render()
+        cfg = instance_json()
+        cfg["local_addr"] = "172.19.0.3"
+        if engine_subnet:
+            cfg["engine_subnet"] = engine_subnet
+
+        def interface(subnet):
+            return addresses.get(subnet, ("", ""))
+
+        with patch.object(module, "media_interface", side_effect=interface):
+            return module.build_context(cfg)
+
+    def test_direct_line_listens_on_the_engine_network_not_the_uplink(self):
+        ctx = self.context("172.21.0.0/16", {"172.21.0.0/16": ("eth0", "172.21.0.4")})
+        self.assertEqual(ctx["webrtc_ws_addr"], "172.21.0.4")
+        # IKE and the IMS leg still leave through the uplink.
+        self.assertEqual((ctx["local_addr"], ctx["rtp_bind_addr"]), ("172.19.0.3", "172.19.0.3"))
+
+    def test_without_an_engine_network_the_listener_stays_on_the_bridge_address(self):
+        for subnet, addresses in (("", {}), ("172.21.0.0/16", {})):
+            with self.subTest(subnet=subnet):
+                self.assertEqual(self.context(subnet, addresses)["webrtc_ws_addr"], "172.19.0.3")
+
+
 class MediaInstanceJsonTests(unittest.TestCase):
     def instance(self, **extra):
         return {"id": "3", "index": 1, "imsi": "001010000000000", "mcc": "001", "mnc": "01",
@@ -201,6 +230,11 @@ class MediaInstanceJsonTests(unittest.TestCase):
         rendered = config.render_instance_json(self.instance(), {})
         self.assertNotIn("media", rendered)
         self.assertEqual(rendered["rtp_start"], config._alloc_ports(1)["rtp_start"])
+
+    def test_the_engine_subnet_reaches_the_engine_only_when_set(self):
+        self.assertNotIn("engine_subnet", config.render_instance_json(self.instance(), {}))
+        rendered = config.render_instance_json(self.instance(engine_subnet="172.21.0.0/16"), {})
+        self.assertEqual(rendered["engine_subnet"], "172.21.0.0/16")
 
     def test_relay_mode_uses_the_shared_range_and_keeps_the_saved_block(self):
         inst = self.instance(media=RELAY)
@@ -318,8 +352,10 @@ class MediaEngineContainerTests(unittest.TestCase):
                 order.append("create")
                 return container
 
-        client = SimpleNamespace(containers=Containers(),
-                                 networks=SimpleNamespace(get=lambda name: uplink))
+        engine_network = SimpleNamespace(attrs={"IPAM": {"Config": [
+            {"Subnet": "fd00:21::/64"}, {"Subnet": "172.21.0.0/16"}]}})
+        client = SimpleNamespace(containers=Containers(), networks=SimpleNamespace(
+            get=lambda name: engine_network if name == "mdd-sim-gateway-engine" else uplink))
         with tempfile.TemporaryDirectory() as temp, \
                 patch.object(engine, "_client", lambda: client), \
                 patch.object(engine, "ENGINE_NETWORK", "mdd-sim-gateway-engine"), \
@@ -329,9 +365,10 @@ class MediaEngineContainerTests(unittest.TestCase):
                 patch.object(engine.egress, "ensure_line", lambda i, s: None), \
                 patch.object(engine.media, "engine_attachment",
                              return_value={"network": media_network, "instance": RELAY}), \
-                patch.object(engine.cfg, "write_instance_json"):
+                patch.object(engine.cfg, "write_instance_json") as write:
             engine.start({"id": "sim1", "ports": {"rtp_start": 30000, "rtp_span": 12}}, {})
         self.assertEqual(order, ["create", "media", "start", "uplink"])
+        self.assertEqual(write.call_args[0][0]["engine_subnet"], "172.21.0.0/16")
         self.assertEqual(created["network"], "mdd-sim-gateway-engine")
         self.assertEqual(created["ports"], {})
 

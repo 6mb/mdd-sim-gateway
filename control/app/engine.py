@@ -142,6 +142,25 @@ def _engine_network_is_internal(client) -> bool:
     return _internal_networks[ENGINE_NETWORK]
 
 
+def _engine_network_subnet(client) -> str:
+    """The Engine network's IPv4 subnet, or "" when there is none or it cannot be read.
+
+    The relay (softphone_ws) reaches each engine on this network, but a line going direct also
+    joins the uplink, which then holds the default route, and the engine's own address probe
+    lands there (#195). The engine binds its softphone listener inside this subnet instead."""
+    if not ENGINE_NETWORK:
+        return ""
+    try:
+        for entry in ((client.networks.get(ENGINE_NETWORK).attrs or {}).get("IPAM")
+                      or {}).get("Config") or []:
+            subnet = ipaddress.ip_network(entry.get("Subnet") or "")
+            if subnet.version == 4:
+                return str(subnet)
+    except Exception as exc:  # noqa: BLE001 - the engine falls back to its probed address
+        log.warning("engine network %s subnet unreadable: %s", ENGINE_NETWORK, exc)
+    return ""
+
+
 def reconcile_rtp_forward(client=None, exclude: str = "") -> None:
     """Keep the RTP forwarder (rtp_forward.py) in step with the lines behind an exit. Best
     effort: a line's registration and SMS never depend on it."""
@@ -475,6 +494,9 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
     media_attachment = media.engine_attachment(client)
     if media_attachment is not None:
         rendered_inst = {**rendered_inst, "media": media_attachment["instance"]}
+    engine_subnet = _engine_network_subnet(client)
+    if engine_subnet:
+        rendered_inst = {**rendered_inst, "engine_subnet": engine_subnet}
     cfg.write_instance_json(rendered_inst, settings)
     base, host_base = _instance_paths(iid)
     ports = inst.get("ports", {})

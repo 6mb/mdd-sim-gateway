@@ -1160,6 +1160,10 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         rendered["media"] = dict(relay)
         rendered["rtp_start"] = relay["rtp_start"]
         rendered["rtp_end"] = relay["rtp_end"]
+    # The Engine network the control surface relays the softphone over (engine.start, one-run
+    # copy). Absent outside the container stack.
+    if inst.get("engine_subnet"):
+        rendered["engine_subnet"] = inst["engine_subnet"]
     return rendered
 
 
