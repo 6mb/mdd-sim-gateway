@@ -45,6 +45,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   without it, so the engines fell back to the default MTU and a carrier that drops fragments
   never answered registration. `SWU_TUN_MTU=default ./install.sh reload` drops a carried-over
   value, and a value outside 1280–1500 is ignored with a warning.
+- A modem that ModemManager put in state "failed" (seen as `unknown-capabilities` after
+  ModemManager restarted mid-probe) is no longer asked to enable every cycle and left marked
+  as starting. The orchestrator reboots the module when that can help, after a minute and at
+  most three times, spaced out. The cellular badge says what happened, and VoWiFi, which
+  keeps working through the SIM bridge, is no longer shown as starting.
 
 ### Security
 
