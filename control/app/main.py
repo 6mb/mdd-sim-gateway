@@ -1703,6 +1703,7 @@ async def media_supervisor():
                 last_supervise = time.monotonic()
                 last_state_mtime = state_mtime
                 await asyncio.to_thread(media.supervise)
+                await asyncio.to_thread(engine.reconcile_rtp_forward)
             await _media_converge_once()
         except Exception as exc:  # noqa: BLE001 - supervision must never stop
             log.warning("media supervision failed: %s", exc)

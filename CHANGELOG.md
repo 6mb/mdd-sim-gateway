@@ -61,6 +61,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- On the container stack, the browser softphone had no audio on a line behind a country exit.
+  Such a line is only on the internal Engine network, and Docker publishes no port there, so its
+  RTP ports were never reachable. Control now runs a small `mdd-sim-gateway-rtp-forward`
+  container from its own image that publishes those ranges and relays UDP to the line. The
+  Engine's networks and routes are unchanged, so nothing it sends can bypass the exit. A line
+  created before this version is forwarded once it is rebuilt (an update does that).
+
 - On the container stack, a modem ModemManager cannot claim is no longer reset every few
   minutes for good. Each reset took that SIM's VoWiFi down for a minute or more. The resets now
   double their spacing and stop after three, none is made while flight mode is on, and the count

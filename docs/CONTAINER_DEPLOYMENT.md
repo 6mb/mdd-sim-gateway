@@ -164,6 +164,11 @@ https://NAS_LAN_IP:10443/
 `30000` 开始动态分配；若跨 VLAN 或经过防火墙使用通话功能，需要允许客户端与 NAS 之间的
 对应 UDP 流量。
 
+走国家出口（SOCKS）的线路只接在 internal 的 Engine 网络上，Docker 不会为它发布端口。
+这类线路的 RTP 由 Control 自动创建的 `mdd-sim-gateway-rtp-forward` 容器代为发布并转发：
+它使用 Control 镜像，不需要额外下载；只转发 UDP，而且只把 Engine 的回包送回发起这路通话的
+浏览器地址，Engine 本身不会因此获得任何对外路由。没有走出口的线路时不会创建这个容器。
+
 ### 通话媒体模式
 
 > **部分实测**：在 Debian 13（x86_64，内核 6.12）的全容器栈上验证过：用 `docker exec` 启用和
