@@ -177,12 +177,36 @@ jobs:
             docker save --output "$image_tar" "$local_image" "$local_image:${GITHUB_REF_NAME}"
             gzip -1 "$image_tar"
           done
+      # The optional media relay (relay media mode) is upstream coturn, unmodified. Ship the
+      # exact image control/app/media.py pins, so a gateway that cannot reach Docker Hub still
+      # gets it the way it gets every other image: as a checksummed Release asset.
+      - name: Mirror the media relay image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          upstream=$(python3 -c "import re;print(''.join(re.search(r'UPSTREAM_IMAGE = \(([^)]*)\)', open('control/app/media.py').read()).group(1).replace('\"', '').split()))")
+          case "$upstream" in coturn/coturn:*@sha256:*) ;; *) echo "unexpected relay image: $upstream" >&2; exit 1 ;; esac
+          owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          local_image="mdd-sim-gateway/relay:${GITHUB_REF_NAME}"
+          architecture_image="ghcr.io/$owner/mdd-sim-gateway-relay:${GITHUB_REF_NAME}-${{ matrix.arch }}"
+          docker pull --platform "linux/${{ matrix.arch }}" "$upstream"
+          docker tag "$upstream" "$local_image"
+          docker tag "$upstream" "$architecture_image"
+          test "$(docker image inspect "$local_image" --format '{{.Architecture}}')" = "${{ matrix.arch }}"
+          docker run --rm --entrypoint sh "$local_image" -c \
+            'command -v turnserver turnutils_stunclient ip awk >/dev/null'
+          docker push "$architecture_image"
+          image_tar="mdd-sim-gateway-relay-${GITHUB_REF_NAME}-${{ matrix.arch }}.tar"
+          docker save --output "$image_tar" "$local_image"
+          gzip -1 "$image_tar"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-images-${{ matrix.arch }}
           path: |
             mdd-sim-gateway-hardware-v*-${{ matrix.arch }}.tar.gz
             mdd-sim-gateway-egress-v*-${{ matrix.arch }}.tar.gz
+            mdd-sim-gateway-relay-v*-${{ matrix.arch }}.tar.gz
           compression-level: 0
           if-no-files-found: error
 
@@ -263,7 +287,7 @@ jobs:
           set -eu
           owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          for component in engine control hardware egress; do
+          for component in engine control hardware egress relay; do
             registry_image="ghcr.io/$owner/mdd-sim-gateway-$component"
             docker buildx imagetools create \
               --tag "$registry_image:${GITHUB_REF_NAME}" \
@@ -322,6 +346,8 @@ jobs:
             "mdd-sim-gateway-hardware-${GITHUB_REF_NAME}-amd64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-arm64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-amd64.tar.gz" \
+            "mdd-sim-gateway-relay-${GITHUB_REF_NAME}-arm64.tar.gz" \
+            "mdd-sim-gateway-relay-${GITHUB_REF_NAME}-amd64.tar.gz" \
             > "$root/engine/release-image.SHA256SUMS"
           tar -czf "$archive" -C "$staging" "mdd-sim-gateway-${GITHUB_REF_NAME}"
           sha256sum "$archive" \
@@ -334,6 +360,8 @@ jobs:
             "mdd-sim-gateway-hardware-${GITHUB_REF_NAME}-amd64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-arm64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-amd64.tar.gz" \
+            "mdd-sim-gateway-relay-${GITHUB_REF_NAME}-arm64.tar.gz" \
+            "mdd-sim-gateway-relay-${GITHUB_REF_NAME}-amd64.tar.gz" \
             "mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz" > SHA256SUMS
       - name: Publish GitHub Release
         env:
@@ -359,6 +387,8 @@ jobs:
             "mdd-sim-gateway-hardware-${GITHUB_REF_NAME}-amd64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-arm64.tar.gz" \
             "mdd-sim-gateway-egress-${GITHUB_REF_NAME}-amd64.tar.gz" \
+            "mdd-sim-gateway-relay-${GITHUB_REF_NAME}-arm64.tar.gz" \
+            "mdd-sim-gateway-relay-${GITHUB_REF_NAME}-amd64.tar.gz" \
             "mdd-driver-synology-ds1621plus-dsm7.4.1-90080-k4.4.302plus-x86_64.tar.gz" \
             SHA256SUMS \
             --verify-tag --notes-file "$notes_file" --title "MDD Sim Gateway ${GITHUB_REF_NAME}" \
