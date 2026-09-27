@@ -266,14 +266,29 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   useEffect(() => subscribe((msg) => {
     if (msg.type === 'sms' && msg.instance === id) {
       // A message arriving in the conversation on screen is read as it arrives; counting it as
-      // unread would badge something the reader is looking at.
+      // unread would badge something the reader is looking at. Only while the page is visible:
+      // in a background tab or behind a locked screen nobody sees it, so it stays unread until
+      // the page is looked at again (below).
       const onScreen = peer && msg.message?.direction === 'in' && msg.message?.peer === peer
+        && document.visibilityState === 'visible'
       const marked = onScreen ? api.markThreadRead(id, { peer }).catch(() => {}) : Promise.resolve()
       marked.then(() => { loadThreads(); if (onScreen) refreshUnread?.() })
       loadBinary()
       if (peer) loadMsgs(peer)
     }
   }), [subscribe, id, peer, loadThreads, loadMsgs, loadBinary, refreshUnread])
+
+  // Coming back to a page left on a conversation reads what arrived there in the meantime.
+  useEffect(() => {
+    if (!peer) return undefined
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible' || !unreadRef.current[peer]) return
+      setUnread((current) => { const next = { ...current }; delete next[peer]; return next })
+      api.markThreadRead(id, { peer }).then(() => refreshUnread?.()).catch(() => {})
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [id, peer, refreshUnread])
 
   const markAllRead = async () => {
     setUnread({})
