@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import os
 import random
@@ -19,6 +20,39 @@ from PIL import Image
 from control.app import main, mms, mms_convert, mms_pdu, mms_staging, store
 
 TO = ["+447700900123"]
+
+
+# A 320x240 HEIC made with pillow-heif's encoder. The gateway installs pi-heif, which only
+# decodes, so the tests cannot make one of their own.
+TINY_HEIC = base64.b64decode(
+    "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"
+)
 
 
 def photo(width=3000, height=2000, fmt="JPEG", mode="RGB", **options) -> bytes:
@@ -123,8 +157,9 @@ class ImageFitTests(unittest.TestCase):
                                         ("HEIF", "image/heic", "IMG_2.HEIC"),
                                         ("AVIF", "image/avif", "a.avif")):
             with self.subTest(fmt):
+                data = TINY_HEIC if fmt == "HEIF" else photo(320, 240, fmt)
                 fitted, problem, summary = fit([{"name": name, "content_type": content_type,
-                                                 "data": photo(320, 240, fmt)}], 600 * 1024)
+                                                 "data": data}], 600 * 1024)
                 self.assertIsNone(problem)
                 self.assertEqual(fitted[0]["content_type"], "image/jpeg")
                 self.assertTrue(fitted[0]["name"].endswith(".jpg"))
@@ -199,7 +234,7 @@ class ImageFitTests(unittest.TestCase):
 
     def test_the_fitted_message_packages_with_a_valid_smil(self):
         fitted, _problem, _summary = fit([{"name": "p.heic", "content_type": "image/heic",
-                                           "data": photo(800, 600, "HEIF")}], 300 * 1024)
+                                           "data": TINY_HEIC}], 300 * 1024)
         request = mms.build_request("0" * 20, TO, "", mms._compose_parts("hi", fitted))
         pdu = mms_pdu.decode_pdu(request)
         mms_pdu.check_smil(pdu.parts[0], pdu.parts[1:])

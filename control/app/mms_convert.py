@@ -24,11 +24,13 @@ try:
 except ImportError:  # pragma: no cover - the control requirements install Pillow
     Image = ImageOps = None
 try:
-    import pillow_heif
+    # pi-heif is the decode-only build of pillow-heif (same author, same plugin API): reading
+    # HEIC is all MMS needs, and it leaves out the x265 encoder and its GPL.
+    import pi_heif
 except ImportError:  # pragma: no cover - HEIC/HEIF is then simply not convertible
-    pillow_heif = None
+    pi_heif = None
 else:
-    pillow_heif.register_heif_opener()
+    pi_heif.register_heif_opener()
 
 # A picture this large is not a photo anyone means to send by MMS; refusing it also keeps a
 # crafted file from making the decoder allocate gigabytes.
@@ -74,7 +76,7 @@ class ImageConverter:
         if Image is None:
             return False
         if content_type in ("image/heic", "image/heif"):
-            return pillow_heif is not None
+            return pi_heif is not None
         return content_type in ("image/jpeg", "image/png", "image/gif", "image/webp",
                                 "image/bmp", "image/avif")
 

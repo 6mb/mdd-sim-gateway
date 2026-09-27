@@ -1,6 +1,6 @@
 """install.sh: a reload stops when the control plane's Python dependencies are not usable.
 
-The picture conversion added for MMS needs Pillow and pillow-heif, which carry native
+The picture conversion added for MMS needs Pillow and pi-heif, which carry native
 libraries. The control plane starts without them on purpose -- conversion then simply does
 not happen -- so the installer is the only place that can tell an operator their reload did
 not give them what the release says it does.

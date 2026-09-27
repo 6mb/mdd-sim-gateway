@@ -20,9 +20,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   (about 5 MB installed instead of 46 MB), with no dependencies and no native code. It comes
   with the new control image; nothing needs installing on the host.
 
-- **The control plane gains two Python packages**, Pillow and pillow-heif, for converting MMS
-  pictures on the gateway. `install.sh reload` installs them from prebuilt wheels (amd64 and
-  arm64); a host that reloads offline needs them available first. A reload that cannot install
+- **The control plane gains two Python packages**, Pillow and pi-heif (the decode-only build of
+  pillow-heif), for converting MMS pictures on the gateway. The control image carries them; on
+  a host install `install.sh reload` installs them from prebuilt wheels (amd64 and arm64), and
+  a host that reloads offline needs them available first. A reload that cannot install
   them, or that installs them but cannot import them, stops before anything is restarted
   rather than coming up with picture conversion silently off.
 
