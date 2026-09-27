@@ -1657,18 +1657,30 @@ async def _media_converge_once() -> bool:
                                     cfg.get_settings(),
                                     os.environ.get("MDD_DEV_MOUNTS", "") == "1", "media_mode")
         except Exception as exc:  # noqa: BLE001 - this line waits, the others go on
-            failures = int(retry.get("failures", 0)) + 1
-            delay = min(MEDIA_RETRY_MAX_SECONDS, MEDIA_RETRY_FIRST_SECONDS * 2 ** (failures - 1))
-            _media_retry[iid] = {"at": now + delay, "failures": failures}
-            log.warning("line %s: media mode rebuild failed, retrying in %ds: %s",
-                        iid, delay, exc)
+            _media_back_off(iid, retry, now, exc)
             continue
-        _media_retry.pop(iid, None)
         # The old container is gone only now; its AMI connection goes with it.
         await hub.drop_ami(iid)
         hub.reset_health(iid, "configuration_restart")
+        started = await asyncio.to_thread(engine.media_mode_of, iid)
+        if started is not None and started != wanted:
+            # Started, but not in the wanted mode: relay-pending, because the media network
+            # could not be prepared. That start succeeded, so without this the line would be
+            # rebuilt, and made to register again, on every pass for as long as the cause
+            # lasts. It waits like a failure instead.
+            _media_back_off(iid, retry, now, f"started as {started}")
+        else:
+            _media_retry.pop(iid, None)
         return True
     return False
+
+
+def _media_back_off(iid: str, retry: dict, now: float, reason) -> None:
+    failures = int(retry.get("failures", 0)) + 1
+    delay = min(MEDIA_RETRY_MAX_SECONDS, MEDIA_RETRY_FIRST_SECONDS * 2 ** (failures - 1))
+    _media_retry[iid] = {"at": now + delay, "failures": failures}
+    log.warning("line %s: not in the recorded media mode, retrying in %ds: %s",
+                iid, delay, reason)
 
 
 async def media_supervisor():

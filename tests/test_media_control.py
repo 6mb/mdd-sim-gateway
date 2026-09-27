@@ -24,7 +24,9 @@ class MediaControlTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def converge(self, modes, failing=(), now=1000.0):
+    def converge(self, modes, failing=(), now=1000.0, pending=()):
+        """One pass. A line that starts lands in the recorded mode, or relay-pending when
+        it is in ``pending`` (the media network could not be prepared)."""
         lines = [{"id": iid} for iid in modes]
         started, order = [], []
 
@@ -33,6 +35,7 @@ class MediaControlTests(unittest.TestCase):
             if inst["id"] in failing:
                 raise RuntimeError("exit unavailable")
             started.append((inst["id"], args))
+            modes[inst["id"]] = media.RELAY_PENDING if inst["id"] in pending else media.mode()
 
         async def drop_ami(iid):
             order.append(("drop_ami", iid))
@@ -95,6 +98,29 @@ class MediaControlTests(unittest.TestCase):
         main._media_retry["1"] = {"at": 0.0, "failures": 9}
         self.converge({"1": "direct"}, failing={"1"})
         self.assertEqual(main._media_retry["1"]["at"], 1000.0 + main.MEDIA_RETRY_MAX_SECONDS)
+
+    def test_a_line_left_pending_is_not_rebuilt_on_every_pass(self):
+        """Review of #181: a start that lands in relay-pending succeeded, so the line used to
+        be rebuilt, and re-register, every 15 s for as long as the network could not be had."""
+        self.setUp_retry()
+        media.save_state({"mode": "relay", "secret": "x"})
+        modes = {"1": "direct"}
+        rebuilds = []
+        for second in range(0, 60, 15):                    # four passes, 15 s apart
+            _rebuilt, started, order = self.converge(modes, pending={"1"},
+                                                     now=1000.0 + second)
+            rebuilds += started
+            if started:
+                self.assertIn(("drop_ami", "1"), order)   # its old container is gone
+        self.assertEqual(len(rebuilds), 1)
+        self.assertEqual(main._media_retry["1"]["failures"], 1)
+        _rebuilt, started, _order = self.converge(modes, pending={"1"}, now=1061.0)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(main._media_retry["1"]["failures"], 2)
+        # Once the network can be had the line lands in relay mode and its backoff is gone.
+        _rebuilt, started, _order = self.converge(modes, now=1061.0 + 121)
+        self.assertEqual((len(started), modes["1"]), (1, "relay"))
+        self.assertNotIn("1", main._media_retry)
 
     def test_a_line_started_without_the_media_network_is_tried_again(self):
         self.setUp_retry()
