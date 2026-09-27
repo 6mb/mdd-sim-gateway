@@ -32,16 +32,16 @@ class FailedModemTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def apply(self, snapshot):
+    def apply(self, snapshot, wanted=WANTED, reboot_error=None):
         calls = []
         stub = SimpleNamespace(returncode=0, stdout="", stderr="")
         with patch.object(self.app, "modemmanager_modem_for_tty", return_value="/mm/0"), \
                 patch.object(self.app, "modem_snapshot", return_value=dict(snapshot)), \
-                patch.object(self.app, "reboot_modem") as reboot, \
+                patch.object(self.app, "reboot_modem", side_effect=reboot_error) as reboot, \
                 patch("host.mdd_orchestrator.serial", SimpleNamespace()), \
                 patch("host.mdd_orchestrator.run",
                       side_effect=lambda args, **k: calls.append(args) or stub):
-            self.app.apply_device_radios([MODEM], WANTED, through_modemmanager=True)
+            self.app.apply_device_radios([MODEM], wanted, through_modemmanager=True)
         return calls, reboot
 
     def failed(self, reason="unknown-capabilities"):
@@ -54,7 +54,7 @@ class FailedModemTests(unittest.TestCase):
         state = self.app.cellular_states["a"]
         self.assertEqual(state["state"], "failed")
         self.assertEqual(state["failure"], {"reason": "unknown-capabilities",
-                                            "resettable": True, "resets": 0,
+                                            "resettable": True, "resets": 0, "rebooted": 0,
                                             "exhausted": False})
 
     def test_the_module_is_rebooted_after_a_grace_period_spaced_out_and_bounded(self):
@@ -64,12 +64,34 @@ class FailedModemTests(unittest.TestCase):
         reboots = 0
         for _ in range(10):
             record["since"] -= mdd_orchestrator.MM_FAILED_GRACE_SECONDS
-            if record["last_reset"]:
+            if record["last_reset"] is not None:
                 record["last_reset"] -= mdd_orchestrator.MM_RESET_BACKOFF_SECONDS * 8
             _calls, reboot = self.apply(self.failed())
             reboots += reboot.call_count
         self.assertEqual(reboots, mdd_orchestrator.MM_RESET_ATTEMPTS)
         self.assertTrue(self.app.cellular_states["a"]["failure"]["exhausted"])
+
+    def test_flight_mode_records_the_failure_but_never_reboots(self):
+        flight = {"a": {**WANTED["a"], "flight_mode": True}}
+        self.apply(self.failed(), wanted=flight)
+        self.app._modem_failed["a"]["since"] -= 10 * mdd_orchestrator.MM_FAILED_GRACE_SECONDS
+        _calls, reboot = self.apply(self.failed(), wanted=flight)
+        reboot.assert_not_called()
+        self.assertEqual(self.app.cellular_states["a"]["failure"]["resets"], 0)
+        _calls, reboot = self.apply(self.failed())   # flight mode off again
+        reboot.assert_called_once()
+
+    def test_reboots_that_could_not_be_sent_are_told_apart(self):
+        self.apply(self.failed())
+        record = self.app._modem_failed["a"]
+        for _ in range(mdd_orchestrator.MM_RESET_ATTEMPTS):
+            record["since"] -= mdd_orchestrator.MM_FAILED_GRACE_SECONDS
+            if record["last_reset"] is not None:
+                record["last_reset"] -= mdd_orchestrator.MM_RESET_BACKOFF_SECONDS * 8
+            self.apply(self.failed(), reboot_error=OSError("port busy"))
+        failure = self.app.cellular_states["a"]["failure"]
+        self.assertEqual((failure["exhausted"], failure["resets"], failure["rebooted"]),
+                         (True, mdd_orchestrator.MM_RESET_ATTEMPTS, 0))
 
     def test_the_next_reboot_waits_for_the_backoff(self):
         self.apply(self.failed())
@@ -118,9 +140,10 @@ class FailedModemTests(unittest.TestCase):
 
     def test_a_rebooting_module_keeps_its_count_while_its_ports_are_gone(self):
         self.app._modem_failed = {"a": {"reason": "unknown-capabilities", "since": 0.0,
-                                        "resets": 2, "last_reset": time.time()},
+                                        "resets": 2, "rebooted": 2,
+                                        "last_reset": time.monotonic()},
                                   "b": {"reason": "unknown-capabilities", "since": 0.0,
-                                        "resets": 1, "last_reset": 0.0}}
+                                        "resets": 0, "rebooted": 0, "last_reset": None}}
         self.app.forget_absent_modem_failures(set())
         self.assertIn("a", self.app._modem_failed)
         self.assertNotIn("b", self.app._modem_failed)
@@ -134,7 +157,7 @@ class FailedModemWordingTests(unittest.TestCase):
         sentences = ["".join(re.findall(r'"([^"]*)"', part))
                      for part in re.split(r"\bif\b|\belse\b", block.split("cell_reason = (")[1])]
         sentences = [s for s in sentences if s.startswith("ModemManager")]
-        self.assertEqual(len(sentences), 3)
+        self.assertEqual(len(sentences), 4)
         i18n = (ROOT / "webui" / "src" / "i18n.jsx").read_text(encoding="utf-8")
         zh = i18n[i18n.index("const zh"):i18n.index("const en")]
         for sentence in sentences:

@@ -63,6 +63,7 @@ const zh = {
   'ModemManager could not start this modem. Check the SIM.': 'ModemManager 无法启动此模组，请检查 SIM 卡。',
   'ModemManager could not start this modem, and rebooting it did not help. Reconnect the modem or restart the host.': 'ModemManager 无法启动此模组，重启模组也没有恢复。请重新连接模组或重启主机。',
   'ModemManager could not start this modem. It is being rebooted.': 'ModemManager 无法启动此模组，正在重启模组。',
+  'ModemManager could not start this modem, and it could not be rebooted. Reconnect the modem or restart the host.': 'ModemManager 无法启动此模组，且无法向模组发送重启命令。请重新连接模组或重启主机。',
   'Detecting card readers…': '正在检测读卡器…', 'No PC/SC smart-card reader found': '未找到 PC/SC 智能卡读卡器',
   'Connect a USB smart-card reader with your SIM inserted — it is detected automatically and this page updates in real time. Softphone, Messages and SIM Config are disabled until a reader is present.': '请连接已插入 SIM 卡的 USB 智能卡读卡器。系统会自动检测并实时更新；在检测到读卡器前，软电话、短信和 SIM 配置不可用。',
   'No card readers detected. Plug in a PC/SC reader and insert a SIM.': '未检测到读卡器。请连接 PC/SC 读卡器并插入 SIM 卡。',
