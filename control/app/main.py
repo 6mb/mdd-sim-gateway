@@ -1675,12 +1675,21 @@ async def media_supervisor():
     """Keep the relay running in relay mode and move running lines to the recorded mode.
 
     The mode is switched outside this process (python -m app.media), so it is read from its
-    file on every pass rather than cached."""
+    file on every pass rather than cached. A change to that file is acted on at the next pass
+    instead of waiting for the next periodic check, so the relay counts as ready within
+    MEDIA_CONVERGE_SECONDS of a switch."""
     last_supervise = 0.0
+    last_state_mtime = None
     while True:
         try:
-            if time.monotonic() - last_supervise >= MEDIA_SUPERVISE_SECONDS:
+            try:
+                state_mtime = os.stat(media._state_path()).st_mtime
+            except OSError:
+                state_mtime = None
+            if (state_mtime != last_state_mtime
+                    or time.monotonic() - last_supervise >= MEDIA_SUPERVISE_SECONDS):
                 last_supervise = time.monotonic()
+                last_state_mtime = state_mtime
                 await asyncio.to_thread(media.supervise)
             await _media_converge_once()
         except Exception as exc:  # noqa: BLE001 - supervision must never stop
