@@ -1,4 +1,5 @@
 import base64
+import json
 import hashlib
 import hmac
 import importlib
@@ -20,7 +21,8 @@ def _docker():
     return SimpleNamespace(
         from_env=lambda **_: None,
         errors=SimpleNamespace(NotFound=not_found,
-                               ImageNotFound=type("ImageNotFound", (not_found,), {})),
+                               ImageNotFound=type("ImageNotFound", (not_found,), {}),
+                               APIError=type("APIError", (Exception,), {})),
     )
 
 
@@ -65,8 +67,9 @@ class _Container:
         self.removed = False
         self.started = False
 
-    def remove(self, force=False):
+    def remove(self, force=False, v=False):
         self.removed = True
+        self.volumes_removed = v
 
     def start(self):
         self.started = True
@@ -127,6 +130,12 @@ class MediaRelayTests(unittest.TestCase):
         patcher = patch.object(self.media.cfg, "DATA_DIR", self.tmp.name)
         patcher.start()
         self.addCleanup(patcher.stop)
+        host = patch.object(self.media._test_engine, "HOST_DATA_DIR", "/host/data")
+        host.start()
+        self.addCleanup(host.stop)
+        engine_module = patch.dict(sys.modules, {"control.app.engine": self.media._test_engine})
+        engine_module.start()
+        self.addCleanup(engine_module.stop)
 
     def test_no_recorded_mode_is_direct_and_hands_out_no_ice_servers(self):
         self.assertEqual(self.media.mode(), "direct")
@@ -191,9 +200,18 @@ class MediaRelayTests(unittest.TestCase):
         self.assertIn("no-new-privileges:true", kwargs["security_opt"])
         self.assertEqual(kwargs["entrypoint"], ["sh", "-c", self.media.ENTRYPOINT])
         self.assertTrue(kwargs["read_only"])
+        # Upstream's VOLUME is covered, so no anonymous volume piles up per relay.
+        self.assertIn("/var/lib/coturn", kwargs["tmpfs"])
         self.assertEqual(kwargs["network"], "bridge")
         self.assertEqual(kwargs["ports"], {"3478/udp": 8478, "3478/tcp": 8478})
-        self.assertEqual(kwargs["environment"]["MDD_MEDIA_SUBNET"], "172.30.0.0/16")
+        self.assertEqual(kwargs["environment"], {"MDD_MEDIA_SUBNET": "172.30.0.0/16"})
+        # The TURN secret is in a read-only file, not in what `docker inspect` shows.
+        self.assertEqual(kwargs["volumes"], {"/host/data/media/relay.conf": {
+            "bind": "/etc/mdd-relay/turnserver.conf", "mode": "ro"}})
+        written = Path(self.tmp.name, "media", "relay.conf")
+        self.assertIn("static-auth-secret=s3cret", written.read_text())
+        self.assertEqual(os.stat(written).st_mode & 0o777, 0o644)
+        self.assertEqual(os.stat(written.parent).st_mode & 0o777, 0o700)
         self.assertEqual(network.connected, [first])
         self.assertTrue(first.started)
 
@@ -203,6 +221,7 @@ class MediaRelayTests(unittest.TestCase):
 
         self.media.ensure_relay(client, {**state, "port": 9478})
         self.assertTrue(first.removed)
+        self.assertTrue(first.volumes_removed)
         self.assertEqual(len(client.created), 2)
 
     def test_a_foreign_network_of_the_same_name_is_refused(self):
@@ -290,15 +309,102 @@ class MediaRelayTests(unittest.TestCase):
     def test_supervision_keeps_the_previous_image_when_the_new_one_cannot_be_fetched(self):
         self.media.save_state({"mode": "relay", "secret": "x", "image": "relay:old"})
         client = _Client(self.media, network=_Network())
-        self.media._image_checked = False
-        with patch.object(self.media, "ensure_image",
-                          side_effect=[self.media.MediaError("offline"),
-                                       SimpleNamespace(id="sha256:old")]), \
+        self.media._image_retry_at = 0.0
+        fetch = Mock(side_effect=[self.media.MediaError("offline"),
+                                  SimpleNamespace(id="sha256:old")])
+        with patch.object(self.media, "ensure_image", fetch), \
                 patch.object(self.media, "default_image", return_value="relay:new"), \
                 patch.object(self.media, "check_relay", return_value=(True, "")):
             status = self.media.supervise(client)
         self.assertEqual(status["state"], "ready")
         self.assertEqual(self.media.load_state()["image"], "relay:old")
+
+    def test_a_failed_image_refresh_is_tried_again_an_hour_later(self):
+        """Review of #181: a single failure used to stop retries until Control restarted."""
+        self.media.save_state({"mode": "relay", "secret": "x", "image": "relay:old"})
+        self.media._image_retry_at = 0.0
+        tried = []
+
+        def ensure_image(client, reference):
+            tried.append(reference)
+            if reference == "relay:new" and len(tried) == 1:
+                raise self.media.MediaError("offline")
+            return SimpleNamespace(id="sha256:x")
+
+        clock = [1000.0]
+        with patch.object(self.media, "ensure_image", side_effect=ensure_image), \
+                patch.object(self.media, "default_image", return_value="relay:new"), \
+                patch.object(self.media, "ensure_relay"), \
+                patch.object(self.media, "check_relay", return_value=(True, "")), \
+                patch.object(self.media.time, "monotonic", side_effect=lambda: clock[0]):
+            self.media.supervise(Mock())
+            clock[0] += 60
+            self.media.supervise(Mock())
+            self.assertEqual(tried.count("relay:new"), 1)
+            clock[0] += self.media.IMAGE_RETRY_SECONDS
+            self.media.supervise(Mock())
+        self.assertEqual(tried.count("relay:new"), 2)
+        self.assertEqual(self.media.load_state()["image"], "relay:new")
+
+    def test_refreshing_the_image_never_writes_back_a_mode(self):
+        """Review of #181: the image refresh used to save the whole state it had read."""
+        self.media.save_state({"mode": "relay", "secret": "x", "image": "relay:old"})
+        # The operator switched to direct after this pass read the state.
+        with patch.object(self.media, "load_state",
+                          return_value={"mode": "direct", "secret": "x", "image": "relay:old"}), \
+                patch.object(self.media, "ensure_image"), \
+                patch.object(self.media, "default_image", return_value="relay:new"):
+            self.media._image_retry_at = 0.0
+            with self.media.switch_lock():
+                self.media._refresh_image(Mock(), {"mode": "relay", "image": "relay:old"})
+        state = json.loads(Path(self.tmp.name, "media", "state.json").read_text())
+        self.assertEqual((state["mode"], state["image"]), ("direct", "relay:new"))
+
+    def test_direct_mode_removes_a_relay_left_behind(self):
+        """Review of #181: a relay recreated by a supervision pass racing `direct` stayed up."""
+        self.media.save_state({"mode": "direct", "secret": "x"})
+        client = _Client(self.media, network=_Network(), container=_Container("x"))
+        self.media.supervise(client)
+        self.assertTrue(client.container.removed)
+        self.assertTrue(client.network.removed)
+
+    def test_a_gateway_that_never_used_relay_mode_makes_no_docker_call(self):
+        client = Mock()
+        self.assertEqual(self.media.supervise(client)["state"], "off")
+        self.assertEqual(client.mock_calls, [])
+
+    def test_supervision_stands_aside_while_a_switch_is_in_progress(self):
+        self.media.save_state({"mode": "direct", "secret": "x"})
+        client = _Client(self.media, network=_Network(), container=_Container("x"))
+        with self.media.switch_lock():
+            self.media.supervise(client)       # e.g. `enable` still waiting for its relay
+        self.assertFalse(client.container.removed)
+
+    def test_the_switch_holds_the_lock_while_it_prepares_the_relay(self):
+        held = []
+
+        def probe(client, network):
+            with self.media.switch_lock(blocking=False) as free:
+                held.append(not free)
+
+        client = _Client(self.media)
+        with patch.object(self.media, "probe_engine_firewall", side_effect=probe), \
+                patch.object(self.media, "wait_ready", return_value=(True, "")):
+            self.media.enable(client, port=8478, image="relay:test")
+        self.assertEqual(held, [True])
+
+    def test_a_probe_that_never_started_is_cleaned_up(self):
+        leftover = Mock(attrs={"Config": {"Labels": {"io.mdd-sim-gateway.managed": "true"}}})
+        client = Mock()
+        client.containers.get.return_value = leftover
+        client.containers.run.side_effect = RuntimeError("start failed")
+        with patch.object(self.media._test_engine, "ensure_image",
+                          return_value=SimpleNamespace(id="sha256:eng")):
+            with self.assertRaises(self.media.MediaError):
+                self.media.probe_engine_firewall(client, SimpleNamespace(name="media-net"))
+        self.assertEqual(client.containers.run.call_args[1]["name"],
+                         "mdd-sim-gateway-media-probe")
+        self.assertEqual(leftover.remove.call_count, 2)    # before, and after the failure
 
 
 class RelayImageTests(unittest.TestCase):
@@ -377,11 +483,12 @@ class RelayEntrypointTests(unittest.TestCase):
             Path(bin_dir, "turnserver").write_text("#!/bin/sh\ncat \"$2\"\n")
             for name in ("ip", "turnserver"):
                 os.chmod(Path(bin_dir, name), 0o755)
-            script = media.ENTRYPOINT.replace("/tmp/turnserver.conf", f"{tmp}/turnserver.conf")
+            Path(tmp, "relay.conf").write_text("realm=x\n")
+            script = media.ENTRYPOINT.replace("/tmp/turnserver.conf", f"{tmp}/turnserver.conf") \
+                .replace(media.RELAY_CONFIG_MOUNT, f"{tmp}/relay.conf")
             return subprocess.run(
                 ["sh", "-c", script],
-                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "MDD_RELAY_CONFIG": "realm=x",
-                     "MDD_MEDIA_SUBNET": "172.30.0.0/16"},
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "MDD_MEDIA_SUBNET": "172.30.0.0/16"},
                 capture_output=True, text=True)
 
     def test_allocations_live_on_the_media_network_and_listeners_everywhere_else(self):

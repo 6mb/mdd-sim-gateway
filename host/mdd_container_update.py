@@ -369,7 +369,7 @@ def remove_relay(client) -> None:
         relay = client.containers.get(RELAY_CONTAINER)
         labels = (relay.attrs.get("Config") or {}).get("Labels") or {}
         if labels.get(MANAGED) == "true" and labels.get(COMPONENT) == "relay":
-            relay.remove(force=True)
+            relay.remove(force=True, v=True)
     except docker.errors.NotFound:
         pass
     except Exception as exc:  # noqa: BLE001

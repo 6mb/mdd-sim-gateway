@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import ipaddress
@@ -115,6 +117,36 @@ def save_state(state: dict) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, sort_keys=True)
     os.replace(tmp, path)
+
+
+@contextlib.contextmanager
+def switch_lock(blocking: bool = True):
+    """Serialise the switch (python -m app.media, its own process) with the control plane's
+    supervision. Yields False when not blocking and a switch holds it: without this, the
+    supervisor could see direct mode while ``enable`` was still waiting for its new relay to
+    answer, and remove it; or write back a mode the switch had just changed."""
+    path = os.path.join(cfg.DATA_DIR, "media", ".lock")
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def update_state(**fields) -> dict:
+    """Change only ``fields``, on the state as it is now. Call with switch_lock held."""
+    state = {**load_state(), **fields}
+    save_state(state)
+    return state
 
 
 def mode(state: dict | None = None) -> str:
@@ -243,12 +275,19 @@ def render_config(secret: str, subnet: ipaddress.IPv4Network,
     return "\n".join(lines) + "\n"
 
 
+# The configuration holds the TURN secret, so it reaches the relay as a read-only file rather
+# than an environment variable `docker inspect` would show. It lives in the private data
+# directory; the file itself is world-readable so the relay's nobody user can read it through
+# the bind mount.
+RELAY_CONFIG_MOUNT = "/etc/mdd-relay/turnserver.conf"
+
 # Run by the stock image's sh before turnserver: adds what is only known once the container is
 # attached. relay-ip is its address on the media network (MDD_MEDIA_SUBNET), where allocations
 # live; every other address becomes a listening-ip, so a client cannot use the relay to reach
 # the relay itself. Loopback serves the health check.
 ENTRYPOINT = r"""set -eu
-: "${MDD_RELAY_CONFIG:?}" "${MDD_MEDIA_SUBNET:?}"
+: "${MDD_MEDIA_SUBNET:?}"
+test -r /etc/mdd-relay/turnserver.conf
 addresses=$(ip -4 -o addr show | awk -v subnet="$MDD_MEDIA_SUBNET" '
   function number(address,  part) {
     split(address, part, ".")
@@ -268,7 +307,7 @@ case "$addresses" in
   *) echo "mdd-relay: no address on the media network $MDD_MEDIA_SUBNET" >&2; exit 1 ;;
 esac
 {
-  printf '%s\n' "$MDD_RELAY_CONFIG"
+  cat /etc/mdd-relay/turnserver.conf
   printf '%s\n' "$addresses"
   printf 'listening-ip=127.0.0.1\n'
 } > /tmp/turnserver.conf
@@ -337,6 +376,30 @@ def _container(client):
         return None
 
 
+def _config_paths() -> tuple[str, str]:
+    """(path this process writes, path Docker mounts). They differ when the control plane runs
+    in a container: MDD_HOST_DATA names the data directory as the Docker host sees it."""
+    from . import engine
+    return (os.path.join(cfg.DATA_DIR, "media", "relay.conf"),
+            os.path.join(engine.HOST_DATA_DIR, "media", "relay.conf"))
+
+
+def _write_config(path: str, text: str) -> None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            if f.read() == text:
+                return
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
 def ensure_relay(client, state: dict, network=None):
     """Make the relay container match ``state``. It is replaced only when what it runs would
     change, so calling this repeatedly never drops a live call."""
@@ -361,8 +424,10 @@ def ensure_relay(client, state: dict, network=None):
             if current.status != "running":
                 current.start()
             return current
-        current.remove(force=True)
+        current.remove(force=True, v=True)
 
+    local_path, host_path = _config_paths()
+    _write_config(local_path, config)
     publish = (bind, port) if bind else port
     container = client.containers.create(
         image.id,
@@ -371,7 +436,8 @@ def ensure_relay(client, state: dict, network=None):
         network="bridge",
         ports={f"{LISTEN_PORT}/udp": publish, f"{LISTEN_PORT}/tcp": publish},
         entrypoint=["sh", "-c", ENTRYPOINT],
-        environment={"MDD_RELAY_CONFIG": config, "MDD_MEDIA_SUBNET": str(subnet)},
+        environment={"MDD_MEDIA_SUBNET": str(subnet)},
+        volumes={host_path: {"bind": RELAY_CONFIG_MOUNT, "mode": "ro"}},
         # The image runs as nobody. Upstream's turnserver carries a file capability to bind
         # ports below 1024; the kernel refuses to execute it when that capability is outside
         # the bounding set. With no-new-privileges it is never granted: the relay runs with an
@@ -380,7 +446,11 @@ def ensure_relay(client, state: dict, network=None):
         cap_add=["NET_BIND_SERVICE"],
         security_opt=["no-new-privileges:true"],
         read_only=True,
-        tmpfs={"/tmp": "rw,nosuid,nodev,size=8m"},
+        # Upstream declares VOLUME /var/lib/coturn; without a mount there, every relay container
+        # would leave an anonymous volume behind. The relay keeps nothing there (userdb is in
+        # /tmp, credentials are computed).
+        tmpfs={"/tmp": "rw,nosuid,nodev,size=8m",
+               "/var/lib/coturn": "rw,nosuid,nodev,size=1m"},
         pids_limit=64,
         mem_limit="128m",
         restart_policy={"Name": "unless-stopped"},
@@ -391,7 +461,7 @@ def ensure_relay(client, state: dict, network=None):
         network.connect(container)
         container.start()
     except Exception:
-        container.remove(force=True)
+        container.remove(force=True, v=True)
         raise
     log.info("started media relay %s on port %s", CONTAINER, port)
     return container
@@ -426,7 +496,7 @@ def remove_relay(client) -> None:
     if container is not None:
         labels = (container.attrs.get("Config") or {}).get("Labels") or {}
         if labels.get(MANAGED_LABEL) == "true":
-            container.remove(force=True)
+            container.remove(force=True, v=True)
 
 
 def remove_network(client) -> bool:
@@ -440,14 +510,21 @@ def remove_network(client) -> bool:
         return True
     if (network.attrs or {}).get("Containers"):
         return False
-    network.remove()
+    try:
+        network.remove()
+    except docker.errors.NotFound:
+        pass
+    except docker.errors.APIError as exc:  # something joined it meanwhile
+        log.debug("media network still in use: %s", exc)
+        return False
     return True
 
 
 # ------------------------------------------------------------------ supervision
 _status_lock = threading.Lock()
 _status: dict = {"state": "off", "reason": ""}
-_image_checked = False
+IMAGE_RETRY_SECONDS = 3600
+_image_retry_at = 0.0
 
 
 def relay_status() -> dict:
@@ -462,40 +539,60 @@ def _set_status(state: str, reason: str = "") -> None:
 
 def _refresh_image(client, state: dict) -> dict:
     """After an update, move the relay to this version's image. A fetch failure keeps the
-    image already in use: the update itself has succeeded, and the old relay still works."""
-    global _image_checked
-    if _image_checked:
-        return state
-    _image_checked = True
+    image already in use (the update itself has succeeded and the old relay still works) and
+    is tried again an hour later. Call with switch_lock held."""
+    global _image_retry_at
     wanted = default_image()
-    if state.get("image") == wanted:
+    if state.get("image") == wanted or time.monotonic() < _image_retry_at:
         return state
     try:
         ensure_image(client, wanted)
     except MediaError as exc:
+        _image_retry_at = time.monotonic() + IMAGE_RETRY_SECONDS
         log.warning("keeping relay image %s: %s", state.get("image"), exc)
         return state
-    state = {**state, "image": wanted}
-    save_state(state)
-    return state
+    return update_state(image=wanted)
+
+
+def _remove_leftovers(client) -> None:
+    """Direct mode: nothing of the relay may stay. A relay that outlived a switch (the switch
+    and this loop raced, or a rollback left it) would keep its port open with nothing behind
+    it, and would hold the media network."""
+    remove_relay(client)
+    if not attached_engines(client):
+        try:
+            remove_network(client)
+        except Exception as exc:  # noqa: BLE001 - removed on a later pass
+            log.debug("media network not removed yet: %s", exc)
 
 
 def supervise(client=None) -> dict:
-    """One pass: in relay mode bring the relay back if it is gone or stopped, and record
-    whether it answers. Called periodically by the control plane."""
-    state = load_state()
-    if mode(state) != RELAY:
-        _set_status("off")
-        return relay_status()
-    try:
-        client = client or _client()
-        state = _refresh_image(client, state)
-        ensure_relay(client, state)
-        ready, reason = check_relay(client)
-        _set_status("ready" if ready else "unavailable", reason)
-    except Exception as exc:  # noqa: BLE001 - reported, retried on the next pass
-        log.warning("media relay not ready: %s", exc)
-        _set_status("unavailable", "relay_error")
+    """One pass, called periodically by the control plane: in relay mode bring the relay
+    back if it is gone or stopped and record whether it answers; in direct mode remove what
+    is left of it. Skipped while a switch is in progress."""
+    with switch_lock(blocking=False) as held:
+        if not held:
+            return relay_status()
+        state = load_state()
+        if mode(state) != RELAY:
+            _set_status("off")
+            if state:
+                # Only a gateway that has ever used relay mode has anything to remove; one
+                # that never did makes no Docker call here at all.
+                try:
+                    _remove_leftovers(client or _client())
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("could not remove the media relay: %s", exc)
+            return relay_status()
+        try:
+            client = client or _client()
+            state = _refresh_image(client, state)
+            ensure_relay(client, state)
+            ready, reason = check_relay(client)
+            _set_status("ready" if ready else "unavailable", reason)
+        except Exception as exc:  # noqa: BLE001 - reported, retried on the next pass
+            log.warning("media relay not ready: %s", exc)
+            _set_status("unavailable", "relay_error")
     return relay_status()
 
 
@@ -530,15 +627,34 @@ PROBE_RULESET = (
     "}\n")
 
 
+PROBE_CONTAINER = "mdd-sim-gateway-media-probe"
+
+
+def _remove_probe(client) -> None:
+    """A probe that failed to start is not removed by Docker's auto-remove."""
+    try:
+        probe = client.containers.get(PROBE_CONTAINER)
+    except Exception:  # noqa: BLE001 - absent is the normal case
+        return
+    labels = (probe.attrs.get("Config") or {}).get("Labels") or {}
+    if labels.get(MANAGED_LABEL) == "true":
+        try:
+            probe.remove(force=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not remove %s: %s", PROBE_CONTAINER, exc)
+
+
 def probe_engine_firewall(client, network) -> None:
     from . import engine
     try:
         image = engine.ensure_image(client)
     except Exception as exc:  # noqa: BLE001
         raise MediaError(f"engine image unavailable: {exc}") from exc
+    _remove_probe(client)
     try:
         client.containers.run(
             image.id,
+            name=PROBE_CONTAINER,
             entrypoint=["sh", "-c", 'printf "%s" "$RULES" | nft -f -'],
             environment={"RULES": PROBE_RULESET},
             network=network.name,
@@ -552,12 +668,21 @@ def probe_engine_firewall(client, network) -> None:
         raise MediaError("engines cannot filter the media network on this host (the engine "
                          "image needs nftables, the kernel nf_tables with its socket match): "
                          f"{detail.strip()}") from exc
+    finally:
+        _remove_probe(client)
 
 
 def enable(client, *, port: int, bind: str = "", public_host: str = "",
            public_port: int | None = None, image: str = "") -> dict:
     """Prepare and verify the relay, then record relay mode. On any failure everything this
     call created is removed and the recorded mode is left as it was."""
+    with switch_lock():
+        return _enable(client, port=port, bind=bind, public_host=public_host,
+                       public_port=public_port, image=image)
+
+
+def _enable(client, *, port: int, bind: str, public_host: str,
+            public_port: int | None, image: str) -> dict:
     previous = load_state()
     had_network = True
     try:
@@ -598,10 +723,10 @@ def disable(client, wait: float = 600) -> bool:
     """Record direct mode and remove the relay. The control plane rebuilds the lines; the
     media network goes once the last one has left it. False if that did not happen in time
     (the network is harmless and is removed by the next ``disable``)."""
-    state = load_state()
-    if state:
-        save_state({**state, "mode": DIRECT})
-    remove_relay(client)
+    with switch_lock():
+        if load_state():
+            update_state(mode=DIRECT)
+        remove_relay(client)
     deadline = time.monotonic() + wait
     while True:
         if remove_network(client):

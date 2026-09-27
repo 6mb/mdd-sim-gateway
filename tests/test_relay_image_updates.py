@@ -70,7 +70,7 @@ class ContainerUpdateRelayTests(unittest.TestCase):
                                                    "io.mdd-sim-gateway.component": "relay"}}})
         client = SimpleNamespace(containers=SimpleNamespace(get=lambda name: relay))
         mdd_container_update.remove_relay(client)
-        relay.remove.assert_called_once_with(force=True)
+        relay.remove.assert_called_once_with(force=True, v=True)
 
         foreign = Mock(attrs={"Config": {"Labels": {}}})
         client = SimpleNamespace(containers=SimpleNamespace(get=lambda name: foreign))
