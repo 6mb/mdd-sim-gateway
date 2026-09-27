@@ -16,13 +16,16 @@ converter takes it.
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 
 try:
-    from PIL import Image, ImageOps
+    from PIL import Image
 except ImportError:  # pragma: no cover - the control requirements install Pillow
-    Image = ImageOps = None
+    Image = None
 try:
     # pi-heif is the decode-only build of pillow-heif (same author, same plugin API): reading
     # HEIC is all MMS needs, and it leaves out the x265 encoder and its GPL.
@@ -39,8 +42,8 @@ MAX_PIXELS = 64_000_000
 if Image is not None:
     # Pillow's own guard is a backstop, not the limit: it raises only above twice
     # MAX_IMAGE_PIXELS and does no more than warn in between, so a 100-megapixel file set
-    # against this would be decoded anyway. _open() enforces MAX_PIXELS itself, from the
-    # header, before a single row is decoded.
+    # against this would be decoded anyway. _open_header() enforces MAX_PIXELS itself, from
+    # the header, before a single row is decoded.
     Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 
 
@@ -69,8 +72,108 @@ QUALITY_STEPS = 6
 PASS_THROUGH_IMAGES = ("image/jpeg", "image/png", "image/gif")
 
 
+@dataclass(frozen=True)
+class Probe:
+    """What a picture's header says, read without decoding a single pixel."""
+    format: str | None
+    width: int                  # as shown, i.e. after the EXIF orientation
+    height: int
+    orientation: int
+    animated: bool
+
+    @property
+    def longest(self) -> int:
+        return max(self.width, self.height)
+
+
+# ImageOps.exif_transpose's table, applied to the shrunk picture instead of the full-size one.
+_TRANSPOSE = {2: "FLIP_LEFT_RIGHT", 3: "ROTATE_180", 4: "FLIP_TOP_BOTTOM", 5: "TRANSPOSE",
+              6: "ROTATE_270", 7: "TRANSVERSE", 8: "ROTATE_90"}
+
+
+def _open_header(data: bytes):
+    """The picture opened -- its header read, nothing decoded -- and held to MAX_PIXELS."""
+    try:
+        image = Image.open(io.BytesIO(data))
+    except Image.DecompressionBombError:
+        raise ConversionError("the picture is too large to convert") from None
+    except Exception as exc:  # noqa: BLE001 -- any decoder failure means "unreadable"
+        raise ConversionError(f"the picture could not be read ({exc})") from None
+    # Opening reads the header, not the pixels; this is the point at which the size is known
+    # and nothing has been allocated for it yet.
+    width, height = image.size
+    if width * height > MAX_PIXELS:
+        image.close()
+        raise ConversionError(f"the picture is {width}x{height} pixels; at most "
+                              f"{MAX_PIXELS // 1_000_000} megapixels can be converted")
+    return image
+
+
+def probe(data: bytes) -> Probe:
+    image = _open_header(data)
+    try:
+        width, height = image.size
+        orientation = image.getexif().get(0x0112, 1)
+        animated = bool(getattr(image, "is_animated", False))
+    except Exception as exc:  # noqa: BLE001
+        raise ConversionError(f"the picture could not be read ({exc})") from None
+    finally:
+        image.close()
+    if orientation in (5, 6, 7, 8):
+        width, height = height, width
+    return Probe(image.format, width, height, orientation, animated)
+
+
+def decode(data: bytes, longest: int, orientation: int = 1):
+    """The picture as an upright RGB image no larger than `longest` on either side.
+
+    The full-size picture is only ever held for as long as it takes to shrink it: everything a
+    fit tries afterwards -- each size, each quality -- starts from this one, a few megabytes
+    whatever the camera. A JPEG is not even decoded at full size: DCT scaling reads it straight
+    at the smallest scale that still covers `longest`. HEIC has nothing like that, so libheif
+    decodes it whole, and that decode is what a conversion costs in memory."""
+    image = _open_header(data)
+    try:
+        width, height = image.size
+        if image.format == "JPEG" and max(width, height) > longest:
+            scale = longest / max(width, height)
+            image.draft("RGB", (int(width * scale) + 1, int(height * scale) + 1))
+        image.load()
+        if image.mode in ("RGBA", "LA", "PA") or (image.mode == "P" and
+                                                  "transparency" in image.info):
+            image = image.convert("RGBA")
+        elif image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        if max(image.size) > longest:
+            image.thumbnail((longest, longest), Image.LANCZOS)
+    except ConversionError:
+        raise
+    except Image.DecompressionBombError:
+        raise ConversionError("the picture is too large to convert") from None
+    except Exception as exc:  # noqa: BLE001 -- any decoder failure means "unreadable"
+        raise ConversionError(f"the picture could not be read ({exc})") from None
+    if image.mode == "RGBA":
+        # JPEG has no alpha: paint transparent areas white rather than black.
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image, mask=image.getchannel("A"))
+        image = background
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
+    if orientation in _TRANSPOSE:
+        image = image.transpose(getattr(Image.Transpose, _TRANSPOSE[orientation]))
+    return image
+
+
 class ImageConverter:
     kind = "image"
+    # Pictures already decoded and shrunk to IMAGE_EDGES[0], by content: typing in the composer
+    # changes the room the text leaves and so every picture's byte target, and without these
+    # each keystroke would decode every photo again. About 6 MB each.
+    BASE_CACHE_BYTES = 64 * 1024 * 1024
+
+    def __init__(self):
+        self._bases: OrderedDict[tuple, object] = OrderedDict()
+        self._bases_lock = threading.Lock()
 
     def can_convert(self, content_type: str) -> bool:
         if Image is None:
@@ -80,45 +183,6 @@ class ImageConverter:
         return content_type in ("image/jpeg", "image/png", "image/gif", "image/webp",
                                 "image/bmp", "image/avif")
 
-    def _open(self, data: bytes, *, longest: int | None = None):
-        """The decoded picture. With `longest`, a JPEG is decoded straight at the smallest
-        scale that still covers that edge (DCT scaling), which is several times faster for a
-        camera photo that is going to be shrunk anyway."""
-        try:
-            image = Image.open(io.BytesIO(data))
-        except Image.DecompressionBombError:
-            raise ConversionError("the picture is too large to convert") from None
-        except Exception as exc:  # noqa: BLE001 -- any decoder failure means "unreadable"
-            raise ConversionError(f"the picture could not be read ({exc})") from None
-        # Opening reads the header, not the pixels; this is the point at which the size is
-        # known and nothing has been allocated for it yet.
-        width, height = image.size
-        if width * height > MAX_PIXELS:
-            image.close()
-            raise ConversionError(f"the picture is {width}x{height} pixels; at most "
-                                  f"{MAX_PIXELS // 1_000_000} megapixels can be converted")
-        try:
-            if longest and image.format == "JPEG" and max(width, height) > longest:
-                scale = longest / max(width, height)
-                image.draft("RGB", (int(width * scale) + 1, int(height * scale) + 1))
-            image.load()
-        except Image.DecompressionBombError:
-            raise ConversionError("the picture is too large to convert") from None
-        except Exception as exc:  # noqa: BLE001 -- any decoder failure means "unreadable"
-            raise ConversionError(f"the picture could not be read ({exc})") from None
-        return image
-
-    @staticmethod
-    def _size(data: bytes) -> tuple[int, int, int]:
-        """The picture's own size as shown and its EXIF orientation, read from its header
-        without decoding it."""
-        with Image.open(io.BytesIO(data)) as image:
-            width, height = image.size
-            orientation = image.getexif().get(0x0112, 1)
-        if orientation in (5, 6, 7, 8):
-            width, height = height, width
-        return width, height, orientation
-
     def adjustable(self, content_type: str, data: bytes) -> bool:
         """Whether this picture can be made smaller: an animated GIF cannot without losing
         its animation, so it is sent as it is or not at all."""
@@ -126,19 +190,23 @@ class ImageConverter:
             return False
         if content_type != "image/gif":
             return True
-        return not getattr(self._open(data), "is_animated", False)
+        return not probe(data).animated
 
-    @staticmethod
-    def _flatten(image):
-        image = ImageOps.exif_transpose(image)
-        if image.mode in ("RGBA", "LA", "PA") or (image.mode == "P" and
-                                                  "transparency" in image.info):
-            image = image.convert("RGBA")
-            # JPEG has no alpha: paint transparent areas white rather than black.
-            background = Image.new("RGB", image.size, (255, 255, 255))
-            background.paste(image, mask=image.getchannel("A"))
-            return background
-        return image.convert("RGB")
+    def base(self, data: bytes, info: Probe, digest: bytes | None = None):
+        """The picture decoded, upright and shrunk to IMAGE_EDGES[0]; decoded once per content
+        however many times it is fitted."""
+        key = (digest or hashlib.sha256(data).digest(), IMAGE_EDGES[0])
+        with self._bases_lock:
+            if key in self._bases:
+                self._bases.move_to_end(key)
+                return self._bases[key]
+        image = decode(data, IMAGE_EDGES[0], info.orientation)
+        with self._bases_lock:
+            self._bases[key] = image
+            while len(self._bases) > 1 and sum(
+                    i.width * i.height * 3 for i in self._bases.values()) > self.BASE_CACHE_BYTES:
+                self._bases.popitem(last=False)
+        return image
 
     @staticmethod
     def _encode(image, quality: int) -> bytes:
@@ -149,20 +217,19 @@ class ImageConverter:
         return out.getvalue()
 
     def fit(self, content_type: str, data: bytes, target: int, *,
-            force: bool = False) -> Fitted:
+            force: bool = False, digest: bytes | None = None) -> Fitted:
         """`data` as a picture of at most `target` bytes: unchanged when it already is one a
         phone shows, fits and is no larger than IMAGE_EDGES[0] (and `force` is not set);
         otherwise the largest size, then the highest quality, whose JPEG fits."""
-        image = self._open(data, longest=IMAGE_EDGES[0])
-        width, height, orientation = self._size(data)
-        if content_type == "image/gif" and getattr(image, "is_animated", False):
+        info = probe(data)
+        width, height = info.width, info.height
+        if content_type == "image/gif" and info.animated:
             if len(data) <= target:
                 return Fitted(content_type, data, width, height)
             raise ConversionError("an animated GIF cannot be made smaller without losing its "
                                   "animation")
-        longest = max(width, height)
-        if not force and content_type in PASS_THROUGH_IMAGES and longest <= IMAGE_EDGES[0] \
-                and orientation == 1:
+        if not force and content_type in PASS_THROUGH_IMAGES \
+                and info.longest <= IMAGE_EDGES[0] and info.orientation == 1:
             # Sent as it is, apart from its metadata: a phone photo's EXIF carries where it
             # was taken. (A rotated one is re-encoded instead: dropping its EXIF would drop
             # the rotation with it.)
@@ -171,8 +238,8 @@ class ImageConverter:
                 return Fitted(content_type, clean, width, height)
         if target <= 0:
             raise ConversionError("there is no room left for this picture")
-        base = self._flatten(image)
-        longest = max(base.size)           # after any decoding scale, still >= the first edge
+        base = self.base(data, info, digest)
+        longest = max(base.size)
         edges = [e for e in IMAGE_EDGES if e < longest]
         edges.insert(0, min(longest, IMAGE_EDGES[0]))
         for edge in dict.fromkeys(edges):

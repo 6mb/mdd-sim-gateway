@@ -227,6 +227,26 @@ class ImageFitTests(unittest.TestCase):
         self.assertIn("huge.png", problem)
         self.assertIn("megapixels", problem)
 
+    def test_typing_re_encodes_without_decoding_the_photo_again(self):
+        # Each keystroke changes the room the text leaves and so the picture's byte target;
+        # the picture is decoded once and every later target starts from that copy.
+        attachment = {"name": "p.jpg", "content_type": "image/jpeg",
+                      "data": photo(3000, 2000, quality=95)}
+        with patch.object(mms_convert, "decode", wraps=mms_convert.decode) as decode:
+            sizes = []
+            for text in ("h", "he", "hello there"):
+                _fitted, problem, summary = fit([attachment], 150 * 1024, text=text)
+                self.assertIsNone(problem)
+                sizes.append(summary["size"])
+        self.assertEqual(decode.call_count, 1)
+        self.assertTrue(all(size <= 150 * 1024 for size in sizes))
+
+    def test_the_full_size_picture_is_shrunk_as_it_is_decoded(self):
+        for data in (photo(3000, 2000, quality=95), photo(2400, 1800, "PNG")):
+            image = mms_convert.decode(data, 1600)
+            self.assertEqual((image.mode, max(image.size)), ("RGB", 1600))
+        self.assertEqual(mms_convert.decode(photo(3000, 2000), 1600).size, (1600, 1067))
+
     def test_a_limit_too_small_for_any_picture_says_so(self):
         _fitted, problem, _summary = fit([{"name": "p.jpg", "content_type": "image/jpeg",
                                            "data": photo()}], 2 * 1024)

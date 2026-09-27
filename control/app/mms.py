@@ -349,7 +349,8 @@ def _allocate(sizes: list[int], budget: int) -> list[int]:
 
 
 # Recent fits by (original digest, type, byte target, force): composing re-plans the whole
-# message each time an attachment is added or removed, mostly with the same targets.
+# message each time an attachment is added or removed, mostly with the same targets. A new
+# target -- the text changed -- re-encodes from the converter's own decoded copy.
 _FIT_CACHE: dict[tuple, mms_convert.Fitted] = {}
 _FIT_CACHE_SIZE = 64
 _fit_cache_lock = threading.Lock()
@@ -360,7 +361,7 @@ def _fit(converter, content_type: str, data: bytes, target: int, force: bool):
     with _fit_cache_lock:
         if key in _FIT_CACHE:
             return _FIT_CACHE[key]
-    fitted = converter.fit(content_type, data, target, force=force)
+    fitted = converter.fit(content_type, data, target, force=force, digest=key[0])
     with _fit_cache_lock:
         _FIT_CACHE[key] = fitted
         while len(_FIT_CACHE) > _FIT_CACHE_SIZE:
