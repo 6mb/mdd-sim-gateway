@@ -151,6 +151,46 @@ def _redirect_open(outputs: Path, tmp: str):
     return fake_open
 
 
+class EngineAddressTests(unittest.TestCase):
+    """On the container stack the engine network is internal and the uplink is joined after
+    start, so the first render has no default route: the address comes from the list, where
+    the media network may come first (review of #181)."""
+
+    def address(self, listed, exclude, gateway=""):
+        module = engine_render()
+        with patch.object(module, "_default_gateway_ipv4", return_value=gateway), \
+                patch.object(module.subprocess, "check_output", return_value=listed):
+            return module.container_ipv4(exclude)
+
+    def test_the_media_address_is_skipped_when_it_is_listed_first(self):
+        self.assertEqual(self.address("172.30.0.3 172.18.0.5 ", "172.30.0.0/16"), "172.18.0.5")
+
+    def test_direct_mode_takes_the_first_address_as_before(self):
+        self.assertEqual(self.address("172.30.0.3 172.18.0.5 ", ""), "172.30.0.3")
+
+    def test_only_a_media_address_is_refused_rather_than_used(self):
+        module = engine_render()
+        fake = Mock()
+        fake.getsockname.return_value = ("172.30.0.3", 1)
+        with patch.object(module, "_default_gateway_ipv4", return_value=""), \
+                patch.object(module.subprocess, "check_output", return_value="172.30.0.3"), \
+                patch.object(module.socket, "socket", return_value=fake):
+            with self.assertRaisesRegex(RuntimeError, "outside the media network"):
+                module.container_ipv4("172.30.0.0/16")
+
+    def test_relay_mode_keeps_ike_and_sip_off_the_media_network(self):
+        module = engine_render()
+        cfg = instance_json(RELAY)
+        cfg.pop("local_addr")
+        with patch.object(module, "media_interface", return_value=("eth0", "172.30.0.3")), \
+                patch.object(module, "_default_gateway_ipv4", return_value=""), \
+                patch.object(module.subprocess, "check_output",
+                             return_value="172.30.0.3 172.18.0.5"):
+            ctx = module.build_context(cfg)
+        self.assertEqual((ctx["local_addr"], ctx["rtp_bind_addr"], ctx["media_addr"]),
+                         ("172.18.0.5", "172.18.0.5", "172.30.0.3"))
+
+
 class MediaInstanceJsonTests(unittest.TestCase):
     def instance(self, **extra):
         return {"id": "3", "index": 1, "imsi": "001010000000000", "mcc": "001", "mnc": "01",

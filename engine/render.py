@@ -55,20 +55,35 @@ def _default_gateway_ipv4():
     return ""
 
 
-def container_ipv4():
+def _outside(address: str, excluded: str) -> bool:
+    """True unless ``address`` lies in the ``excluded`` network (empty excludes nothing)."""
+    if not excluded:
+        return True
+    try:
+        return ipaddress.ip_address(address) not in ipaddress.ip_network(excluded)
+    except ValueError:
+        return True
+
+
+def container_ipv4(exclude: str = ""):
     """The container's own docker-bridge IPv4 (e.g. 172.17.0.3). MUST be the bridge address, never
     the VoWiFi tunnel inner IP: it is used as the IKE source (SWU_SOURCE) and as the local SIP
     transport bind, both of which must sit on the docker bridge. A public-IP connect() probe would
     pick the tunnel's inner IP once an IPv4 PDN has made the tunnel the default route (the re-render
     after P-CSCF discovery runs post-tunnel), so probe the DOCKER GATEWAY instead — that next hop is
-    always reached over the bridge, so the chosen source is the bridge IP."""
+    always reached over the bridge, so the chosen source is the bridge IP.
+
+    ``exclude`` is the relay media network. Its address must never be chosen: on the container
+    stack the engine network is internal and the uplink is joined only after start, so the first
+    render has no default route and falls through to the address list, where the media address
+    may come first. A line whose IKE source or SIP bind lands there never registers."""
     gw = _default_gateway_ipv4()
     if gw:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect((gw, 9))
             ip = s.getsockname()[0]
-            if ip and not ip.startswith("127."):
+            if ip and not ip.startswith("127.") and _outside(ip, exclude):
                 return ip
         except Exception:
             pass
@@ -79,7 +94,7 @@ def container_ipv4():
         for tok in out:
             try:
                 ip = ipaddress.ip_address(tok)
-                if ip.version == 4 and not ip.is_loopback:
+                if ip.version == 4 and not ip.is_loopback and _outside(tok, exclude):
                     return str(ip)
             except ValueError:
                 continue
@@ -88,9 +103,14 @@ def container_ipv4():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("1.1.1.1", 80))
-        return s.getsockname()[0]
+        ip = s.getsockname()[0]
     finally:
         s.close()
+    if not _outside(ip, exclude):
+        # Better a failed render (the entrypoint stops, Docker restarts the engine) than a
+        # line bound to the media network, which the relay can reach.
+        raise RuntimeError("no engine address outside the media network")
+    return ip
 
 
 def media_interface(subnet: str) -> tuple[str, str]:
@@ -198,8 +218,9 @@ def build_context(cfg):
     if webrtc.get("enable", True) and not webrtc_password:
         raise ValueError("WebRTC credential is missing from instance configuration")
     media = cfg.get("media") or {}
-    media_if, media_addr = (media_interface(media.get("subnet") or "")
-                            if media.get("mode") == "relay" else ("", ""))
+    media_subnet = (media.get("subnet") or "") if media.get("mode") == "relay" else ""
+    media_if, media_addr = (media_interface(media_subnet) if media.get("mode") == "relay"
+                            else ("", ""))
     ike = cfg.get("ike", {}) or {}
     default_ike = ("aes256-sha256-prfsha256-modp2048,aes128-sha256-prfsha256-modp2048,"
                    "aes256-sha1-prfsha1-modp2048,aes128-sha1-prfsha1-modp2048,"
@@ -230,7 +251,7 @@ def build_context(cfg):
         # family or Asterisk cannot reach the P-CSCF over the tunnel: IPv6 P-CSCF (Telus, EE)
         # -> bind [::]:5060; IPv4 P-CSCF (Vodafone UK, cp_mode=v4) -> bind 0.0.0.0:5060.
         "pcscf_is_v6": (":" in pcscf),
-        "local_addr": cfg.get("local_addr") or container_ipv4(),
+        "local_addr": cfg.get("local_addr") or container_ipv4(media_subnet),
         "ike_proposals": ike.get("proposals", default_ike),
         "esp_proposals": ike.get("esp_proposals", default_esp),
         # P-Access-Network-Info: i-wlan-node-id should be the Wi-Fi AP BSSID (MAC). The
@@ -273,7 +294,7 @@ def build_context(cfg):
         # The container's own RTP bind IP (docker-bridge private, e.g. 172.17.0.2). Used as the
         # LHS of rtp.conf [ice_host_candidates] to rewrite that unreachable host candidate to
         # the host LAN IP (advertise_addr) so a LAN WebRTC browser can reach our RTP.
-        "rtp_bind_addr": cfg.get("local_addr") or container_ipv4(),
+        "rtp_bind_addr": cfg.get("local_addr") or container_ipv4(media_subnet),
         "rtp_start": cfg.get("rtp_start", 10000),
         "rtp_end": cfg.get("rtp_end", 11000),
         # Relay media mode: the browser leg's RTP binds to this line's media network address
