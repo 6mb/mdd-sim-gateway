@@ -34,7 +34,7 @@ from . import (store, engine, status as status_mod, sim, card, notify_push, lpa,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
                mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice,
-               gate, line_offline, contacts, media)
+               gate, line_offline, contacts, media, clients, authz)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -598,8 +598,11 @@ class Hub:
     async def broadcast(self, msg: dict):
         dead = []
         for ws in list(self.clients):
+            view = authz.event_for(gate.current(ws), msg)
+            if view is None:
+                continue
             try:
-                await ws.send_json(msg)
+                await ws.send_json(view)
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -3025,8 +3028,14 @@ app.add_middleware(gate.Gate)
 @app.get("/api/auth/status")
 def api_auth_status(request: Request):
     who = gate.current(request)
-    return {"configured": auth.configured(), "authenticated": who.kind == "admin",
-            "username": auth.username(), "csrf": who.csrf}
+    body = {"configured": auth.configured(), "authenticated": who.kind == "admin",
+            "username": auth.username(), "csrf": who.csrf,
+            # What this gateway offers a client app, which may be newer or older than it.
+            "api": 1, "features": ["client_tokens"]}
+    if who.kind == "client":
+        # A client that reaches this is signed in: its token was checked on the way.
+        body.update({"authenticated": True, "kind": "client", "client_id": who.client_id})
+    return body
 
 
 @app.post("/api/auth/setup")
@@ -3037,6 +3046,11 @@ def api_auth_setup(body: dict, request: Request):
         auth.setup(str(body.get("password") or ""), str(body.get("username") or "admin"))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # Setting up again follows `install.sh reset-admin` -- typically because a phone or a
+    # password was lost -- so nothing signed in with the old account survives it.
+    clients.revoke_all()
+    gate.revoke_kind("session")
+    gate.revoke_kind("client")
     remember = bool(body.get("remember"))
     result = auth.login(str(body.get("username") or "admin"), str(body.get("password") or ""),
                         request.client.host if request.client else "", remember=remember)
@@ -3075,6 +3089,7 @@ def api_auth_login(body: dict, request: Request):
 @app.post("/api/auth/logout")
 def api_auth_logout(request: Request):
     auth.logout(request.cookies.get(auth.SESSION_COOKIE))
+    gate.revoke(gate.current(request).credential)
     response = JSONResponse({"ok": True})
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     return response
@@ -3087,9 +3102,62 @@ def api_auth_password(body: dict, request: Request):
                              str(body.get("new_password") or ""))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # A new password ends every sign-in made with the old one: browsers and client apps alike.
+    clients.revoke_all()
+    gate.revoke_kind("session")
+    gate.revoke_kind("client")
     response = JSONResponse({"ok": True, "reauthenticate": True})
     response.delete_cookie(auth.SESSION_COOKIE, path="/")
     return response
+
+
+@app.post("/api/auth/client/login")
+def api_auth_client_login(body: dict, request: Request):
+    """Sign a client app in with the administrator's credentials; it gets a bearer token.
+
+    The token is returned this once. Only its digest is stored, so it cannot be shown again."""
+    if not auth.configured():
+        raise HTTPException(409, "administrator setup is required")
+    peer = request.client.host if request.client else ""
+    retry = auth.throttled(peer)
+    if retry:
+        return JSONResponse({"detail": "too many attempts", "retry_after": retry},
+                            status_code=429, headers={"Retry-After": str(retry)})
+    if not auth.verify(str(body.get("username") or "admin"), str(body.get("password") or ""),
+                       peer):
+        raise HTTPException(401, "invalid username or password")
+    for evicted in clients.make_room():
+        gate.revoke(f"client:{evicted}")
+    try:
+        client, token = clients.register(str(body.get("name") or ""),
+                                         str(body.get("platform") or "other"),
+                                         str(body.get("app_version") or ""))
+    except clients.ClientError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"token": token, "client": client}
+
+
+@app.post("/api/auth/client/logout")
+def api_auth_client_logout(request: Request):
+    who = gate.current(request)
+    if who.kind != "client":
+        raise HTTPException(400, "only a client app signs itself out here")
+    clients.revoke(who.client_id)
+    gate.revoke(who.credential)
+    return {"ok": True}
+
+
+@app.get("/api/auth/clients")
+def api_auth_clients():
+    return {"clients": clients.list_clients()}
+
+
+@app.delete("/api/auth/clients/{client_id}")
+def api_auth_client_revoke(client_id: int):
+    if not clients.revoke(client_id):
+        raise HTTPException(404, "no such client")
+    gate.revoke(f"client:{client_id}")
+    return {"ok": True}
 
 
 def _audit_client(request: Request, settings: dict) -> str:
@@ -3110,7 +3178,8 @@ async def audit_mutations(request: Request, call_next):
         settings = cfg.get_settings()
         _write_audit_record({"at": int(time.time()), "method": request.method,
                              "path": request.url.path, "status": response.status_code,
-                             "client": _audit_client(request, settings)}, settings)
+                             "client": _audit_client(request, settings),
+                             "actor": gate.current(request).label}, settings)
     return response
 
 
@@ -5613,10 +5682,17 @@ async def api_support_bundle():
 
 # ----------------------------- instances -----------------------------
 @app.get("/api/instances")
-async def api_instances():
+async def api_instances(request: Request):
     out = []
+    client = gate.current(request).kind == "client"
     for inst in cfg.list_instances():
         st = _cached_line_status(inst)
+        if client:
+            # A client app lists lines to talk on; the line's configuration is not its business.
+            out.append({"id": inst["id"], "name": inst.get("name", ""),
+                        "msisdn": inst.get("msisdn", ""), "enabled": inst.get("enabled", True),
+                        "status": authz.status_for(gate.current(request), st)})
+            continue
         safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
         safe["has_pin"] = bool(inst.get("pin"))
         safe["proxy_country_effective"] = egress.line_country(inst)
@@ -5932,11 +6008,11 @@ async def _stop_instance(iid: str, cancel_reason: str) -> dict:
 
 
 @app.get("/api/instances/{iid}/status")
-async def api_instance_status(iid: str):
+async def api_instance_status(iid: str, request: Request):
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
-    return _cached_line_status(inst)
+    return authz.status_for(gate.current(request), _cached_line_status(inst))
 
 
 def _availability_window(now: int, recorded_since: int | None) -> int:
@@ -6011,9 +6087,10 @@ def _owner(request: Request) -> int:
 
     An address book belongs to whoever keeps it, not to the gateway, so the rows carry an
     owner and every query names one instead of assuming it. This gateway has a single
-    administrator, so that is the answer for every request that gets this far.
+    administrator, so that is the answer for every request that gets this far -- the
+    administrator's browser, or a client app signed in with the administrator's credentials.
     """
-    if gate.current(request).kind != "admin":
+    if gate.current(request).kind not in ("admin", "client"):
         raise HTTPException(401, "authentication required")
     return store.ADMIN_OWNER
 

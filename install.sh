@@ -1740,6 +1740,10 @@ cmd_reset_admin() {
   mkdir -p "$(dirname -- "$backup")"
   mv "$auth_file" "$backup"
   chmod 600 "$backup" 2>/dev/null || true
+  # Client app tokens were issued by the old administrator; a reset is usually because a phone
+  # or the password was lost, so none of them may outlive it (the control plane also refuses
+  # them while no administrator is configured, and revokes them when a new one is set up).
+  [ -f "$MDD_DATA_DIR/clients.json" ] && rm -f "$MDD_DATA_DIR/clients.json"
   info "administrator account reset; previous credential file preserved at $backup"
   info "open the WebUI to create a new administrator account"
 }
