@@ -48,7 +48,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - A modem that ModemManager put in state "failed" (seen as `unknown-capabilities` after
   ModemManager restarted mid-probe) is no longer asked to enable every cycle and left marked
   as starting. The orchestrator reboots the module when that can help, after a minute and at
-  most three times, spaced out. The cellular badge says what happened, and VoWiFi, which
+  most three times, spaced out, and not while flight mode is on, where the reboot would only
+  interrupt VoWiFi. The cellular badge says what happened, and VoWiFi, which
   keeps working through the SIM bridge, is no longer shown as starting.
 
 ### Security

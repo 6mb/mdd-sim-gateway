@@ -4305,6 +4305,9 @@ async def _unified_devices() -> list[dict]:
                     cell_reason = (
                         "ModemManager could not start this modem. Check the SIM."
                         if not failure.get("resettable", True) else
+                        "ModemManager could not start this modem, and it could not be "
+                        "rebooted. Reconnect the modem or restart the host."
+                        if failure.get("exhausted") and not failure.get("rebooted", 1) else
                         "ModemManager could not start this modem, and rebooting it did not "
                         "help. Reconnect the modem or restart the host."
                         if failure.get("exhausted") else

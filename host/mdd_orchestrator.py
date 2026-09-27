@@ -345,7 +345,9 @@ BRIDGE_SETTLE_SECONDS = 5.0
 # behind by a ModemManager restart mid-probe, "unknown-capabilities"), and a module reboot
 # clears it. Other reasons (sim-missing, sim-error, esim-without-profiles) are not fixed by a
 # reboot and are only reported. Each reboot also interrupts that modem's VoWiFi (about a minute
-# and a half on the test gateway until it registered again), so they are spaced out and bounded.
+# and a half on the test gateway until it registered again), so they are spaced out and bounded,
+# and only made while the device is meant to be on the cellular network: in flight mode nothing
+# needs ModemManager, and the reboot would only interrupt the VoWiFi that is working.
 MM_RESETTABLE_FAILURES = {"unknown-capabilities", "unknown"}
 MM_FAILED_GRACE_SECONDS = 60.0
 MM_RESET_BACKOFF_SECONDS = 300.0
@@ -1192,20 +1194,26 @@ class Orchestrator:
         finally:
             modem.close()
 
-    def recover_failed_modem(self, modem: dict, reason: str) -> None:
+    def recover_failed_modem(self, modem: dict, reason: str, wanted: bool = True) -> None:
         """ModemManager gave up on this modem. Reboot the module when that can help, spaced
         out and at most MM_RESET_ATTEMPTS times; ModemManager probes it afresh when its ports
-        return. Retrying --enable, as before, only repeated "Wrong state" every cycle."""
+        return. Retrying --enable, as before, only repeated "Wrong state" every cycle.
+
+        ``wanted`` is False in flight mode: the failure is recorded but nothing is rebooted.
+        Times are monotonic, so the clock being set at boot neither skips the grace period
+        nor stretches the backoff."""
         device_id = modem["id"]
-        now = time.time()
+        now = time.monotonic()
         record = self._modem_failed.setdefault(
-            device_id, {"reason": reason, "since": now, "resets": 0, "last_reset": 0.0})
+            device_id, {"reason": reason, "since": now, "resets": 0, "rebooted": 0,
+                        "last_reset": None})
         record["reason"] = reason
-        if reason not in MM_RESETTABLE_FAILURES or record["resets"] >= MM_RESET_ATTEMPTS:
+        if not wanted or reason not in MM_RESETTABLE_FAILURES or \
+                record["resets"] >= MM_RESET_ATTEMPTS:
             return
         if now - record["since"] < MM_FAILED_GRACE_SECONDS:
             return
-        if record["last_reset"] and \
+        if record["last_reset"] is not None and \
                 now - record["last_reset"] < MM_RESET_BACKOFF_SECONDS * (2 ** (record["resets"] - 1)):
             return
         if serial is None or self.dry_run:
@@ -1216,17 +1224,19 @@ class Orchestrator:
                  f"(attempt {record['resets']} of {MM_RESET_ATTEMPTS})")
         try:
             self.reboot_modem(modem["tty"])
+            record["rebooted"] += 1
         except Exception as exc:
             self.log(f"could not reboot {device_id}: {exc}")
 
     def forget_absent_modem_failures(self, live_ids: set) -> None:
         """A module this loop just rebooted is briefly absent; keeping its record is what
         bounds the reboots. Anything else absent was unplugged, which starts afresh."""
-        now = time.time()
+        now = time.monotonic()
         self._modem_failed = {device_id: value for device_id, value
                               in self._modem_failed.items()
                               if device_id in live_ids or
-                              now - value["last_reset"] < MM_RESET_BACKOFF_SECONDS}
+                              (value["last_reset"] is not None and
+                               now - value["last_reset"] < MM_RESET_BACKOFF_SECONDS)}
 
     def modem_failure(self, device_id: str) -> dict:
         """What the control plane shows for a failed modem; {} when it is not failed."""
@@ -1235,7 +1245,7 @@ class Orchestrator:
             return {}
         resettable = record["reason"] in MM_RESETTABLE_FAILURES
         return {"reason": record["reason"], "resettable": resettable,
-                "resets": record["resets"],
+                "resets": record["resets"], "rebooted": record["rebooted"],
                 "exhausted": resettable and record["resets"] >= MM_RESET_ATTEMPTS}
 
     def _bridge_stderr_path(self, hwid: str):
@@ -1970,7 +1980,8 @@ class Orchestrator:
                 if snapshot.get("state") == "failed":
                     # Enabling a failed modem only ever answers "Wrong state". Report it
                     # and recover instead; VoWiFi does not depend on it.
-                    self.recover_failed_modem(modem, snapshot.get("failed_reason") or "unknown")
+                    self.recover_failed_modem(modem, snapshot.get("failed_reason") or "unknown",
+                                              wanted=radio_enabled)
                     snapshot["failure"] = self.modem_failure(device_id)
                     self.cellular_states[device_id] = snapshot
                     continue
