@@ -143,10 +143,11 @@ boundaries:
 - no host-published Egress SOCKS port;
 - `restart: unless-stopped` for recovery after a NAS reboot.
 
-Hardware NetworkManager is restricted to `wwan*` and `cdc-wdm*`, and cellular connections are
-created with `never-default`. Hardware stops cellular setup if it sees a NAS physical NIC, Open
-vSwitch, VLAN, Docker bridge or loopback under its control. Country exits stay inside container
-networks and do not install carrier routes into the NAS main routing table.
+Hardware NetworkManager is restricted to `ww*` (`wwan0`, or a predictable name such as
+`wws27u1i4`) and `cdc-wdm*`, and cellular connections are created with `never-default`.
+Hardware stops cellular setup if it sees a NAS physical NIC, Open vSwitch, VLAN, Docker bridge
+or loopback under its control. Country exits stay inside container networks and do not install
+carrier routes into the NAS main routing table.
 
 ## 6. First-start acceptance checks
 

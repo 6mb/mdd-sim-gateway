@@ -128,6 +128,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   Engine's networks and routes are unchanged, so nothing it sends can bypass the exit. A line
   created before this version is forwarded once it is rebuilt (an update does that).
 
+- On the container stack, an EC25 on a host that gives network interfaces predictable names
+  (Debian 13 and other systemd 257 hosts call its data interface something like `wws27u1i4`
+  instead of `wwan0`) is claimed by ModemManager again. Hardware only told ModemManager about
+  interfaces named `wwan*`, so it never learned of the data port and refused the modem with
+  "Failed to find a net port in the QMI modem". Hardware now asks the kernel whether an
+  interface is a cellular one (`DEVTYPE=wwan`) instead of going by its name, reading each
+  interface once, and NetworkManager is allowed to manage `ww*` rather than only `wwan*`.
+
 - On the container stack, a modem ModemManager cannot claim is no longer reset every few
   minutes for good. Each reset took that SIM's VoWiFi down for a minute or more. The resets now
   double their spacing and stop after three, none is made while flight mode is on, and the count

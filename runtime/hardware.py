@@ -33,11 +33,19 @@ except ImportError:  # the image inherits pyserial from Control; tests may not h
     serial = None
 
 
+NET_ROOT = Path("/sys/class/net")
 EVENT_ROOTS = (
     ("tty", Path("/sys/class/tty"), re.compile(r"tty(?:USB|ACM)\d+")),
     ("usbmisc", Path("/sys/class/usbmisc"), re.compile(r"cdc-wdm\d+")),
-    ("net", Path("/sys/class/net"), re.compile(r"wwan\d+")),
+    # No name pattern: a net interface is judged by what the kernel says it is. See
+    # CellularNetInterfaces.
+    ("net", NET_ROOT, None),
 )
+# The name a modem's data interface has on hosts without predictable interface names. It is
+# recognised without reading sysfs, so those hosts behave exactly as before.
+WWAN_NAME = re.compile(r"wwan\d+")
+# ModemManager's QMI/MBIM control port, which NetworkManager lists as the modem device.
+CDC_WDM_NAME = re.compile(r"cdc-wdm\d+")
 # (vid, pid, AT interface, display name); the same default as control/app/config.py.
 DEFAULT_MODEM_PROFILES = (("2c7c", "0125", 2, "DJI/Quectel EC25"),
                           ("05c6", "9215", 2, "Quectel EC20"))
@@ -102,10 +110,84 @@ def compact_log(path, limit=4 * 1024 * 1024, keep=128 * 1024):
         pass
 
 
+class CellularNetInterfaces:
+    """The cellular data interfaces under one /sys/class/net.
+
+    systemd's default naming (99-default.link) turns wwan0 into a name such as wws27u1i4 on
+    Debian 13 and similar hosts, so the name cannot be relied on. qmi_wwan and cdc_mbim mark
+    the interface DEVTYPE=wwan in its uevent whatever it is called.
+
+    kernel_objects() runs twice a second through wake_signature(), and a host with many
+    Docker networks has dozens of veth interfaces, so reading every uevent on every call
+    would be a standing cost for nothing. Each interface is read once and the answer kept
+    while the same sysfs entry is there. The key is the name plus the entry's inode, which
+    the directory listing hands over for free: an interface removed and created again, even
+    under the same name, is a new sysfs entry (and a new ifindex) and is read again, and
+    reading the ifindex itself would cost a file read per interface per call.
+    """
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.known = {}
+
+    def names(self):
+        try:
+            with os.scandir(self.root) as entries:
+                present = {(entry.name, entry.inode()) for entry in entries}
+        except OSError:
+            present = set()
+        known = {}
+        for key in present:
+            cellular = self.known.get(key)
+            if cellular is None:
+                cellular = self.classify(key[0])
+            if cellular is not None:
+                known[key] = cellular
+        # Rebuilt from what is present, so interfaces that went away are forgotten.
+        self.known = known
+        return {name for (name, _), cellular in known.items() if cellular}
+
+    def classify(self, name):
+        if WWAN_NAME.fullmatch(name):
+            return True
+        try:
+            uevent = (self.root / name / "uevent").read_text(encoding="utf-8",
+                                                             errors="replace")
+        except OSError:
+            # Gone between the listing and the read. Nothing is cached, so an interface
+            # that does exist is asked again next time rather than written off.
+            return None
+        return "DEVTYPE=wwan" in uevent.splitlines()
+
+
+_cellular_net = {}
+
+
+def cellular_net_interfaces(root=None):
+    """Names of the cellular data interfaces present under root, /sys/class/net by default."""
+    root = NET_ROOT if root is None else root
+    interfaces = _cellular_net.get(root)
+    if interfaces is None:
+        interfaces = _cellular_net[root] = CellularNetInterfaces(root)
+    return interfaces.names()
+
+
+def is_cellular_interface(name):
+    """Whether a device NetworkManager lists is a modem's: its control port or its data
+    interface. The data interface uses the same decision that reports it to ModemManager."""
+    return bool(CDC_WDM_NAME.fullmatch(name) or WWAN_NAME.fullmatch(name)
+                or name in cellular_net_interfaces())
+
+
 def kernel_objects():
-    return {(subsystem, path.name)
-            for subsystem, root, pattern in EVENT_ROOTS
-            for path in root.glob("*") if pattern.fullmatch(path.name)}
+    objects = set()
+    for subsystem, root, pattern in EVENT_ROOTS:
+        if pattern is None:
+            objects.update((subsystem, name) for name in cellular_net_interfaces(root))
+        else:
+            objects.update((subsystem, path.name)
+                           for path in root.glob("*") if pattern.fullmatch(path.name))
+    return objects
 
 
 def atomic_json(path, value):
@@ -691,8 +773,8 @@ class HardwareSupervisor:
         for line in result.stdout.splitlines():
             device, separator, state = line.rpartition(":")
             device = device.replace(r"\:", ":")
-            if (separator and device and not re.fullmatch(r"(?:wwan|cdc-wdm)\d+", device)
-                    and state.strip().lower() != "unmanaged"):
+            if (separator and device and state.strip().lower() != "unmanaged"
+                    and not is_cellular_interface(device)):
                 unexpected.append(device)
         if unexpected:
             raise RuntimeError("NetworkManager claimed non-cellular interface(s): " +
@@ -875,7 +957,7 @@ class HardwareSupervisor:
             # releases the stale session and re-enumerates the complete QMI modem.
             qmi_present = any(path.exists() for path in Path("/sys/class/usbmisc").glob(
                 "cdc-wdm*"))
-            net_present = any(path.exists() for path in Path("/sys/class/net").glob("wwan*"))
+            net_present = bool(cellular_net_interfaces())
             # Same reason as data_attempt_at: a 0 default is indistinguishable from a reset
             # performed at monotonic zero, which suppressed this recovery for the first five
             # minutes of host uptime — exactly when a restarted Hardware container is most
