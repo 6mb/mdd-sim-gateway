@@ -6,6 +6,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **v1.13.0-rc1's Egress image did not start**, so every container update to it rolled back:
+  the orchestrator had begun importing `host/modem_probe.py` (for trying unrecognised modems),
+  which the Egress Dockerfile never copied. The image now carries it and the bridge module it
+  imports, and a test follows each runtime image's imports from its entry point and fails when
+  the Dockerfile misses one. CI does not build the Egress or Hardware images, so nothing had run
+  it before the release.
 - **A container update no longer asks for 6 GiB free.** The figure was fixed, sized for the
   images before they were slimmed, and refused a Raspberry Pi with 5.1 GiB free for an update
   whose arm64 archives total about 530 MB. It is now worked out from this release's archive
