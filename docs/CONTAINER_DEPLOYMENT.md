@@ -132,8 +132,8 @@ File Station 或 SMB 读取。YAML 的后续编辑应通过 Container Manager �
 - Egress 不发布 SOCKS 端口到 NAS；
 - `restart: unless-stopped`，用于 NAS 重启后恢复基础服务。
 
-Hardware 中的 NetworkManager 只允许管理 `wwan*` 和 `cdc-wdm*`，蜂窝连接强制
-`never-default`。如果它发现任何 NAS 物理网口、Open vSwitch、VLAN、Docker bridge 或
+Hardware 中的 NetworkManager 只允许管理 `ww*`（`wwan0`，或 `wws27u1i4` 这类可预测命名）
+和 `cdc-wdm*`，蜂窝连接强制 `never-default`。如果它发现任何 NAS 物理网口、Open vSwitch、VLAN、Docker bridge 或
 loopback 被接管，会停止蜂窝拨号。国家出口运行在容器网络中，不向 NAS 主路由表安装运营商
 路由。
 
