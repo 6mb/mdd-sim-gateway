@@ -223,7 +223,7 @@ const zh = {
   'Advanced IMS identity': '高级 IMS 身份',
   'Carrier defaults are applied automatically. Change these fields only when required by the carrier.': '系统会自动应用运营商默认值；仅在运营商明确要求时修改这些字段。',
   'Automatic carrier default': '自动使用运营商默认值', 'IMS access type': 'IMS 接入类型',
-  'Add ;user=phone to telephone-number SIP requests': '在电话号码 SIP 请求中添加 ;user=phone', 'Add parameters to the request URI of outgoing calls': '外呼时在请求地址中附加参数', 'Request URI parameters': '请求地址参数', 'Outgoing calls only; SMS is not affected. Separate several parameters with ;.': '仅用于拨出电话，不影响短信。多个参数用 ; 分隔。',
+  'Add ;user=phone to every SIP request, SMS included (older setting; the call-only option below replaces it)': '在所有 SIP 请求（含短信）中添加 ;user=phone（旧设置，已由下方仅用于外呼的选项取代）', 'Add parameters to the request URI of outgoing calls': '外呼时在请求地址中附加参数', 'Request URI parameters': '请求地址参数', 'Outgoing calls only; SMS is not affected. Separate several parameters with ;.': '仅用于拨出电话，不影响短信。多个参数用 ; 分隔。',
   'ePDG identity (IDr)': 'ePDG 身份（IDr）', 'Bare APN (default)': '裸 APN（默认）', 'IMS address family (CP)': 'IMS 地址族（CP）',
   'Auto-detect (recommended)': '自动检测（推荐）', 'Dual-stack (IPv4+IPv6)': '双栈（IPv4+IPv6）', 'IPv6 only': '仅 IPv6', 'IPv4 only': '仅 IPv4',
   'Local SIP port mapping': '本地 SIP 端口映射', Automatic: '自动', 'SIP listen': 'SIP 监听', 'SIP transport': 'SIP 传输协议',
