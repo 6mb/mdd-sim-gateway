@@ -2,7 +2,9 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
-## [Unreleased]
+## [1.13.0-rc1] - 2026-09-28
+
+First release candidate for 1.13.0. The automatic update channel stays on 1.9.5.
 
 ### Upgrade notes
 
@@ -28,6 +30,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   rather than coming up with picture conversion silently off.
 
 ### Added
+
+- **Line offline and recovery notifications.** A line that stays offline longer than a
+  threshold (10 minutes by default, 1-1440 on the Notifications page) sends `line_offline` once,
+  with the reason, and `line_recovered` when it registers again. Lines switched off, drafts and
+  devices with VoWiFi off do not count; several lines crossing the threshold together make one
+  message. Before this a line could stay down for hours with no notice at all.
+- **The Quectel EC20 (`05c6:9215`) is recognised out of the box**, and built-in models now also
+  reach installations whose saved hardware list predates them (a saved entry for the same
+  vid/pid still wins). The container stack read hardware settings from the wrong place, so saved
+  models and names never applied there; it now reads `settings.hardware`.
+- **Experimental: add a modem the gateway does not know.** The Devices page lists unrecognised
+  USB devices that look like modems; "Try this device" finds the AT port and checks SIM access
+  with `AT+CSIM` before adding it, instead of editing `config.yaml` by hand.
 
 - **Messages are marked read.** A conversation with something new shows how many, and opening
   it clears that. The position is recorded as a message id rather than a time, because an
@@ -120,6 +135,17 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   engine image.
 
 ### Fixed
+
+- On the container stack, texts, calls and tunnel events from the lines never reached the WebUI
+  on an installation migrated from a host install: a saved `manager_url` pointing at the host
+  won over the container address, and the engines could not reach it. The container address
+  now wins there, and a delivery that fails is logged by the engine.
+- On the container stack, the browser softphone could not connect to a line going out directly
+  after it re-rendered its configuration: the softphone WebSocket was bound to the uplink
+  address. It is now bound on the Engine network (#195).
+- On a host install (local mode), switching on a country exit took the host's DNS: the exit's
+  tun interface registered itself as the default DNS route, so the host resolved nothing. The
+  exit interfaces are kept out of the host's DNS.
 
 - **Outgoing calls on T-Mobile US and MVNOs on its IMS core (310-240, such as Ultra Mobile).**
   The network refused every call to a US number with 500 "CC_IMS_TRY_NEXT_MGCF_FAIL" because
