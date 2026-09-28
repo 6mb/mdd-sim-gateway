@@ -12,6 +12,17 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   imports, and a test follows each runtime image's imports from its entry point and fails when
   the Dockerfile misses one. CI does not build the Egress or Hardware images, so nothing had run
   it before the release.
+- **A container update no longer asks for 6 GiB free.** The figure was fixed, sized for the
+  images before they were slimmed, and refused a Raspberry Pi with 5.1 GiB free for an update
+  whose arm64 archives total about 530 MB. It is now worked out from this release's archive
+  sizes -- staging must hold every archive, Docker's image store every archive and its
+  unpacked image -- with 4 GiB when the Release does not report sizes, and a refusal says how
+  much is needed and how much is free. The check runs in the release being updated from, so it
+  takes effect from the update after this one.
+- **A successful container update removes the releases before the one it replaced.** Only
+  the new release and its rollback are kept, besides anything a container uses and the host
+  install's `latest`/`trusted` images; before, every release's images stayed until someone
+  pruned them by hand.
 
 ## [1.13.0-rc1] - 2026-09-28
 
