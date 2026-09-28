@@ -17,6 +17,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   refused to authenticate, and retried every minute until the line was saved again. Every
   start now rebinds such a line to the reader the card monitor sees its SIM in, as modem lines
   already were. No card is read to find it.
+### Changed
+
+- **One `;user=phone` setting on the line form instead of two.** The call-only request-URI
+  parameters replace the old endpoint-wide checkbox, which also put `;user=phone` on SMS. The old
+  checkbox is shown only on a line where it was turned on by hand, labelled as the older setting,
+  so it can be turned off. O2 (234-10) keeps the endpoint-wide default its SMS has always used,
+  and its form now shows the call option on with `user=phone`.
 
 ## [1.13.0-rc2] - 2026-09-28
 
