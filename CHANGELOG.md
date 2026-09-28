@@ -4,6 +4,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Relay mode could not be switched on on Synology.** The check that loads the media firewall
+  in a throwaway engine read that container's output, which Docker hands back only for the
+  `json-file` and `journald` log drivers; DSM's daemon uses its own `db` driver, so the answer
+  was lost and every attempt ended in "engine firewall probe gave no result", leaving the mode
+  unchanged. The probe now asks for `json-file`.
+- **A line on a card reader follows its SIM to whichever reader holds it.** Switching the eSIM
+  in a reader to a profile last used in another reader started that profile's line with the
+  old USB port: the engine found no reader there, fell back to one holding another line's card,
+  refused to authenticate, and retried every minute until the line was saved again. Every
+  start now rebinds such a line to the reader the card monitor sees its SIM in, as modem lines
+  already were. No card is read to find it.
 ### Changed
 
 - **One `;user=phone` setting on the line form instead of two.** The call-only request-URI
