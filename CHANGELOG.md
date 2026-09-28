@@ -2,6 +2,16 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **Relay mode could not be switched on on Synology.** The check that loads the media firewall
+  in a throwaway engine read that container's output, which Docker hands back only for the
+  `json-file` and `journald` log drivers; DSM's daemon uses its own `db` driver, so the answer
+  was lost and every attempt ended in "engine firewall probe gave no result", leaving the mode
+  unchanged. The probe now asks for `json-file`.
+
 ## [1.13.0-rc2] - 2026-09-28
 
 Second release candidate for 1.13.0. The automatic update channel stays on 1.9.5.
