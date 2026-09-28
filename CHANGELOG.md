@@ -60,6 +60,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   and is unchanged. Relay mode needs nf_tables with its socket match in the host kernel. On a
   full-container deployment it has been tested on Debian only, without a registered line, and
   not on a Synology NAS.
+- Relay mode on older kernels (Synology DSM's 4.4), which have neither nf_tables nor its socket
+  match: the engines filter their media interface with iptables-legacy instead, IPv4 and IPv6.
+  nftables is still tried first, and a kernel that takes it runs exactly the rules it did
+  before; enabling checks the path that will actually be used and is refused, as before, only
+  when neither loads. Without the socket match the fallback can admit only the RTP port range,
+  so it does not tell the browser leg from the carrier leg: on an IPv4 PDN the carrier leg's
+  RTP is reachable through the relay, though only with valid TURN credentials, where direct
+  mode exposes the same ports with none. AMI, SIP and the WebSocket stay outside the range and
+  blocked. `python -m app.media status` and `/api/media` say which filter is in use and whether
+  it tells the two legs apart.
 - Client apps can sign in with the administrator's credentials and receive a long-lived bearer
   token (`POST /api/auth/client/login`). A token is shown once and stored only as a digest,
   expires after 90 days without use, and ends when the administrator revokes it
@@ -105,7 +115,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - A received part the browser cannot show is offered as a download marked "Preview not
   available".
 - The engine image now includes nftables, which relay mode uses to filter each line's media
-  interface. An update therefore rebuilds the engine image.
+  interface, and iptables-legacy, its fallback on kernels without nf_tables (about 0.3 MB; the
+  xtables extensions it uses already come with nftables). An update therefore rebuilds every
+  engine image.
 
 ### Fixed
 

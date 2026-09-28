@@ -194,7 +194,8 @@ def _clear_runtime_state(base: str):
     """
     run_dir = os.path.join(base, "run")
     for name in ("swu_status.json", "pcscf", "pcscf.applied", "pin_status.json",
-                 "usim_status.json", "engine.env", "swu.ctl", "media.json", "media.nft"):
+                 "usim_status.json", "engine.env", "swu.ctl", "media.json", "media.nft",
+                 "media.iptables"):
         try:
             os.unlink(os.path.join(run_dir, name))
         except FileNotFoundError:

@@ -141,9 +141,30 @@ class MediaControlTests(unittest.TestCase):
         with patch.object(main.cfg, "list_instances",
                           return_value=[{"id": iid} for iid in modes]), \
                 patch.object(main.engine, "media_mode_of", side_effect=modes.get), \
-                patch.object(main, "_line_media_state", return_value="ready"):
+                patch.object(main, "_line_media_report",
+                             return_value={"state": "ready", "filter": "nft"}):
             status = main.api_media()
         self.assertEqual(status["lines"], {"1": "ready", "2": "no_media_network"})
+
+    def test_media_status_says_which_filter_the_engines_use(self):
+        modes = {"1": media.RELAY}
+        for recorded, report, separates in (
+                # Recorded before the fallback existed: only nftables could have enabled it.
+                ({}, {"state": "ready"}, True),
+                ({"filter": "nft"}, {"state": "ready", "filter": "nft"}, True),
+                ({"filter": "iptables-legacy"},
+                 {"state": "ready", "filter": "iptables-legacy"}, False)):
+            media.save_state({"mode": "relay", "port": 8478, "secret": "x", **recorded})
+            with patch.object(main.cfg, "list_instances", return_value=[{"id": "1"}]), \
+                    patch.object(main.engine, "media_mode_of", side_effect=modes.get), \
+                    patch.object(main, "_line_media_report", return_value=report):
+                status = main.api_media()
+            self.assertEqual(status["filter"], recorded.get("filter", "nft"))
+            self.assertEqual(status["filter_separates_legs"], separates)
+            self.assertEqual(status["line_filters"], {"1": report.get("filter", "")})
+
+    def test_direct_mode_status_carries_no_filter(self):
+        self.assertNotIn("filter", main.api_media())
 
     def test_direct_mode_provisioning_carries_no_ice_servers(self):
         with patch.object(main.cfg, "get_instance", return_value=INSTANCE):

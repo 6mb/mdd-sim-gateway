@@ -1715,9 +1715,13 @@ async def media_supervisor():
         await asyncio.sleep(MEDIA_CONVERGE_SECONDS)
 
 
-def _line_media_state(iid: str) -> str:
+def _line_media_report(iid: str) -> dict:
     """The engine's own report on its media interface (engine/entrypoint.sh), relay mode."""
-    return str((engine.read_run_json(iid, "media.json") or {}).get("state") or "starting")
+    return engine.read_run_json(iid, "media.json") or {}
+
+
+def _line_media_state(iid: str) -> str:
+    return str(_line_media_report(iid).get("state") or "starting")
 
 
 async def status_poller():
@@ -7689,15 +7693,28 @@ def api_media():
     current = media.mode(state)
     result = {"mode": current, "relay": media.relay_status()}
     if current == media.RELAY:
+        lines, line_filters = {}, {}
+        for iid in (str(inst["id"]) for inst in cfg.list_instances()):
+            line_mode = engine.media_mode_of(iid)
+            if line_mode == media.RELAY_PENDING:
+                lines[iid] = "no_media_network"
+            elif line_mode == media.RELAY:
+                report = _line_media_report(iid)
+                lines[iid] = str(report.get("state") or "starting")
+                # What the engine actually loaded; absent from engines older than the
+                # iptables-legacy fallback, and while the line is still starting.
+                line_filters[iid] = str(report.get("filter") or "")
+        kind = media.recorded_filter(state)
         result.update({
             "port": state.get("port"),
             "public_host": state.get("public_host") or "",
             "public_port": state.get("public_port"),
-            "lines": {iid: (_line_media_state(iid) if line_mode == media.RELAY
-                            else "no_media_network")
-                      for iid in (str(inst["id"]) for inst in cfg.list_instances())
-                      if (line_mode := engine.media_mode_of(iid)) in {media.RELAY,
-                                                                      media.RELAY_PENDING}},
+            "lines": lines,
+            # The engines' media filter, as probed when relay mode was enabled, and whether it
+            # tells the browser leg from the IMS leg (iptables-legacy goes by port only).
+            "filter": kind,
+            "filter_separates_legs": media.filter_separates_legs(kind),
+            "line_filters": line_filters,
         })
     return result
 

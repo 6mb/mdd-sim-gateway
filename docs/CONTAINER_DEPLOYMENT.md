@@ -195,9 +195,13 @@ sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media rel
 更新，更新助手会和其他镜像一样从 Release 附件导入本版本的中继镜像（走相同的下载线路和校验）；
 导入失败不影响更新，中继继续使用原有镜像。
 
-启用时会先创建媒体网络，在临时 Engine 容器中确认内核支持所需的 nftables 规则（nf_tables 及其
-socket 匹配），并等待中继应答 STUN 请求；任一步失败都会回滚且不修改当前模式。Synology DSM
-的内核较旧（DS1621+ 为 4.4），很可能不满足这个要求，届时启用会被拒绝并给出原因，直连模式
+启用时会先创建媒体网络，在临时 Engine 容器中确认内核能加载引擎的媒体过滤规则，并等待中继
+应答 STUN 请求；任一步失败都会回滚且不修改当前模式。过滤规则优先使用 nftables（需要 nf_tables
+及其 socket 匹配），内核不支持时改用 iptables-legacy，Synology DSM 的旧内核（DS1621+ 为 4.4）
+属于这种情况。iptables-legacy 只能按 RTP 端口范围放行，区分不了浏览器和运营商（IMS）两条腿：
+IPv4 PDN 下运营商那条腿的 RTP 也在这个范围里，经中继可以访问到，但需要有效的 TURN 凭据，仍比
+直连模式严格；AMI、SIP 和 WebSocket 不在范围内，照样挡住。`python -m app.media status` 和
+`/api/media` 会显示当前用的是哪一种。两种都加载不了时启用会被拒绝并给出原因，直连模式
 不受影响。切换会依次重建所有运行中的线路。启用后需要在 NAS 前端的路由器/防火墙放行中继端口
 的 UDP 和 TCP；经反向代理部署时该端口不是 HTTP，需要单独做 TCP/UDP 转发。
 

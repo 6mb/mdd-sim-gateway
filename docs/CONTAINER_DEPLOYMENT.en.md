@@ -211,11 +211,16 @@ Docker Hub, and fails if neither can be reached. From then on every one-click up
 this release's relay image from the Release assets like the other images, over the same routes and
 checksums; a failed import does not fail the update and the relay keeps the image it has.
 
-Enabling creates the media network, checks in a throwaway Engine container that the kernel
-supports the required nftables rule (nf_tables and its socket match), and waits for the relay to
-answer a STUN request; any failure rolls back and leaves the mode unchanged. Synology DSM kernels
-are old (4.4 on a DS1621+) and very likely do not meet this, in which case enabling is refused with
-the reason and direct mode is unaffected. Switching rebuilds every running line one at a time.
+Enabling creates the media network, checks in a throwaway Engine container that the kernel can
+load the engines' media filter, and waits for the relay to answer a STUN request; any failure rolls
+back and leaves the mode unchanged. The filter is nftables where the kernel supports it (nf_tables
+and its socket match) and iptables-legacy where it does not, as on Synology DSM's old kernel (4.4
+on a DS1621+). iptables-legacy can only admit the RTP port range, so it cannot tell the browser leg
+from the carrier (IMS) leg: on an IPv4 PDN the carrier leg's RTP is in that range and reachable
+through the relay, though only with valid TURN credentials, which is still stricter than direct
+mode; AMI, SIP and the WebSocket are outside the range and stay blocked. `python -m app.media
+status` and `/api/media` show which one is in use. If neither loads, enabling is refused with the
+reason and direct mode is unaffected. Switching rebuilds every running line one at a time.
 Once enabled, forward the relay port's UDP and TCP in any router or firewall in front of the NAS;
 behind a reverse proxy that port is not HTTP, so it needs a plain TCP/UDP forward of its own.
 

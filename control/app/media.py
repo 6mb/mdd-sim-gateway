@@ -22,6 +22,8 @@ Two modes, each with its own code path:
     * each engine drops everything arriving on its media interface except UDP to
       ``RTP_PORTS`` (engine/render.py writes the ruleset, the entrypoint loads it). The engine
       already holds NET_ADMIN; the relay, which faces the internet, holds no capability at all.
+      With nftables only packets for the browser leg's sockets get in; on a kernel without it
+      the iptables-legacy fallback goes by the port range alone (see IPTABLES_LEGACY).
 
 The mode is switched by ``python -m app.media`` (install.sh ``media`` for a host install,
 ``docker exec`` for the container stack). Enabling prepares and verifies everything before it
@@ -633,9 +635,35 @@ def engine_attachment(client) -> dict | None:
 
 
 # ------------------------------------------------------------------ switching
-# What engine/render.py's media_ruleset relies on, tried once in a throwaway engine container
-# before any line is moved: nf_tables, and its socket match on the input hook. A kernel without
-# them would leave every line's media interface down.
+# How an engine filters its media interface (engine/entrypoint.sh reports it in media.json).
+# nftables tells the browser leg from the IMS leg by the socket a packet lands on;
+# iptables-legacy, the fallback for kernels without nf_tables or its socket match, can only go
+# by the port range, which the IMS leg's RTP shares on an IPv4 PDN.
+NFT = "nft"
+IPTABLES_LEGACY = "iptables-legacy"
+
+
+def filter_separates_legs(kind: str) -> bool:
+    return kind == NFT
+
+
+def recorded_filter(state: dict) -> str:
+    """What the probe found when relay mode was enabled. A state recorded before the fallback
+    existed has none, and could only have been enabled with nftables."""
+    return str(state.get("filter") or NFT)
+
+
+def describe_filter(kind: str) -> str:
+    if filter_separates_legs(kind):
+        return f"{kind} (browser leg only)"
+    return (f"{kind} (RTP port range only: does not tell the browser leg from the IMS leg, "
+            "whose RTP on an IPv4 PDN is in the same range)")
+
+
+# What engine/render.py's rulesets rely on, tried once in a throwaway engine container before
+# any line is moved, in the order the entrypoint tries them: nf_tables with its socket match on
+# the input hook, else iptables-legacy (IPv4, and IPv6 unless the kernel has none). A kernel
+# that takes neither would leave every line's media interface down.
 PROBE_RULESET = (
     "table inet mdd_media_probe {\n"
     "  chain input {\n"
@@ -643,6 +671,27 @@ PROBE_RULESET = (
     f"    udp dport {RTP_PORTS[0]}-{RTP_PORTS[1]} socket wildcard 0 accept\n"
     "  }\n"
     "}\n")
+# engine/render.py's media_legacy_ruleset for the probe's only interface. The probe's own
+# namespace goes away with it, so the DROP never touches a line.
+PROBE_LEGACY_RULESET = (
+    "*filter\n"
+    ":INPUT ACCEPT [0:0]\n"
+    ":FORWARD ACCEPT [0:0]\n"
+    ":OUTPUT ACCEPT [0:0]\n"
+    f"-A INPUT -i eth0 -p udp -m udp --dport {RTP_PORTS[0]}:{RTP_PORTS[1]} -j ACCEPT\n"
+    "-A INPUT -i eth0 -j DROP\n"
+    "COMMIT\n")
+# Prints the filter it loaded as its last line; fails, with each tool's own message on
+# stderr, when neither loads.
+PROBE_SCRIPT = r"""
+if printf '%s' "$RULES" | nft -f -; then echo "filter=nft"; exit 0; fi
+echo "nftables ruleset refused, trying iptables-legacy" >&2
+printf '%s' "$LEGACY_RULES" | iptables-legacy-restore || exit 1
+if [ -e /proc/net/if_inet6 ]; then
+  printf '%s' "$LEGACY_RULES" | ip6tables-legacy-restore || exit 1
+fi
+echo "filter=iptables-legacy"
+"""
 
 
 PROBE_CONTAINER = "mdd-sim-gateway-media-probe"
@@ -662,7 +711,9 @@ def _remove_probe(client) -> None:
             log.warning("could not remove %s: %s", PROBE_CONTAINER, exc)
 
 
-def probe_engine_firewall(client, network) -> None:
+def probe_engine_firewall(client, network) -> str:
+    """The filter engines will use on this host (NFT or IPTABLES_LEGACY), found by loading it.
+    MediaError when neither loads."""
     from . import engine
     try:
         image = engine.ensure_image(client)
@@ -670,24 +721,38 @@ def probe_engine_firewall(client, network) -> None:
         raise MediaError(f"engine image unavailable: {exc}") from exc
     _remove_probe(client)
     try:
-        client.containers.run(
+        output = client.containers.run(
             image.id,
             name=PROBE_CONTAINER,
-            entrypoint=["sh", "-c", 'printf "%s" "$RULES" | nft -f -'],
-            environment={"RULES": PROBE_RULESET},
+            entrypoint=["sh", "-c", PROBE_SCRIPT],
+            environment={"RULES": PROBE_RULESET, "LEGACY_RULES": PROBE_LEGACY_RULESET},
             network=network.name,
             cap_add=["NET_ADMIN"],
             labels={MANAGED_LABEL: "true", COMPONENT_LABEL: "media-probe"},
             remove=True, stdout=True, stderr=True)
-    except Exception as exc:  # noqa: BLE001 - ContainerError carries nft's own message
+    except Exception as exc:  # noqa: BLE001 - ContainerError carries the tools' own messages
         detail = getattr(exc, "stderr", b"") or str(exc)
         if isinstance(detail, bytes):
             detail = detail.decode(errors="replace")
         raise MediaError("engines cannot filter the media network on this host (the engine "
-                         "image needs nftables, the kernel nf_tables with its socket match): "
+                         "image needs nftables with the kernel's nf_tables and its socket "
+                         "match, or iptables-legacy with x_tables): "
                          f"{detail.strip()}") from exc
     finally:
         _remove_probe(client)
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    kind = ""
+    for line in str(output or "").splitlines():
+        if line.startswith("filter="):
+            kind = line.partition("=")[2].strip()
+    if kind not in (NFT, IPTABLES_LEGACY):
+        raise MediaError(f"engine firewall probe gave no result: {str(output or '').strip()}")
+    if kind == IPTABLES_LEGACY:
+        log.warning("this kernel refuses the nftables media ruleset; engines will filter the "
+                    "media network with iptables-legacy, by port range only (the IMS leg's "
+                    "RTP on an IPv4 PDN shares that range)")
+    return kind
 
 
 def enable(client, *, port: int, bind: str = "", public_host: str = "",
@@ -718,7 +783,7 @@ def _enable(client, *, port: int, bind: str, public_host: str,
     }
     try:
         network = ensure_network(client)
-        probe_engine_firewall(client, network)
+        state["filter"] = probe_engine_firewall(client, network)
         ensure_relay(client, state, network)
         ready, reason = wait_ready(client)
         if not ready:
@@ -797,6 +862,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"port {state.get('port')}"
                   + (f", clients use {state.get('public_host') or '<WebUI host>'}:"
                      f"{state.get('public_port')}"))
+            print(f"engine media filter: {describe_filter(recorded_filter(state))}")
             print(f"lines on the media network: {', '.join(attached_engines(client)) or 'none'}")
         return 0
     if args.command == "relay":
@@ -818,6 +884,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"media mode: relay (port {new['port']}/udp+tcp)."
               + ("" if mode(state) == RELAY else
                  " Running lines are rebuilt one at a time and register again."))
+        print(f"engine media filter: {describe_filter(recorded_filter(new))}")
         return 0
     if args.command == "direct":
         if mode(state) == DIRECT and not attached_engines(client) and _container(client) is None:
