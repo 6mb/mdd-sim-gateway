@@ -2,6 +2,17 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **v1.13.0-rc1's Egress image did not start**, so every container update to it rolled back:
+  the orchestrator had begun importing `host/modem_probe.py` (for trying unrecognised modems),
+  which the Egress Dockerfile never copied. The image now carries it and the bridge module it
+  imports, and a test follows each runtime image's imports from its entry point and fails when
+  the Dockerfile misses one. CI does not build the Egress or Hardware images, so nothing had run
+  it before the release.
+
 ## [1.13.0-rc1] - 2026-09-28
 
 First release candidate for 1.13.0. The automatic update channel stays on 1.9.5.
