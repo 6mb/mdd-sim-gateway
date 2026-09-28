@@ -121,6 +121,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Every incoming SMS no longer ends in a failed SIP request.** Besides handing the text to the
+  manager, each engine forwarded it to the browser softphone as a SIP MESSAGE, which the
+  softphone has no handler for and answered with 405 Method Not Allowed. The WebUI shows texts
+  from the manager's store, so the forward is gone; nothing that was visible changes.
+
 - On the container stack, the browser softphone had no audio on a line behind a country exit.
   Such a line is only on the internal Engine network, and Docker publishes no port there, so its
   RTP ports were never reachable. Control now runs a small `mdd-sim-gateway-rtp-forward`
