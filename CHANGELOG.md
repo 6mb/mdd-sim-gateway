@@ -24,6 +24,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   checkbox is shown only on a line where it was turned on by hand, labelled as the older setting,
   so it can be turned off. O2 (234-10) keeps the endpoint-wide default its SMS has always used,
   and its form now shows the call option on with `user=phone`.
+### Changed
+
+- **A long SMS completed by a late part says so, and is pushed again whole** (#193). A text
+  still missing parts after three minutes is shown and pushed with `[…]` for the gap; a part
+  that arrives later (up to an hour) completes it where it is. It keeps its place, its time and
+  its read state, and now carries a "Completed" mark with the time, stored with the message so
+  a reloaded page and a native client show it too. Once the last part is in, the whole text is
+  pushed once more, opening with "（补全）" so it reads as the rest of the first push rather
+  than a new message -- for anyone who reads only the push, the missing part may have been the
+  code they were waiting for.
 
 ## [1.13.0-rc2] - 2026-09-28
 

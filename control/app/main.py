@@ -1968,6 +1968,26 @@ def _line_subscriber(iid: str) -> str:
     return f"imsi:{imsi}" if imsi else ""
 
 
+# Opens the push sent when a late part completes a text already pushed incomplete, so the
+# second notification reads as the rest of the first rather than as a new message.
+SMS_COMPLETED_MARK = "（补全）"
+
+
+async def _publish_completed_sms(rec: dict) -> None:
+    """Announce a text that a late part has just made whole (#193).
+
+    Its incomplete form was published when the reaper gave up waiting -- pushed like any text,
+    since that is what stored it -- and many people read only the push, where the missing part
+    may have been the code they were waiting for. So the whole text is pushed once more, once
+    the last part is in rather than for each part on the way. It is not a new arrival for read
+    state: the message stays where the reader saw it, marked completed.
+    """
+    iid = str(rec["instance"])
+    await asyncio.to_thread(_harvest_allowance_reply, iid, rec["peer"])
+    _dispatch_push(notify_push.EV_INCOMING_SMS, iid, rec["peer"],
+                   SMS_COMPLETED_MARK + rec["body"])
+
+
 async def _publish_incoming_sms(rec: dict) -> None:
     """Announce one newly stored inbound text, whichever transport delivered it."""
     iid = str(rec["instance"])
@@ -7934,14 +7954,17 @@ async def api_engine_event(payload: dict):
                              "message %d", seq, total, sender, ref, late["message_id"])
                     return {"ok": True, "merged": "duplicate"}
                 merged = _join_sms_parts(late["bodies"], late["seqs"], total)
-                rec = await asyncio.to_thread(store.set_message_body, late["message_id"],
-                                              merged)
+                rec = await asyncio.to_thread(
+                    store.set_message_body, late["message_id"], merged,
+                    int(time.time()) if late["complete"] else None)
                 log.info("late part %d/%d from %s (ref %d) merged into message %d — %s",
                          seq, total, sender, ref, late["message_id"],
                          "now complete" if late["complete"]
                          else f"{len(late['seqs'])}/{total} parts")
                 if rec:
                     await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
+                    if late["complete"]:
+                        await _publish_completed_sms(rec)
                 return {"ok": True, "merged": f"{len(late['seqs'])}/{total}"}
             group = await asyncio.to_thread(store.add_sms_segment, iid, sender, ref, total,
                                             seq, text, sent_ts=sent_ts, with_meta=True)
