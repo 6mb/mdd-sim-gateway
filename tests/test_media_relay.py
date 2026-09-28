@@ -3,6 +3,7 @@ import json
 import hashlib
 import hmac
 import importlib
+import importlib.util
 import ipaddress
 import os
 import subprocess
@@ -249,18 +250,44 @@ class MediaRelayTests(unittest.TestCase):
         self.assertEqual(client.created, [])
         self.assertTrue(client.network.removed)
 
-    def test_the_probe_loads_the_engine_ruleset_in_a_throwaway_engine(self):
+    def probe(self, output):
         client = _Client(self.media, network=_Network())
-        client.containers.run = Mock()
+        client.containers.run = Mock(return_value=output)
         engine = self.media._test_engine
         with patch.dict(sys.modules, {"control.app.engine": engine}), \
                 patch.object(engine, "ensure_image", return_value=SimpleNamespace(id="sha256:eng")):
-            self.media.probe_engine_firewall(client, SimpleNamespace(name="media-net"))
-        args, kwargs = client.containers.run.call_args
+            kind = self.media.probe_engine_firewall(client, SimpleNamespace(name="media-net"))
+        return kind, client.containers.run.call_args
+
+    def test_the_probe_loads_the_engine_ruleset_in_a_throwaway_engine(self):
+        kind, (args, kwargs) = self.probe(b"filter=nft\n")
+        self.assertEqual(kind, "nft")
         self.assertEqual(args[0], "sha256:eng")
         self.assertTrue(kwargs["remove"])
         self.assertEqual(kwargs["network"], "media-net")
         self.assertIn("socket wildcard 0 accept", kwargs["environment"]["RULES"])
+        self.assertIn("--dport 10000:10199", kwargs["environment"]["LEGACY_RULES"])
+
+    def test_the_probe_reports_the_iptables_legacy_fallback(self):
+        # stderr is part of the output: nft's refusal comes before the result.
+        kind, _call = self.probe(b"Error: Could not process rule: No such file or directory\n"
+                                 b"nftables ruleset refused, trying iptables-legacy\n"
+                                 b"filter=iptables-legacy\n")
+        self.assertEqual(kind, "iptables-legacy")
+        self.assertFalse(self.media.filter_separates_legs(kind))
+        self.assertTrue(self.media.filter_separates_legs("nft"))
+
+    def test_a_probe_without_a_result_is_a_failure(self):
+        with self.assertRaisesRegex(self.media.MediaError, "no result"):
+            self.probe(b"")
+
+    def test_enabling_records_the_filter_the_probe_found(self):
+        client = _Client(self.media)
+        with patch.object(self.media, "probe_engine_firewall", return_value="iptables-legacy"), \
+                patch.object(self.media, "wait_ready", return_value=(True, "")):
+            self.media.enable(client, port=8478, image="relay:test")
+        self.assertEqual(self.media.load_state()["filter"], "iptables-legacy")
+        self.assertEqual(self.media.recorded_filter({}), "nft")
 
     def test_a_relay_that_never_answers_leaves_direct_mode_and_nothing_behind(self):
         client = _Client(self.media)
@@ -275,7 +302,7 @@ class MediaRelayTests(unittest.TestCase):
 
     def test_enabling_records_relay_mode_only_after_the_relay_answers(self):
         client = _Client(self.media)
-        probe = patch.object(self.media, "probe_engine_firewall")
+        probe = patch.object(self.media, "probe_engine_firewall", return_value="nft")
         probe.start()
         self.addCleanup(probe.stop)
         with patch.object(self.media, "wait_ready", return_value=(True, "")):
@@ -535,6 +562,68 @@ class RelayEntrypointTests(unittest.TestCase):
         result = self.run_entrypoint("172.17.0.5")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no address on the media network", result.stderr)
+
+
+class ProbeScriptTests(unittest.TestCase):
+    """The engine firewall probe's script run for real, with stub nft and iptables tools on
+    PATH: it tries what the engine entrypoint tries, in the same order."""
+
+    def run_probe(self, *, nft, legacy4, legacy6, ipv6=True):
+        media = media_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = Path(tmp, "calls")
+            for name, code in (("nft", nft), ("iptables-legacy-restore", legacy4),
+                               ("ip6tables-legacy-restore", legacy6)):
+                tool = Path(tmp, name)
+                tool.write_text(f'#!/bin/sh\ncat > "{tmp}/{name}.in"\n'
+                                f'echo {name} >> "{calls}"\nexit {code}\n')
+                tool.chmod(0o755)
+            inet6 = Path(tmp, "if_inet6")
+            if ipv6:
+                inet6.write_text("")
+            result = subprocess.run(
+                ["sh", "-c", media.PROBE_SCRIPT.replace("/proc/net/if_inet6", str(inet6))],
+                capture_output=True, text=True,
+                env={"PATH": f"{tmp}:/usr/bin:/bin", "RULES": media.PROBE_RULESET,
+                     "LEGACY_RULES": media.PROBE_LEGACY_RULESET})
+            ran = calls.read_text().split() if calls.exists() else []
+            fed = {name: Path(tmp, f"{name}.in").read_text() for name in ran}
+        return result, ran, fed, media
+
+    def test_nftables_alone_runs_where_the_kernel_takes_it(self):
+        result, ran, fed, media = self.run_probe(nft=0, legacy4=0, legacy6=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "filter=nft")
+        self.assertEqual(ran, ["nft"])
+        self.assertEqual(fed["nft"], media.PROBE_RULESET)
+
+    def test_iptables_legacy_is_loaded_for_ipv4_and_ipv6_when_nftables_is_refused(self):
+        result, ran, fed, media = self.run_probe(nft=1, legacy4=0, legacy6=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "filter=iptables-legacy")
+        self.assertEqual(ran, ["nft", "iptables-legacy-restore", "ip6tables-legacy-restore"])
+        self.assertEqual(fed["iptables-legacy-restore"], media.PROBE_LEGACY_RULESET)
+        self.assertEqual(fed["ip6tables-legacy-restore"], media.PROBE_LEGACY_RULESET)
+
+    def test_a_kernel_without_ipv6_needs_only_the_ipv4_rules(self):
+        result, ran, _fed, _media = self.run_probe(nft=1, legacy4=0, legacy6=1, ipv6=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(ran, ["nft", "iptables-legacy-restore"])
+
+    def test_neither_loading_fails_the_probe(self):
+        for legacy4, legacy6 in ((1, 0), (0, 1)):
+            result, _ran, _fed, _media = self.run_probe(nft=1, legacy4=legacy4, legacy6=legacy6)
+            self.assertNotEqual(result.returncode, 0, (legacy4, legacy6))
+            self.assertNotIn("filter=", result.stdout)
+
+    def test_the_probe_loads_what_the_engine_renders(self):
+        spec = importlib.util.spec_from_file_location("mdd_render_probe",
+                                                      ROOT / "engine" / "render.py")
+        render = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(render)
+        media = media_module()
+        self.assertEqual(media.PROBE_LEGACY_RULESET,
+                         render.media_legacy_ruleset("eth0", *media.RTP_PORTS))
 
 
 if __name__ == "__main__":

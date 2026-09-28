@@ -5,8 +5,10 @@ the browser leg, never the IMS leg inside the tunnel.
 """
 import importlib
 import importlib.util
+import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -105,6 +107,27 @@ class MediaRenderTests(unittest.TestCase):
         self.assertLess(rules.index("delete table inet mdd_media"),
                         rules.index("table inet mdd_media {"))
 
+    def test_the_legacy_fallback_admits_only_the_lines_rtp_range_on_the_media_interface(self):
+        rules = engine_render().media_legacy_ruleset("eth1", 12000, 12011)
+        lines = rules.splitlines()
+        self.assertEqual(lines[0], "*filter")
+        self.assertEqual(lines[-1], "COMMIT")
+        self.assertEqual([line for line in lines if line.startswith("-A")], [
+            "-A INPUT -i eth1 -p udp -m udp --dport 12000:12011 -j ACCEPT",
+            "-A INPUT -i eth1 -j DROP",
+        ])
+        # The socket match is what a 4.4 kernel lacks; nothing here may need it.
+        self.assertNotIn("socket", rules)
+        # Replaces the table rather than appending, so loading it again changes nothing.
+        self.assertIn(":INPUT ACCEPT [0:0]", lines)
+
+    def test_render_takes_the_legacy_port_range_from_the_line(self):
+        module = engine_render()
+        ctx = module.build_context(instance_json())
+        self.assertIn(f"--dport {ctx['rtp_start']}:{ctx['rtp_end']} ",
+                      module.media_legacy_ruleset("eth1", ctx["rtp_start"], ctx["rtp_end"]))
+        self.assertEqual((ctx["rtp_start"], ctx["rtp_end"]), (12000, 12011))
+
     def test_the_media_interface_is_found_by_subnet(self):
         module = engine_render()
         out = ("1: lo    inet 127.0.0.1/8 scope host lo\n"
@@ -135,6 +158,10 @@ class MediaRenderTests(unittest.TestCase):
                     module.main()
                 env_text = env_path.read_text()
                 self.assertEqual(Path(tmp, "run", "media.nft").exists(), expected)
+                self.assertEqual(Path(tmp, "run", "media.iptables").exists(), expected)
+                if expected:
+                    self.assertIn("-A INPUT -i eth1 -p udp -m udp --dport 10000:10199 -j ACCEPT",
+                                  Path(tmp, "run", "media.iptables").read_text())
                 self.assertEqual("MDD_MEDIA_MODE=relay" in env_text, expected)
                 self.assertEqual("MDD_MEDIA_IF=eth1" in env_text, expected)
 
@@ -149,6 +176,67 @@ def _redirect_open(outputs: Path, tmp: str):
             path = str(outputs / path.strip("/").replace("/", "_"))
         return real_open(path, mode, *args, **kwargs)
     return fake_open
+
+
+class EntrypointMediaFirewallTests(unittest.TestCase):
+    """The entrypoint's relay-mode block, extracted and run for real with stub nft, iptables
+    and ip tools: nftables first, iptables-legacy only when the kernel refuses it."""
+
+    def run_block(self, *, nft, legacy4=0, legacy6=0, ipv6=True, media_if="eth1"):
+        text = (ROOT / "engine" / "entrypoint.sh").read_text()
+        block = text[text.index("load_media_firewall() {"):text.index("# --- 2. ")]
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = Path(tmp, "calls")
+            for name, code in (("nft", nft), ("iptables-legacy-restore", legacy4),
+                               ("ip6tables-legacy-restore", legacy6), ("ip", 0)):
+                tool = Path(tmp, name)
+                tool.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\nexit {code}\n')
+                tool.chmod(0o755)
+            for name in ("media.nft", "media.iptables"):
+                Path(tmp, name).write_text("# rendered\n")
+            inet6 = Path(tmp, "if_inet6")
+            if ipv6:
+                inet6.write_text("")
+            script = ("set -u\nlog() { echo \"$*\"; }\n"
+                      + block.replace("/proc/net/if_inet6", str(inet6)))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True,
+                env={"PATH": f"{tmp}:/usr/bin:/bin", "MDD_RUNDIR": tmp,
+                     "MDD_MEDIA_MODE": "relay", "MDD_MEDIA_IF": media_if})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ran = [line.split()[0] for line in calls.read_text().splitlines()] \
+                if calls.exists() else []
+            report = json.loads(Path(tmp, "media.json").read_text())
+        return report, ran, result.stdout
+
+    def test_a_kernel_that_takes_nftables_never_touches_iptables(self):
+        report, ran, _out = self.run_block(nft=0)
+        self.assertEqual(report, {"mode": "relay", "state": "ready", "filter": "nft"})
+        self.assertEqual(ran, ["nft"])
+
+    def test_a_kernel_without_nftables_falls_back_to_iptables_legacy_for_both_families(self):
+        report, ran, out = self.run_block(nft=1)
+        self.assertEqual(report, {"mode": "relay", "state": "ready",
+                                  "filter": "iptables-legacy"})
+        self.assertEqual(ran, ["nft", "iptables-legacy-restore", "ip6tables-legacy-restore"])
+        self.assertIn("trying iptables-legacy", out)
+
+    def test_a_kernel_without_ipv6_loads_only_the_ipv4_rules(self):
+        report, ran, _out = self.run_block(nft=1, legacy6=1, ipv6=False)
+        self.assertEqual(report["filter"], "iptables-legacy")
+        self.assertEqual(ran, ["nft", "iptables-legacy-restore"])
+
+    def test_when_neither_loads_the_media_interface_goes_down(self):
+        for legacy4, legacy6 in ((1, 0), (0, 1)):
+            report, ran, out = self.run_block(nft=1, legacy4=legacy4, legacy6=legacy6)
+            self.assertEqual(report, {"mode": "relay", "state": "firewall_failed", "filter": ""})
+            self.assertEqual(ran[-1], "ip")
+            self.assertIn("relay media: firewall_failed", out)
+
+    def test_without_a_media_address_nothing_is_loaded(self):
+        report, ran, _out = self.run_block(nft=0, media_if="")
+        self.assertEqual(report["state"], "no_media_address")
+        self.assertEqual(ran, [])
 
 
 class EngineAddressTests(unittest.TestCase):
