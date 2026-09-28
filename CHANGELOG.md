@@ -2,7 +2,9 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
-## [Unreleased]
+## [1.13.0-rc2] - 2026-09-28
+
+Second release candidate for 1.13.0. The automatic update channel stays on 1.9.5.
 
 ### Fixed
 
