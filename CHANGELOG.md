@@ -20,6 +20,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   (about 5 MB installed instead of 46 MB), with no dependencies and no native code. It comes
   with the new control image; nothing needs installing on the host.
 
+- **The control plane gains two Python packages**, Pillow and pi-heif (the decode-only build of
+  pillow-heif), for converting MMS pictures on the gateway. The control image carries them; on
+  a host install `install.sh reload` installs them from prebuilt wheels (amd64 and arm64), and
+  a host that reloads offline needs them available first. A reload that cannot install
+  them, or that installs them but cannot import them, stops before anything is restarted
+  rather than coming up with picture conversion silently off.
+
 ### Added
 
 - **Messages are marked read.** A conversation with something new shows how many, and opening
@@ -65,6 +72,38 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- **MMS pictures are converted and shrunk on the gateway, not in the browser.** An attachment is
+  uploaded as soon as it is added; the gateway checks it, converts HEIC/HEIF, WebP, BMP and AVIF
+  to JPEG, and shares the line's size limit between the pictures, each re-encoded from its
+  original at the largest size (up to 1600 px) and then the highest quality that fits. The
+  composer shows each attachment's size before and after and the packaged total against the
+  limit. A picture phones show that already fits and is no larger than 1600 px keeps its
+  pixels; every picture sent loses its EXIF, XMP, IPTC or PNG text, so a photo no longer tells
+  the recipient where it was taken. The original is kept only while the
+  message is being written; the sent message stores what was sent. Clients using the API get
+  the same conversion when they send files directly, or can stage them with the new
+  `/mms/attachments` endpoints. Sound, video and animated GIFs are sent as they are (video
+  conversion can be added later as another converter).
+- Picture conversion is held to the memory the gateway has. Pictures are decoded in worker
+  processes, each shrunk to 1600 px as soon as it is decoded and kept that way while the
+  message is written, so editing the text re-encodes without decoding again. A decode starts
+  only when its cost, estimated from the header, fits the budget: several at once where there
+  is memory (up to `MDD_MMS_CONVERT_WORKERS`, default the CPUs), one after another where there
+  is not. A JPEG too large to decode whole within `MDD_MMS_CONVERT_MEMORY` (default: worked
+  out from the control container's `mem_limit`) is sent smaller and marked so in the composer;
+  a HEIC that large is refused with the reason. A worker that runs out of memory anyway is the
+  one the kernel stops, not the control plane. Uploads over 1 MB are spooled under the data
+  directory, not the container's 32 MB `/tmp`.
+- With several attachments the sender chooses between one MMS, whose attachments share the
+  line's per-MMS limit, and one MMS per attachment, each fitted to the whole limit (text and
+  subject go with the first; they are submitted in order).
+- MMS attachments are checked by content against one capability table (send / convert /
+  receive-only) that the MMS settings API returns as `formats`, with an `attachable` flag the
+  WebUI follows for its picker, paste and drag-drop. Unsupported codecs (such as HEVC video),
+  vCard 4.0 and files whose content does not match their declared kind are refused with the
+  reason when they are added.
+- A received part the browser cannot show is offered as a download marked "Preview not
+  available".
 - The engine image now includes nftables, which relay mode uses to filter each line's media
   interface. An update therefore rebuilds the engine image.
 

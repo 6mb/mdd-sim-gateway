@@ -40,6 +40,11 @@ CLIENT_LINE_RULES = _rules(
     ("POST", r"^/(sms/send|mms/send|messages/delete|messages/read)$"),
     ("GET", r"^/mms/settings$"),
     ("POST", r"^/messages/[^/]+/mms/download$"),
+    # Composing an MMS: attachments are uploaded as they are added, fitted to the limit and
+    # previewed as they will be sent, and removed again, as the WebUI does.
+    ("POST", r"^/mms/attachments(/fit)?$"),
+    ("GET", r"^/mms/attachments/[^/]+/preview$"),
+    ("DELETE", r"^/mms/attachments/[^/]+$"),
     # Calls, through the softphone relay and over the modem.
     ("GET", r"^/(calls|cellular-call/status)$"),
     ("POST", r"^/(call|hangup|calls/delete|cellular-call|cellular-call/hangup)$"),
