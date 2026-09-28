@@ -109,6 +109,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- **Outgoing calls on T-Mobile US and MVNOs on its IMS core (310-240, such as Ultra Mobile).**
+  The network refused every call to a US number with 500 "CC_IMS_TRY_NEXT_MGCF_FAIL" because
+  the request URI lacked `;user=phone` (#114). A line can now add request-URI parameters to its
+  outgoing calls (line settings → SIP), and 310-240 lines add `user=phone` by default. Only the
+  call carries them; SMS is sent exactly as before, and every other carrier's lines are
+  unchanged unless the setting is switched on. Numbers are dialled as typed, `+` included.
+
 - On the container stack, the browser softphone had no audio on a line behind a country exit.
   Such a line is only on the internal Engine network, and Docker publishes no port there, so its
   RTP ports were never reachable. Control now runs a small `mdd-sim-gateway-rtp-forward`

@@ -5702,6 +5702,12 @@ async def api_instances(request: Request):
         safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
         safe["has_pin"] = bool(inst.get("pin"))
         safe["proxy_country_effective"] = egress.line_country(inst)
+        # What the carrier profile turns on when the line leaves a setting unset, so the form can
+        # show what is actually in effect. Only the switches: a PANI identity is not for display.
+        carrier = cfg.carrier_sip_defaults(str(inst.get("mcc") or ""), str(inst.get("mnc") or ""))
+        safe["sip_carrier_defaults"] = {key: carrier[key] for key in
+                                        (*cfg.CARRIER_SIP_FLAGS, *cfg.CARRIER_SIP_TEXT)
+                                        if key in carrier}
         # Report the reader index that PHYSICALLY holds this line's SIM right now (ICCID-matched
         # against the live monitor) instead of the stored one. PC/SC indices shift when readers
         # are unplugged, so a stored index can be stale and make the SIM-config "Detect card"

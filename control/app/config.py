@@ -41,7 +41,7 @@ MAX_SIM_LINES = 10
 # Keep this list shared with the save/restart diff so removing pollution written by an older
 # release does not itself look like an operational edit and rebuild a running line.
 RUNTIME_ONLY_INSTANCE_FIELDS = frozenset({
-    "status", "has_pin", "proxy_country_effective",
+    "status", "has_pin", "proxy_country_effective", "sip_carrier_defaults",
 })
 
 # SIP User-Agent a line presents to the IMS core. The product identifies itself honestly by
@@ -868,6 +868,8 @@ def _upsert_instance_locked(inst: dict, unique_name: bool = False) -> dict:
     # were hand-edited rather than saved through here.
     if "user_agent" in sip:
         sip["user_agent"] = sanitize_user_agent(sip.get("user_agent"))
+    if "invite_uri_params" in sip:
+        sip["invite_uri_params"] = sanitize_uri_params(sip.get("invite_uri_params"))
     wr = sip.setdefault("webrtc", {})
     wr.setdefault("username", "webrtc")
     if not wr.get("password"):
@@ -975,6 +977,23 @@ def sanitize_user_agent(value: str) -> str:
     return " ".join(cleaned.split())[:MAX_USER_AGENT_LEN].strip()
 
 
+MAX_URI_PARAMS_LEN = 128
+_URI_PARAM = re.compile(r"[A-Za-z0-9._~+%:-]+(?:=[A-Za-z0-9._~+%:-]+)?")
+
+
+def sanitize_uri_params(value: str) -> str:
+    """Return ';'-separated SIP URI parameters for an outgoing call, or ''.
+
+    The text lands inside the dialplan's Dial() argument, so it may hold only what a URI
+    parameter is made of: no ',' or '&' (Dial separators), no '$', '[' or '(' (dialplan
+    expressions), no whitespace. A part that does not look like name or name=value is dropped
+    rather than guessed at. A leading ';' is optional. Mirrored by engine/render.py.
+    """
+    parts = [part.strip() for part in str(value or "").split(";")]
+    kept = [part for part in parts if part and _URI_PARAM.fullmatch(part)]
+    return ";".join(kept)[:MAX_URI_PARAMS_LEN].rstrip(";")
+
+
 def imeisv_from_imei(imei: str, imeisv: str = "", svn: str = "00") -> str:
     """Return a 16-digit IMEISV.
 
@@ -1063,7 +1082,21 @@ CARRIER_SIP_PROFILES = {
         "access_type": "wlan1",
         "user_eq_phone": True,
     },
+    # T-Mobile US and MVNOs on its IMS core, such as Ultra Mobile. Its MGCF answers an INVITE
+    # to a US number with 500 "CC_IMS_TRY_NEXT_MGCF_FAIL" unless the request URI carries
+    # ;user=phone; the number itself may keep its + (tested on a live 310-240 line: +1 and 1
+    # forms both fail without it and both connect with it; an international +86 call connects
+    # either way). Only the INVITE gets it, so SMS is sent exactly as before. No PANI identity:
+    # none has been characterised for this network (#114).
+    "310-240": {
+        "invite_uri_params_enable": True,
+        "invite_uri_params": "user=phone",
+    },
 }
+
+# What a carrier profile may set besides a PANI identity, and the kind of each value.
+CARRIER_SIP_FLAGS = ("user_eq_phone", "invite_uri_params_enable")
+CARRIER_SIP_TEXT = ("invite_uri_params",)
 
 
 def carrier_sip_defaults(mcc: str, mnc: str, identity: str = "") -> dict:
@@ -1082,17 +1115,19 @@ def carrier_sip_defaults(mcc: str, mnc: str, identity: str = "") -> dict:
                     if key in CARRIER_SIP_PROFILES), None)
     if not profile:
         return {}
-    seed = str(identity or keys[0]).strip()
-    node = bytearray(hashlib.sha256(("mdd-pani:" + seed).encode("utf-8")).digest()[:6])
-    node[0] = (node[0] | 0x02) & 0xFE  # locally administered, never multicast
-    node_id = "".join("%02x" % value for value in node)
-    country = profile["pani_country"]
-    return {
-        "pani": (r'IEEE-802.11\; i-wlan-node-id="%s"\;country=%s'
-                 % (node_id, country)),
-        "access_type": profile["access_type"],
-        "user_eq_phone": bool(profile["user_eq_phone"]),
-    }
+    defaults = {key: bool(profile[key]) for key in CARRIER_SIP_FLAGS if key in profile}
+    defaults.update({key: str(profile[key]) for key in CARRIER_SIP_TEXT if key in profile})
+    # A PANI identity is derived only for a carrier whose country and access type have been
+    # characterised; inventing one for the rest would present a location nobody asked for.
+    if "pani_country" in profile:
+        seed = str(identity or keys[0]).strip()
+        node = bytearray(hashlib.sha256(("mdd-pani:" + seed).encode("utf-8")).digest()[:6])
+        node[0] = (node[0] | 0x02) & 0xFE  # locally administered, never multicast
+        node_id = "".join("%02x" % value for value in node)
+        defaults["pani"] = (r'IEEE-802.11\; i-wlan-node-id="%s"\;country=%s'
+                            % (node_id, profile["pani_country"]))
+        defaults["access_type"] = profile["access_type"]
+    return defaults
 
 
 def merge_carrier_sip_defaults(mcc: str, mnc: str, identity: str,
@@ -1253,6 +1288,10 @@ def _render_instance_json(inst: dict, settings: dict) -> dict:
             # they will route an originating voice INVITE. Keep this carrier-configurable because
             # other networks reject SMS MESSAGE request URIs when the parameter is present.
             "user_eq_phone": bool(sip.get("user_eq_phone", False)),
+            # URI parameters added to the request URI of an outgoing call only (INVITE, not
+            # SMS), for carriers that route a call only with them (T-Mobile US: user=phone).
+            "invite_uri_params": (sanitize_uri_params(sip.get("invite_uri_params"))
+                                  if sip.get("invite_uri_params_enable") else ""),
             "pani": sip.get("pani", ""),
             "access_type": sip.get("access_type", ""),
             "webrtc": {
