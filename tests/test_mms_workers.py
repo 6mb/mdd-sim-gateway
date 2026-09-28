@@ -166,5 +166,66 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(mms_workers._memory_limit(), (536870912, 120000000))
 
 
+    # Synology DSM mounts cgroup v1. Inside the control container /proc names the group as the
+    # host sees it, while the container's own group is the root of each mount (as observed on a
+    # DS1621+ with mem_limit 512m).
+    DSM_CGROUP = ("9:cpu:/docker/abc\n6:cpuacct:/docker/abc\n4:memory:/docker/abc\n"
+                  "1:name=systemd:/docker/abc\n")
+
+    def test_a_cgroup_v1_limit_is_read_where_a_container_sees_it(self):
+        files = {"/proc/self/cgroup": self.DSM_CGROUP,
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes": "536870912",
+                 "/sys/fs/cgroup/memory/memory.usage_in_bytes": "143667200",
+                 "/sys/fs/cgroup/memory/memory.stat":
+                     "cache 39645184\nrss 94171136\ntotal_cache 39645184\n"}
+        with patch.object(mms_workers, "_read", side_effect=lambda path: files.get(path)):
+            self.assertEqual(mms_workers._memory_limit(), (536870912, 143667200 - 39645184))
+            # Not half of what the host has free: the NAS this was seen on had 22 GB.
+            with patch.object(mms_workers, "_available", return_value=22 * 1024 * MB):
+                self.assertEqual(mms_workers.default_budget(),
+                                 536870912 - (143667200 - 39645184) - mms_workers.RESERVE_BYTES)
+
+    def test_a_cgroup_v1_service_is_limited_by_its_own_group_or_a_parent(self):
+        files = {"/proc/self/cgroup": "5:memory:/system.slice/control.service\n",
+                 "/sys/fs/cgroup/memory/system.slice/control.service/memory.limit_in_bytes":
+                     "9223372036854771712",
+                 "/sys/fs/cgroup/memory/system.slice/control.service/memory.usage_in_bytes":
+                     "300000000",
+                 "/sys/fs/cgroup/memory/system.slice/control.service/memory.stat":
+                     "cache 100000000\ntotal_cache 180000000\n",
+                 "/sys/fs/cgroup/memory/system.slice/memory.limit_in_bytes": "1073741824",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712"}
+        with patch.object(mms_workers, "_read", side_effect=lambda path: files.get(path)):
+            self.assertEqual(mms_workers._memory_limit(), (1073741824, 120000000))
+
+    def test_an_unlimited_cgroup_v1_is_no_limit(self):
+        files = {"/proc/self/cgroup": self.DSM_CGROUP,
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712",
+                 "/sys/fs/cgroup/memory/memory.usage_in_bytes": "143667200"}
+        with patch.object(mms_workers, "_read", side_effect=lambda path: files.get(path)):
+            self.assertEqual(mms_workers._memory_limit(), (None, 0))
+
+    def test_cgroup_v2_is_preferred_where_a_hybrid_host_has_both(self):
+        files = {"/proc/self/cgroup": "4:memory:/docker/abc\n0::/docker/abc\n",
+                 "/sys/fs/cgroup/docker/abc/memory.max": "268435456",
+                 "/sys/fs/cgroup/docker/abc/memory.current": "100000000",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes": "536870912"}
+        with patch.object(mms_workers, "_read", side_effect=lambda path: files.get(path)):
+            self.assertEqual(mms_workers._memory_limit(), (268435456, 100000000))
+
+    def test_a_cgroup_v1_cpu_quota_caps_the_workers(self):
+        files = {"/proc/self/cgroup": self.DSM_CGROUP,
+                 "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "150000",
+                 "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000"}
+        with patch.object(mms_workers, "_read", side_effect=lambda path: files.get(path)), \
+                patch.object(mms_workers.os, "sched_getaffinity", return_value=set(range(8)),
+                             create=True):
+            self.assertEqual(mms_workers.default_workers(), 2)
+            files["/sys/fs/cgroup/cpu/cpu.cfs_quota_us"] = "-1"
+            self.assertEqual(mms_workers.default_workers(), 8)
+            # DSM's kernel has no CFS quota files at all.
+            del files["/sys/fs/cgroup/cpu/cpu.cfs_quota_us"]
+            self.assertEqual(mms_workers.default_workers(), 8)
+
 if __name__ == "__main__":
     unittest.main()

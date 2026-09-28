@@ -17,8 +17,8 @@ has 512 MB in all. Two things keep that from ever taking the control plane down:
 
 The budget is MDD_MMS_CONVERT_MEMORY (MB) when set. Otherwise it is worked out whenever no
 worker is running: the memory limit of this process's cgroup -- the container's, or the
-systemd unit's -- less what the control plane already uses and a reserve; with no limit, half
-of what the host has available.
+systemd unit's, under cgroup v2 or the v1 that Synology DSM still mounts -- less what the
+control plane already uses and a reserve; with no limit, half of what the host has available.
 """
 from __future__ import annotations
 
@@ -48,6 +48,9 @@ RESERVE_BYTES = 64 * MB
 IDLE_SECONDS = 60
 # A decode that takes longer than this is abandoned and its worker killed.
 DECODE_TIMEOUT = 120
+# cgroup v1 has no "max": an unlimited group reports the largest page-aligned count the kernel
+# can hold, just under 2**63. Anything this large is no limit.
+V1_UNLIMITED = 1 << 62
 
 
 class OverBudget(Exception):
@@ -99,6 +102,47 @@ def _cgroup_dirs() -> list[str]:
     return dirs
 
 
+def _cgroup_v1_dirs(controller: str) -> list[str]:
+    """This process's cgroup (v1) directory for one controller and its parents, innermost first.
+
+    cgroup v1 -- still what Synology DSM mounts -- has one hierarchy per controller, and
+    /proc/self/cgroup names the group as "N:memory:/docker/<id>" rather than with "0::". A
+    container usually sees its own group at the root of the mount, so the directory /proc names
+    may not exist inside it; the walk up reaches the mount root either way, and a directory
+    without the file asked for is skipped by the caller."""
+    relative = None
+    for line in (_read("/proc/self/cgroup") or "").splitlines():
+        _hierarchy, _colon, rest = line.partition(":")
+        controllers, _colon, path = rest.partition(":")
+        if controller in controllers.split(","):
+            relative = path
+    if relative is None:
+        return []
+    root = "/sys/fs/cgroup/" + controller
+    path = os.path.normpath(root + "/" + relative.lstrip("/"))
+    dirs = []
+    while path == root or path.startswith(root + "/"):
+        dirs.append(path)
+        if path == root:
+            break
+        path = os.path.dirname(path)
+    return dirs
+
+
+def _used(path: str, usage_file: str, cache_keys: tuple[str, ...]) -> int:
+    """What a cgroup uses, less the page cache the kernel can reclaim."""
+    used = int(_read(os.path.join(path, usage_file)) or 0)
+    stat = {}
+    for line in (_read(os.path.join(path, "memory.stat")) or "").splitlines():
+        key, _space, value = line.partition(" ")
+        stat[key] = value
+    for key in cache_keys:
+        if key in stat:
+            used -= int(stat[key])
+            break
+    return max(0, used)
+
+
 def _memory_limit() -> tuple[int | None, int]:
     """(the tightest memory limit over this process's cgroups, what the innermost uses apart
     from page cache the kernel can reclaim); (None, 0) without a limit."""
@@ -108,14 +152,20 @@ def _memory_limit() -> tuple[int | None, int]:
         value = _read(os.path.join(path, "memory.max"))
         if value and value != "max":
             limits.append(int(value))
+    if limits:
+        return min(limits), _used(dirs[0], "memory.current", ("file",))
+    # No v2 memory controller: a v1 host, or a hybrid one whose unified mount has no controllers.
+    limits, innermost = [], None
+    for path in _cgroup_v1_dirs("memory"):
+        value = _read(os.path.join(path, "memory.limit_in_bytes"))
+        if value is None:
+            continue
+        innermost = innermost or path
+        if int(value) < V1_UNLIMITED:
+            limits.append(int(value))
     if not limits:
         return None, 0
-    used = int(_read(os.path.join(dirs[0], "memory.current")) or 0)
-    for line in (_read(os.path.join(dirs[0], "memory.stat")) or "").splitlines():
-        key, _space, value = line.partition(" ")
-        if key == "file":
-            used -= int(value)
-    return min(limits), max(0, used)
+    return min(limits), _used(innermost, "memory.usage_in_bytes", ("total_cache", "cache"))
 
 
 def _available() -> int:
@@ -140,6 +190,12 @@ def default_workers() -> int:
     for path in _cgroup_dirs():
         quota, _space, period = (_read(os.path.join(path, "cpu.max")) or "max").partition(" ")
         if quota != "max" and period:
+            count = min(count, max(1, -(-int(quota) // int(period))))
+    # v1: -1 is no quota. DSM's kernel has no CFS quota at all, so there the files are absent.
+    for path in _cgroup_v1_dirs("cpu"):
+        quota = _read(os.path.join(path, "cpu.cfs_quota_us"))
+        period = _read(os.path.join(path, "cpu.cfs_period_us"))
+        if quota and period and int(quota) > 0 and int(period) > 0:
             count = min(count, max(1, -(-int(quota) // int(period))))
     return max(1, count)
 
