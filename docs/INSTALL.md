@@ -83,7 +83,7 @@ sudo ./install.sh media relay [--port N] [--bind ADDR] \
 
 relay 模式下不再有任何引擎发布端口，改由一个 coturn 中继容器（`mdd-sim-gateway-relay`，未经修改的上游镜像 `coturn/coturn:4.17.2-alpine`，按摘要固定；正式发布包从 Release 附件导入，源码 checkout 或导入失败时依次从 ghcr 副本和 Docker Hub 拉取）发布单个端口（UDP+TCP，默认 8478），引擎只能通过内部媒体网络与它通信。启用前会先创建媒体网络、在临时引擎容器中确认内核支持所需的 nftables 规则，并等待中继应答 STUN 请求，任一步失败都会回滚且不修改当前模式，原因会打印出来。`--public-host`/`--public-port` 用于路由器/NAT 对外转发的主机名或端口与本机不同的情况；不指定时客户端使用访问 WebUI 时用的主机名和中继端口本身。
 
-启用 relay 后，需要在路由器/防火墙放行该中继端口的 UDP 和 TCP；如果部署在反向代理之后，代理通常只转发 HTTP(S)，中继端口需要单独做 TCP/UDP 直通或端口转发，不能走 HTTP 反代规则。中继不可达或未就绪时线路仍可注册和收发短信，只有浏览器通话会被拒绝或中途结束；切回 direct 会恢复各线路原有的端口分配。已验证的环境：Debian 13（内核 6.12），local 与 docker 两种模式。引擎防火墙需要内核的 nf_tables 及其 socket 匹配，较旧的内核会在启用时被拒绝。手动降级到不支持 relay 的版本前，先执行 `sudo ./install.sh media direct`，否则中继容器会留在原处。
+启用 relay 后，需要在路由器/防火墙放行该中继端口的 UDP 和 TCP；如果部署在反向代理之后，代理通常只转发 HTTP(S)，中继端口需要单独做 TCP/UDP 直通或端口转发，不能走 HTTP 反代规则。中继不可达或未就绪时线路仍可注册和收发短信，只有浏览器通话会被拒绝或中途结束；切回 direct 会恢复各线路原有的端口分配。已验证的环境：Debian 13（内核 6.12），local 与 docker 两种模式。引擎防火墙优先使用内核的 nf_tables 及其 socket 匹配；较旧的内核（例如 4.4）改用 iptables-legacy，只按 RTP 端口范围放行，区分不了浏览器和运营商两条腿（`sudo ./install.sh media` 会显示用的是哪一种）；两者都不可用时启用会被拒绝。手动降级到不支持 relay 的版本前，先执行 `sudo ./install.sh media direct`，否则中继容器会留在原处。
 
 ## 更新
 

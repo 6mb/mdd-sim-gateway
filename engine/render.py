@@ -160,6 +160,28 @@ def media_ruleset(interface: str, rtp_start: int, rtp_end: int) -> str:
         "}\n")
 
 
+def media_legacy_ruleset(interface: str, rtp_start: int, rtp_end: int) -> str:
+    """The same boundary for iptables-legacy-restore, loaded by the entrypoint only when the
+    kernel refuses media_ruleset (e.g. Synology DSM's 4.4: no nf_tables, no xt_socket).
+
+    Without the socket match the port range is all it can go by, so the IMS leg's RTP on an
+    IPv4 PDN (bound to the wildcard address, same range) is reachable through the relay too.
+    That still takes valid TURN credentials, where direct mode publishes the same ports with
+    none; AMI, SIP and the WebSocket stay outside the range and are dropped. The text is fed
+    to both iptables-legacy-restore and ip6tables-legacy-restore, which accept it as is. It
+    replaces the filter table of this container's own namespace, which nothing else uses, so
+    loading it twice gives the same result."""
+    rule = f"-A INPUT -i {interface}"
+    return (
+        "*filter\n"
+        ":INPUT ACCEPT [0:0]\n"
+        ":FORWARD ACCEPT [0:0]\n"
+        ":OUTPUT ACCEPT [0:0]\n"
+        f"{rule} -p udp -m udp --dport {int(rtp_start)}:{int(rtp_end)} -j ACCEPT\n"
+        f"{rule} -j DROP\n"
+        "COMMIT\n")
+
+
 def imeisv_from_imei(imei, imeisv="", svn="00"):
     """Return a 16-digit IMEISV for the ePDG DEVICE_IDENTITY response.
 
@@ -392,13 +414,16 @@ def main():
     # Export env for keeper / ami_usim / swu_ike
     env_path = os.environ.get("MDD_ENV", "/run/mdd-sim-gateway/engine.env")
     os.makedirs(os.path.dirname(env_path), exist_ok=True)
-    # Relay media mode: the entrypoint loads this before Asterisk starts (see media_ruleset).
-    ruleset_path = os.path.join(os.path.dirname(env_path), "media.nft")
-    if ctx["media_addr"]:
-        with open(ruleset_path, "w") as f:
-            f.write(media_ruleset(ctx["media_if"], ctx["rtp_start"], ctx["rtp_end"]))
-    elif os.path.exists(ruleset_path):
-        os.unlink(ruleset_path)
+    # Relay media mode: the entrypoint loads one of these before Asterisk starts, the nftables
+    # ruleset when the kernel takes it and the iptables-legacy one otherwise.
+    rulesets = {"media.nft": media_ruleset, "media.iptables": media_legacy_ruleset}
+    for name, ruleset in rulesets.items():
+        ruleset_path = os.path.join(os.path.dirname(env_path), name)
+        if ctx["media_addr"]:
+            with open(ruleset_path, "w") as f:
+                f.write(ruleset(ctx["media_if"], ctx["rtp_start"], ctx["rtp_end"]))
+        elif os.path.exists(ruleset_path):
+            os.unlink(ruleset_path)
     with open(env_path, "w") as f:
         # This file is sourced by entrypoint.sh. Reader names routinely contain spaces and
         # parentheses; writing raw values makes the shell execute the second word as a command

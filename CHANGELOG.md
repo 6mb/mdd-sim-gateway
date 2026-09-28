@@ -60,6 +60,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   and is unchanged. Relay mode needs nf_tables with its socket match in the host kernel. On a
   full-container deployment it has been tested on Debian only, without a registered line, and
   not on a Synology NAS.
+- Relay mode on older kernels (Synology DSM's 4.4), which have neither nf_tables nor its socket
+  match: the engines filter their media interface with iptables-legacy instead, IPv4 and IPv6.
+  nftables is still tried first, and a kernel that takes it runs exactly the rules it did
+  before; enabling checks the path that will actually be used and is refused, as before, only
+  when neither loads. Without the socket match the fallback can admit only the RTP port range,
+  so it does not tell the browser leg from the carrier leg: on an IPv4 PDN the carrier leg's
+  RTP is reachable through the relay, though only with valid TURN credentials, where direct
+  mode exposes the same ports with none. AMI, SIP and the WebSocket stay outside the range and
+  blocked. `python -m app.media status` and `/api/media` say which filter is in use and whether
+  it tells the two legs apart.
 - Client apps can sign in with the administrator's credentials and receive a long-lived bearer
   token (`POST /api/auth/client/login`). A token is shown once and stored only as a digest,
   expires after 90 days without use, and ends when the administrator revokes it
@@ -105,7 +115,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - A received part the browser cannot show is offered as a download marked "Preview not
   available".
 - The engine image now includes nftables, which relay mode uses to filter each line's media
-  interface. An update therefore rebuilds the engine image.
+  interface, and iptables-legacy, its fallback on kernels without nf_tables (about 0.3 MB; the
+  xtables extensions it uses already come with nftables). An update therefore rebuilds every
+  engine image.
 
 ### Fixed
 
@@ -116,12 +128,25 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   call carries them; SMS is sent exactly as before, and every other carrier's lines are
   unchanged unless the setting is switched on. Numbers are dialled as typed, `+` included.
 
+- **Every incoming SMS no longer ends in a failed SIP request.** Besides handing the text to the
+  manager, each engine forwarded it to the browser softphone as a SIP MESSAGE, which the
+  softphone has no handler for and answered with 405 Method Not Allowed. The WebUI shows texts
+  from the manager's store, so the forward is gone; nothing that was visible changes.
+
 - On the container stack, the browser softphone had no audio on a line behind a country exit.
   Such a line is only on the internal Engine network, and Docker publishes no port there, so its
   RTP ports were never reachable. Control now runs a small `mdd-sim-gateway-rtp-forward`
   container from its own image that publishes those ranges and relays UDP to the line. The
   Engine's networks and routes are unchanged, so nothing it sends can bypass the exit. A line
   created before this version is forwarded once it is rebuilt (an update does that).
+
+- On the container stack, an EC25 on a host that gives network interfaces predictable names
+  (Debian 13 and other systemd 257 hosts call its data interface something like `wws27u1i4`
+  instead of `wwan0`) is claimed by ModemManager again. Hardware only told ModemManager about
+  interfaces named `wwan*`, so it never learned of the data port and refused the modem with
+  "Failed to find a net port in the QMI modem". Hardware now asks the kernel whether an
+  interface is a cellular one (`DEVTYPE=wwan`) instead of going by its name, reading each
+  interface once, and NetworkManager is allowed to manage `ww*` rather than only `wwan*`.
 
 - On the container stack, a modem ModemManager cannot claim is no longer reset every few
   minutes for good. Each reset took that SIM's VoWiFi down for a minute or more. The resets now
