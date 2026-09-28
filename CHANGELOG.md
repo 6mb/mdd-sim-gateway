@@ -2,6 +2,17 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **A line on a card reader follows its SIM to whichever reader holds it.** Switching the eSIM
+  in a reader to a profile last used in another reader started that profile's line with the
+  old USB port: the engine found no reader there, fell back to one holding another line's card,
+  refused to authenticate, and retried every minute until the line was saved again. Every
+  start now rebinds such a line to the reader the card monitor sees its SIM in, as modem lines
+  already were. No card is read to find it.
+
 ## [1.13.0-rc2] - 2026-09-28
 
 Second release candidate for 1.13.0. The automatic update channel stays on 1.9.5.
