@@ -155,7 +155,15 @@ same => n,TrySystem(/usr/local/bin/notify.py call_out "${EXTEN}" &)
 ; a channel created by Dial() gets its own variable space otherwise.
 same => n,Set(_USSDPEER=${EXTEN})
 same => n,Set(DIALTARGET=${STRREPLACE(EXTEN,#,%23)})
+{% if invite_uri_params %}
+; This line's carrier routes a call only with these request-URI parameters (T-Mobile US: 500
+; "CC_IMS_TRY_NEXT_MGCF_FAIL" without user=phone), so the URI is spelled out here rather than
+; letting the endpoint build it. Only the INVITE carries them: SMS leaves through the endpoint
+; unchanged. ';' starts a comment in Asterisk configuration, hence the escaping.
+same => n,Dial(PJSIP/volte_ims/sip:${DIALTARGET}@{{ realm }}\;{{ invite_uri_params | replace(";", "\\;") }},{{ ring_timeout }},b(ims-outbound-headers^s^1))
+{% else %}
 same => n,Dial(PJSIP/${DIALTARGET}@volte_ims,{{ ring_timeout }},b(ims-outbound-headers^s^1))
+{% endif %}
 ; Dial only returns here when the call was NEVER answered (reject/busy/no-answer/congestion);
 ; answered calls are bridged and tear down via BYE, never reaching this line.
 ; Save the REAL disposition for the call log BEFORE overriding the response (PJSIPHangup does

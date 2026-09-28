@@ -12,6 +12,7 @@ Env overrides (used by entrypoint / keeper / ami_usim after render): USIM_PIN, U
 import ipaddress
 import json
 import os
+import re
 import shutil
 import shlex
 import socket
@@ -217,6 +218,22 @@ def sanitize_user_agent(value):
     return " ".join(cleaned.split())[:MAX_USER_AGENT_LEN].strip()
 
 
+MAX_URI_PARAMS_LEN = 128
+_URI_PARAM = re.compile(r"[A-Za-z0-9._~+%:-]+(?:=[A-Za-z0-9._~+%:-]+)?")
+
+
+def sanitize_uri_params(value):
+    """Return ';'-separated SIP URI parameters for an outgoing call, or ''.
+
+    Mirrors control/app/config.sanitize_uri_params: the text is written into the dialplan's
+    Dial() argument, so only what a URI parameter is made of may pass -- no ',' '&' '$' '['
+    '(' or whitespace -- and a part that is not name or name=value is dropped.
+    """
+    parts = [part.strip() for part in str(value or "").split(";")]
+    kept = [part for part in parts if part and _URI_PARAM.fullmatch(part)]
+    return ";".join(kept)[:MAX_URI_PARAMS_LEN].rstrip(";")
+
+
 def build_context(cfg):
     mcc = str(cfg["mcc"])
     mnc = str(cfg["mnc"]).zfill(3)
@@ -290,6 +307,10 @@ def build_context(cfg):
         # whitelists answer 403 to an unknown terminal). Blank/unset keeps the default.
         "user_agent": sanitize_user_agent(sip.get("user_agent")) or DEFAULT_USER_AGENT,
         "user_eq_phone": bool(sip.get("user_eq_phone", False)),
+        # Rendered by the manager only when switched on; a hand-authored file may still say
+        # invite_uri_params_enable: false to keep the text without using it.
+        "invite_uri_params": ("" if sip.get("invite_uri_params_enable") is False
+                              else sanitize_uri_params(sip.get("invite_uri_params"))),
         # SDP identity (s=/o= lines) — Asterisk defaults s=Asterisk which fingerprints it.
         "sdp_session": (sip.get("sdp_session") or "-"),
         "sdp_owner": (sip.get("sdp_owner") or "-"),
