@@ -2,6 +2,14 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- On a host install, testing an individual proxy node failed with a server error before any
+  UDP probe, a regression in 1.13.0: the node parser it loads could no longer find
+  `host/modem_probe.py`. The test reports the node's actual probe result again.
+
 ## [1.13.0] - 2026-09-29
 
 The automatic update channel stays on 1.9.5.
@@ -149,10 +157,6 @@ The automatic update channel stays on 1.9.5.
   code they were waiting for.
 
 ### Fixed
-
-- Testing an individual proxy node no longer fails before any UDP probe when the Control
-  container loads its host-side parser from the separate `host/` mount. The loader now makes
-  that package importable, so the test reports the node's actual probe result.
 
 - On the container stack, texts, calls and tunnel events from the lines never reached the WebUI
   on an installation migrated from a host install: a saved `manager_url` pointing at the host
