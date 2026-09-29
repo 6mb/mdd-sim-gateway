@@ -150,6 +150,10 @@ The automatic update channel stays on 1.9.5.
 
 ### Fixed
 
+- Testing an individual proxy node no longer fails before any UDP probe when the Control
+  container loads its host-side parser from the separate `host/` mount. The loader now makes
+  that package importable, so the test reports the node's actual probe result.
+
 - On the container stack, texts, calls and tunnel events from the lines never reached the WebUI
   on an installation migrated from a host install: a saved `manager_url` pointing at the host
   won over the container address, and the engines could not reach it. The container address
