@@ -329,7 +329,7 @@ const zh = {
   'Confirmation code (optional)': '确认码（可选）', '(from matched line — editable)': '（来自匹配线路，可编辑）', '(optional)': '（可选）',
   '15-digit IMEI': '15 位 IMEI', 'Starting…': '正在启动…', Download: '下载', 'eUICC load failed': 'eUICC 加载失败', line: '线路',
   'VoWiFi {line} is running on this reader.\n\nLoading eSIM info needs exclusive PC/SC access and will stop the line.\n\nStop VoWiFi and Load?': '此读卡器上的 VoWiFi {line} 正在运行。\n\n读取 eSIM 信息需要独占 PC/SC 访问，并会停止该线路。\n\n是否停止 VoWiFi 并读取？',
-  'Line {id} stopped': '线路 {id} 已停止', 'Profile downloaded': '配置文件已下载', 'Download failed': '下载失败',
+  'Line {id} stopped': '线路 {id} 已停止', 'Line {id} is running on this reader and blocks this eUICC operation. Stop the line and continue?': '线路 {id} 正在此读卡器上运行，挡住了本次 eUICC 操作。要停掉该线路并继续吗？', 'Line {id} did not stop in time': '线路 {id} 未能及时停止', 'Profile downloaded': '配置文件已下载', 'Download failed': '下载失败',
   'Downloading an eSIM needs exclusive access and will stop VoWiFi line {id}. Continue?': '下载 eSIM 卡需要独占读卡器，将先停止 VoWiFi 线路 {id}。是否继续？',
   'Read this eSIM once before downloading a new one.': '请先点「读取」识别这张 eSIM 卡，再下载新的 eSIM 卡。',
   '{action} OK': '{action}成功', 'No SIM present. Insert an eUICC into a PC/SC reader to manage profiles.': '未插入 SIM。请将 eUICC 插入 PC/SC 读卡器以管理配置文件。',
