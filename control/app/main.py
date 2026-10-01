@@ -3444,12 +3444,19 @@ def _esim_resolve_se(
 
 
 def _esim_guard_engine(name: str):
-    """Refuse LPA while a VoWiFi engine holds the card (lpac needs exclusive PC/SC)."""
+    """Refuse LPA while a VoWiFi engine holds the card (lpac needs exclusive PC/SC).
+
+    The detail is structured so the WebUI can offer "stop the blocking line and
+    retry" instead of leaving the user to guess which line holds the reader (the
+    UI's own lineRunning view can be stale right after a hotplug auto-start)."""
     inst = _find_running_by_reader(name)
     if inst is not None:
         raise HTTPException(
             409,
-            f"Line {inst.get('id')} is running on this reader — stop it before eSIM operations",
+            {"code": "engine_running",
+             "message": f"Line {inst.get('id')} is running on this reader — "
+                        "stop it before eSIM operations",
+             "instance_id": str(inst.get("id") or "")},
         )
 
 
