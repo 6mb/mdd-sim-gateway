@@ -4,6 +4,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Calls answered from outside the Calls page now offer a keypad for sending DTMF during the
+  conversation. The global call overlay previously showed only mute and hang up.
+
 ## [1.13.1] - 2026-10-02
 
 The automatic update channels remain unchanged.
