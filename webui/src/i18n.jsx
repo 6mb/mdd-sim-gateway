@@ -296,6 +296,7 @@ const zh = {
   'Complete the SIM details; the line will then start automatically': '请补全 SIM 信息，完成后线路会自动启动',
   'Hardware IMEI saved. The line starts once the SIM details are complete: {fields}': '硬件 IMEI 已保存。补全以下 SIM 信息后线路会自动启动：{fields}',
   'Active SIM / line': '当前 SIM/线路', 'Configuring line': '正在配置线路', '— select —': '— 请选择 —', 'only line': '唯一线路',
+  'Unread messages': '有未读短信',
   'Select a SIM / line to use the softphone.': '请选择一张 SIM/线路使用软电话。', 'Select a SIM / line to view and send messages.': '请选择一张 SIM/线路查看和发送短信。',
   'WebRTC is disabled for this SIM. Enable it in SIM Config (needs HTTPS/TLS) to use the browser phone.': '此 SIM 尚未启用 WebRTC。请在 SIM 配置中启用（需要 HTTPS/TLS），然后使用浏览器电话。',
   Decline: '拒接', Answer: '接听', Call: '呼叫', Hangup: '挂断', Mute: '静音', Unmute: '取消静音', Keypad: '拨号键盘', Record: '录音', Stop: '停止',

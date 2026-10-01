@@ -6,6 +6,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- The Calls and Messages pages show SIM lines in a vertical list beside the dial pad and
+  conversation list. Switching lines now takes one click, and each line shows its device,
+  name, phone number, combined 4G/VoWiFi status, and an unread SMS dot when applicable.
 - On a host install, testing an individual proxy node failed with a server error before any
   UDP probe, a regression in 1.13.0: the node parser it loads could no longer find
   `host/modem_probe.py`. The test reports the node's actual probe result again.
