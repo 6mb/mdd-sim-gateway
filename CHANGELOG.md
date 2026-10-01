@@ -4,8 +4,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-10-02
+
+The automatic update channels remain unchanged.
+
 ### Fixed
 
+- A placeholder ePDG DNS answer containing only loopback addresses is reported as unsupported
+  instead of sending a VoWiFi line into repeated connection attempts.
+- When a running line blocks an eSIM LPA action, the API and WebUI identify the line to stop;
+  the rejected action also closes its background coroutine cleanly.
 - The Calls and Messages pages show SIM lines in a vertical list beside the dial pad and
   conversation list. Switching lines now takes one click, and each line shows its device,
   name, phone number, combined 4G/VoWiFi status, and an unread SMS dot when applicable.
