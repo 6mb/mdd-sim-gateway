@@ -6,6 +6,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- SIM cards in Calls and Messages now show the line name, device, number, and 4G/VoWiFi
+  states on separate wrapping rows. Long device names and status text no longer hide the
+  line name or cut off the connection state in the narrow selector.
 - Calls answered from outside the Calls page now offer a keypad for sending DTMF during the
   conversation. The global call overlay previously showed only mute and hang up.
 
